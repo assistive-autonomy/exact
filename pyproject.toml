@@ -5,6 +5,15 @@ description = "Learning and Reasoning with Executable Activity Models"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "accelerate>=1.10.1",
+    "ipywidgets>=8.1.7",
+    "jupyterlab>=4.4.5",
     "lightning>=2.5.2",
-    "transformers>=4.53.3",
+    "mediapy>=1.2.4",
+    "metamotivo[all]",
+    "syncode>=0.4.16",
+    "tqdm>=4.67.1",
 ]
+
+[tool.uv.sources]
+metamotivo = { git = "https://github.com/facebookresearch/metamotivo.git" }
