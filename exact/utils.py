@@ -1,6 +1,7 @@
 import ot
 import torch
 
+
 def wasserstein_distance(X: torch.Tensor, Y: torch.Tensor) -> float:
     """wasserstein_distance computes the 2-Wasserstein distance between two point clouds"""
     X_norm = X.pow(2).sum(-1).reshape(-1, 1)

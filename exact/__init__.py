@@ -1,4 +1,4 @@
-from exact.rewards import RewardFunction
+from exact.complex_rewards import RewardFunction
 from exact.bm import BehaviourModel
 
 

@@ -1,0 +1,9 @@
+start: function_call+
+function_call: obj_body "(" FLOAT ")"
+
+obj_body: "LHip"|"LKnee"|"LAnkle"|"LToe"|"RHip"|"RKnee"|"RAnkle"|"RToe"
+                |"Torso"|"Spine"|"Chest"|"Neck"|"Head"
+                |"LThorax"|"LShoulder"|"L_Elbow"|"LWrist"|"LHand"
+                |"RThorax"|"RShoulder"|"R_Elbow"|"RWrist"|"RHand"
+
+FLOAT: /[+-]?(\d+\.\d*|\.\d+|\d+)/

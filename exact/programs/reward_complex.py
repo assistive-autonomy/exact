@@ -5,12 +5,13 @@
 
 import dataclasses
 import abc
+import sys
+import inspect
 from typing import Optional
 import numpy as np
 import mujoco
 import re
 from dm_control.utils import rewards
-
 
 COORD_TO_INDEX = {"x": 0, "y": 1, "z": 2}
 ALIGNMENT_BOUNDS = {"x": (-0.1, 0.1), "y": (0.9, float("inf")), "z": (-0.1, 0.1)}
@@ -22,7 +23,6 @@ REWARD_LIMITS = {
     "h": [1.8, float("inf"), 0.2],
     "x": [0, float("inf"), 1],
 }
-
 
 def rot2eul(R: np.ndarray):
     beta = -np.arcsin(R[2, 0])
@@ -882,3 +882,15 @@ class MoveAndRaiseArmsReward(RewardFunction):
                 right_pose=right_pose,
             )
         return None
+    
+
+def make_from_name(
+    name: str | None = None,
+):
+    all_rewards = inspect.getmembers(sys.modules["exact.rewards"], inspect.isclass)
+    for reward_class_name, reward_cls in all_rewards:
+        if not inspect.isabstract(reward_cls):
+            reward_obj = reward_cls.reward_from_name(name)
+            if reward_obj is not None:
+                return reward_obj
+    raise ValueError(f"Unknown reward name: {name}")

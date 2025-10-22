@@ -1,13 +1,14 @@
 import h5py
 import torch
 from humenv import make_humenv
+import mediapy as media
 from gymnasium.wrappers import FlattenObservation, TransformObservation
 from huggingface_hub import hf_hub_download
 from metamotivo.fb_cpr.huggingface import FBcprModel
 from metamotivo.buffers.buffers import DictBuffer
 from metamotivo.wrappers.humenvbench import relabel
 
-from exact.rewards import RewardFunction
+from exact.complex_rewards import RewardFunction
 
 
 class BehaviourModel:
@@ -16,6 +17,7 @@ class BehaviourModel:
     def __init__(self,
                  model_name: str = "facebook/metamotivo-M-1",
                  batch_size: int = 256,
+                 max_episode_steps: int = 1000,
                  buffer_small: bool = True,
                  device: str = "cpu"):
         assert "metamotivo" in model_name, "Currently only metamotivo behaviour models are supported"
@@ -23,6 +25,7 @@ class BehaviourModel:
         # load model (assumes model supports numpy-based inference)
         self.model_name = model_name
         self.batch_size = batch_size
+        self.max_episode_steps = max_episode_steps
         self.device = device
         self.model = FBcprModel.from_pretrained(model_name)
         self.model.to(device)
@@ -39,6 +42,7 @@ class BehaviourModel:
         self.env, _ = make_humenv(
             wrappers=[FlattenObservation, _obs_wrapper],
             state_init="Default",
+            max_episode_steps=self.max_episode_steps,
         )
 
         self.buffer_name = "buffer_inference_500000.hdf5" if buffer_small else "buffer.hdf5"
@@ -67,14 +71,22 @@ class BehaviourModel:
 
     def generate(self,
                  reward_fn: RewardFunction,
-                 steps: int) -> tuple[torch.Tensor, torch.Tensor]:
+                 steps: int,
+                 render: bool = False,
+                 render_path: str = None) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the poses and actions taken by following the reward function (numpy, CPU)."""
-
+        assert steps <= self.max_episode_steps, \
+            f"Requested steps {steps} exceeds max episode steps {self.max_episode_steps}"
+        
         obs = self.env.reset()[0] 
         z = self.z_from_reward(reward_fn)
 
         actions_list = []
         poses_list = []
+
+        if render:
+            frames = [self.env.render()]
+            render_path = render_path or f"{reward_fn}.mp4"
 
         for _ in range(steps):
             # model.act expected to work with numpy arrays
@@ -85,11 +97,14 @@ class BehaviourModel:
 
             poses_list.append(pose)
             actions_list.append(action)
+            if render:
+                frames.append(self.env.render())
 
             if done:
                 obs = self.env.reset()[0]
 
+        if render:
+            media.write_video(render_path, frames, fps=30)
+            print(f"Saved video to {render_path}")
         return torch.stack(poses_list), torch.stack(actions_list)
-
-    def score(self):
-        pass
+        
