@@ -8,7 +8,7 @@ from metamotivo.fb_cpr.huggingface import FBcprModel
 from metamotivo.buffers.buffers import DictBuffer
 from metamotivo.wrappers.humenvbench import relabel
 
-from exact.complex_rewards import RewardFunction
+from exact.programs import RewardFunction
 
 
 class BehaviourModel:

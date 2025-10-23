@@ -1,5 +1,5 @@
 import numpy as np
-from mujoco import mujoco
+import mujoco
 
 
 def rot2eul(R: np.ndarray):
