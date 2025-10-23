@@ -25,7 +25,7 @@ class GenerationConfig:
     """
     min_units: int = 1
     max_units: int = 5
-    min_value: float = -1.0  # Allow negative values by default
+    min_value: float = 0.1  # Only positive values allowed
     max_value: float = 1.0
     value_step: float = 0.1
     allowed_parts: Optional[List[str]] = None
@@ -57,9 +57,8 @@ class RewardProgramGenerator:
             # Generate a random value within the specified range and step
             value = self._generate_random_value()
             
-            # Format the unit as "part(value)" and handle negative numbers
-            sign = '' if value >= 0 else ''  # No need for explicit + sign
-            program_parts.append(f"{part}({sign}{value:.1f})")
+            # Format the unit as "part(value)"
+            program_parts.append(f"{part}({value:.1f})")
         
         # Join units with "*" as per the grammar
         return "*".join(program_parts)
@@ -75,7 +74,7 @@ def generate_programs(
     num_programs: int = 10,
     min_units: int = 1,
     max_units: int = 5,
-    min_value: float = 0.1,
+    min_value: float = 0.1,  # Only positive values allowed
     max_value: float = 1.0,
     value_step: float = 0.1,
     allowed_parts: Optional[List[str]] = None

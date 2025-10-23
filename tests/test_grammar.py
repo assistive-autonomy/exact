@@ -18,13 +18,13 @@ def test_correct_grammar(parser):
     assert parser.parse("lknee(1.0)") is not None
     assert parser.parse("lknee(1.0)*rknee(0.5)") is not None
     assert parser.parse("head(3.0)") is not None
-    assert parser.parse("lhip(-1.2)") is not None  # Test negative number
-    assert parser.parse("rshoulder(0.0)*lwrist(-0.5)*head(1.0)") is not None  # Test multiple parts with zero and negative
+    assert parser.parse("lhip(1.2)") is not None
+    assert parser.parse("rshoulder(0.0)*lwrist(0.5)*head(1.0)") is not None  # Test multiple parts
 
 
 @pytest.mark.parametrize("invalid_input,exception_type", [
     ("unknown(1.0)", UnexpectedCharacters),  # Invalid body part
-    ("lknee(-1.0", UnexpectedEOF),  # Missing closing parenthesis
+    ("lknee(-1.0", UnexpectedCharacters),  # Negative number not allowed
     ("lknee1.0)", UnexpectedCharacters),  # Missing opening parenthesis
     ("lknee(1.0)*", UnexpectedEOF),  # Incomplete expression after *
     ("*lknee(1.0)", UnexpectedCharacters),  # Invalid start with *

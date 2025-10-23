@@ -72,7 +72,7 @@ class LHip(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["LHip"]:
-        pattern = r"^lhip-(-?\d+\.*\d*)$"
+        pattern = r"^lhip\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return LHip(target_pose=target_pos)
@@ -85,7 +85,7 @@ class LKnee(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["LKnee"]:
-        pattern = r"^lknee-(-?\d+\.*\d*)$"
+        pattern = r"^lknee\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return LKnee(target_pose=target_pos)
@@ -98,7 +98,7 @@ class LAnkle(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["LAnkle"]:
-        pattern = r"^lankle-(-?\d+\.*\d*)$"
+        pattern = r"^lankle\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return LAnkle(target_pose=target_pos)
@@ -111,7 +111,7 @@ class LToe(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["LToe"]:
-        pattern = r"^ltoe-(-?\d+\.*\d*)$"
+        pattern = r"^ltoe\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return LToe(target_pose=target_pos)
@@ -124,7 +124,7 @@ class RHip(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["RHip"]:
-        pattern = r"^rhip-(-?\d+\.*\d*)$"
+        pattern = r"^rhip\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return RHip(target_pose=target_pos)
@@ -137,7 +137,7 @@ class RKnee(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["RKnee"]:
-        pattern = r"^rknee-(-?\d+\.*\d*)$"
+        pattern = r"^rknee\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return RKnee(target_pose=target_pos)
@@ -151,7 +151,7 @@ class RAnkle(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["RAnkle"]:
-        pattern = r"^rankle-(-?\d+\.*\d*)$"
+        pattern = r"^rankle\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return RAnkle(target_pose=target_pos)
@@ -164,7 +164,7 @@ class RToe(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["RToe"]:
-        pattern = r"^rtoe-(-?\d+\.*\d*)$"
+        pattern = r"^rtoe\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return RToe(target_pose=target_pos)
@@ -177,7 +177,7 @@ class Torso(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["Torso"]:
-        pattern = r"^torso-(-?\d+\.*\d*)$"
+        pattern = r"^torso\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return Torso(target_pose=target_pos)
@@ -190,7 +190,7 @@ class Spine(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["Spine"]:
-        pattern = r"^spine-(-?\d+\.*\d*)$"
+        pattern = r"^spine\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return Spine(target_pose=target_pos)
@@ -203,7 +203,7 @@ class Chest(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["Chest"]:
-        pattern = r"^chest-(-?\d+\.*\d*)$"
+        pattern = r"^chest\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return Chest(target_pose=target_pos)
@@ -216,7 +216,7 @@ class Neck(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["Neck"]:
-        pattern = r"^neck-(-?\d+\.*\d*)$"
+        pattern = r"^neck\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return Neck(target_pose=target_pos)
@@ -229,7 +229,7 @@ class Head(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["Head"]:
-        pattern = r"^head-(-?\d+\.*\d*)$"
+        pattern = r"^head\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return Head(target_pose=target_pos)
@@ -242,7 +242,7 @@ class LThorax(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["LThorax"]:
-        pattern = r"^lthorax-(-?\d+\.*\d*)$"
+        pattern = r"^lthorax\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return LThorax(target_pose=target_pos)
@@ -255,7 +255,7 @@ class LShoulder(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["LShoulder"]:
-        pattern = r"^lshoulder-(-?\d+\.*\d*)$"
+        pattern = r"^lshoulder\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return LShoulder(target_pose=target_pos)
@@ -268,7 +268,7 @@ class LElbow(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["LElbow"]:
-        pattern = r"^lelbow-(-?\d+\.*\d*)$"
+        pattern = r"^lelbow\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return LElbow(target_pose=target_pos)
@@ -281,7 +281,7 @@ class LWrist(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["LWrist"]:
-        pattern = r"^lwrist-(-?\d+\.*\d*)$"
+        pattern = r"^lwrist\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return LWrist(target_pose=target_pos)
@@ -294,7 +294,7 @@ class LHand(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["LHand"]:
-        pattern = r"^lhand-(-?\d+\.*\d*)$"
+        pattern = r"^lhand\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return LHand(target_pose=target_pos)
@@ -307,7 +307,7 @@ class RThorax(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["RThorax"]:
-        pattern = r"^rthorax-(-?\d+\.*\d*)$"
+        pattern = r"^rthorax\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return RThorax(target_pose=target_pos)
@@ -320,7 +320,7 @@ class RShoulder(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["RShoulder"]:
-        pattern = r"^rshoulder-(-?\d+\.*\d*)$"
+        pattern = r"^rshoulder\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return RShoulder(target_pose=target_pos)
@@ -333,7 +333,7 @@ class RElbow(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["RElbow"]:
-        pattern = r"^relbow-(-?\d+\.*\d*)$"
+        pattern = r"^relbow\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return RElbow(target_pose=target_pos)
@@ -346,7 +346,7 @@ class RWrist(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["RWrist"]:
-        pattern = r"^rwrist-(-?\d+\.*\d*)$"
+        pattern = r"^rwrist\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return RWrist(target_pose=target_pos)
@@ -359,7 +359,7 @@ class RHand(PoseReward):
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["RHand"]:
-        pattern = r"^rhand-(-?\d+\.*\d*)$"
+        pattern = r"^rhand\((\d+\.?\d*)\)$"
         target_pos = PoseReward.get_pose_from_pattern(name, pattern)
         if target_pos is not None:
             return RHand(target_pose=target_pos)

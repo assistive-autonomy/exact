@@ -6,6 +6,7 @@ logs
 config.json
 wandb
 *.ipynb
+cache/ # for lark parser
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

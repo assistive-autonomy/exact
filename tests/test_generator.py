@@ -1,6 +1,6 @@
 import pytest
+import re
 from exact.programs.generator import (
-    BODY_PARTS,
     GenerationConfig,
     RewardProgramGenerator,
     generate_programs,
@@ -37,12 +37,13 @@ def test_generate_program():
         assert len(parts) == 2  # Should have exactly 2 units
         
         for part in parts:
-            body_part, value = part.split('-')
+            # Parse the part in format 'body_part(value)'
+            body_part, value_str = part.split('(')
+            value = float(value_str.rstrip(')'))
             assert body_part in ["lhip", "rknee"]
-            value_float = float(value)
-            assert 0.1 <= value_float <= 1.0
+            assert 0.1 <= value <= 1.0
             # Check if value is a multiple of 0.1 (with floating point tolerance)
-            assert abs(round(value_float * 10) / 10 - value_float) < 1e-9
+            assert abs(round(value * 10) / 10 - value) < 1e-9
 
 def test_generate_programs():
     """Test the generate_programs convenience function."""
@@ -62,18 +63,21 @@ def test_generate_programs():
         parts = program.split('*')
         assert 1 <= len(parts) <= 3
         for part in parts:
-            body_part, value = part.split('-')
-            assert body_part in ["head", "torso"]
+            match = re.match(r"(\w+)\(([-]?\d+\.\d+)\)", part)
+            assert match is not None, f"Failed to parse part: {part}"
+            body_part, value = match.groups()
+            assert body_part in ["head", "torso"], f"Unexpected body part: {body_part}"
             value_float = float(value)
-            assert 0.5 <= value_float <= 1.0
-            assert abs(round(value_float * 10) / 10 - value_float) < 1e-9
+            assert 0.5 <= value_float <= 1.0, f"Value {value_float} out of range [0.5, 1.0]"
+            assert abs(round(value_float * 10) / 10 - value_float) < 1e-9, f"Value {value_float} is not a multiple of 0.1"
 
 def test_generate_programs_with_config():
     """Test generating programs with a pre-configured config."""
+    # Test with a range of positive values
     config = GenerationConfig(
-        min_units=3,
-        max_units=3,  # Fixed length
-        min_value=0.3,
+        min_units=2,
+        max_units=2,  # Fixed length
+        min_value=0.1,
         max_value=0.5,
         value_step=0.1,
         allowed_parts=["lhand", "rhand"]
@@ -84,12 +88,39 @@ def test_generate_programs_with_config():
     
     for program in programs:
         parts = program.split('*')
-        assert len(parts) == 3
+        assert len(parts) == 2
         for part in parts:
-            print(part)
-            body_part, value = part.split('-')
-            assert body_part in ["lhand", "rhand"]
+            match = re.match(r"(\w+)\((\d+\.\d+)\)", part)
+            assert match is not None, f"Failed to parse part: {part}"
+            body_part, value = match.groups()
+            assert body_part in ["lhand", "rhand"], f"Unexpected body part: {body_part}"
             value_float = float(value)
-            assert 0.3 <= value_float <= 0.5
-            # Value should be a multiple of 0.1 between 0.3 and 0.5
-            assert value_float in [0.3, 0.4, 0.5]
+            assert 0.1 <= value_float <= 0.5, f"Value {value_float} out of range [0.1, 0.5]"
+            # Value should be a multiple of 0.1 between 0.1 and 0.5
+            assert abs(round(value_float * 10) / 10 - value_float) < 1e-9, f"Value {value_float} is not a multiple of 0.1"
+
+    # Test with a different range of positive values
+    config = GenerationConfig(
+        min_units=2,
+        max_units=2,  # Fixed length
+        min_value=0.5,
+        max_value=1.0,
+        value_step=0.1,
+        allowed_parts=["lhand", "rhand"]
+    )
+
+    programs = generate_programs_with_config(config, num_programs=2)
+    assert len(programs) == 2
+
+    for program in programs:
+        parts = program.split('*')
+        assert len(parts) == 2
+        for part in parts:
+            match = re.match(r"(\w+)\((\d+\.\d+)\)", part)
+            assert match is not None, f"Failed to parse part: {part}"
+            body_part, value = match.groups()
+            assert body_part in ["lhand", "rhand"], f"Unexpected body part: {body_part}"
+            value_float = float(value)
+            assert 0.5 <= value_float <= 1.0, f"Value {value_float} out of range [0.5, 1.0]"
+            # Value should be a multiple of 0.1 between 0.5 and 1.0
+            assert abs(round(value_float * 10) / 10 - value_float) < 1e-9, f"Value {value_float} is not a multiple of 0.1"

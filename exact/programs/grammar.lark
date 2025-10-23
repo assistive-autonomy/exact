@@ -1,6 +1,6 @@
 start: function_call ("*" function_call)*
 
-function_call: obj_body "(" signed_float ")"
+function_call: obj_body "(" float ")"
 
 obj_body: "lhip"|"lknee"|"lankle"|"ltoe"
     |"rhip"|"rknee"|"rankle"|"rtoe"
@@ -8,6 +8,6 @@ obj_body: "lhip"|"lknee"|"lankle"|"ltoe"
     |"lthorax"|"lshoulder"|"lelbow"|"lwrist"|"lhand"
     |"rthorax"|"rshoulder"|"relbow"|"rwrist"|"rhand"
 
-signed_float: /[-+]?[0-9]*\.?[0-9]+/
+float: /[0-9]*\.?[0-9]+/
 
 
