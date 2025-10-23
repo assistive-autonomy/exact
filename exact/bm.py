@@ -8,7 +8,7 @@ from metamotivo.fb_cpr.huggingface import FBcprModel
 from metamotivo.buffers.buffers import DictBuffer
 from metamotivo.wrappers.humenvbench import relabel
 
-from exact.programs import RewardFunction
+from exact.programs import Reward
 
 
 class BehaviourModel:
@@ -55,7 +55,7 @@ class BehaviourModel:
             self.buffer.extend(data)
             del data
 
-    def z_from_reward(self, reward_fn: RewardFunction, max_workers: int = 8) -> torch.Tensor:
+    def z_from_reward(self, reward_fn: Reward, max_workers: int = 8) -> torch.Tensor:
         # sample a batch from the buffer 
         batch = self.buffer.sample(batch_size=self.batch_size)
         # relabel buffer with new rewards 
@@ -70,7 +70,7 @@ class BehaviourModel:
         return self.model.reward_wr_inference(batch["next_observation"], rewards)
 
     def generate(self,
-                 reward_fn: RewardFunction,
+                 reward_fn: Reward,
                  steps: int,
                  render: bool = False,
                  render_path: str = None) -> tuple[torch.Tensor, torch.Tensor]:
