@@ -1,6 +1,7 @@
 .DS_Store
 .vscode
 outputs
+multirun  # Hydra multi-run outputs
 out
 logs
 config.json

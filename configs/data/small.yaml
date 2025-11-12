@@ -1,0 +1,11 @@
+# Small dataset for debugging
+num_train_samples: 50
+num_val_samples: 10
+num_steps: 50
+
+# Program generation parameters
+program_generation:
+  min_units: 1
+  max_units: 2
+  min_value: 0.1
+  max_value: 1.0

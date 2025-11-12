@@ -1,0 +1,11 @@
+# Qwen3-Coder-30B-A3B-Instruct model configuration
+name: Qwen/Qwen2.5-Coder-3B-Instruct
+type: causal_lm
+
+# Motion encoder configuration
+# Adjusted for larger model hidden size
+motion_encoder:
+  motion_dim: 256
+  hidden_dim: 1024
+  num_layers: 6
+  num_prefix_tokens: 8

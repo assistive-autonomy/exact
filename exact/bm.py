@@ -10,7 +10,6 @@ from metamotivo.wrappers.humenvbench import relabel
 
 from exact.programs import Reward
 
-
 class BehaviourModel:
     """Behaviour model using a pre-trained FBcprModel from MetaMotivo."""
 
@@ -22,7 +21,6 @@ class BehaviourModel:
                  device: str = "cpu"):
         assert "metamotivo" in model_name, "Currently only metamotivo behaviour models are supported"
 
-        # load model (assumes model supports numpy-based inference)
         self.model_name = model_name
         self.batch_size = batch_size
         self.max_episode_steps = max_episode_steps
