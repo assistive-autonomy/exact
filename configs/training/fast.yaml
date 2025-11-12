@@ -7,14 +7,14 @@ learning_rate: 1.0e-5
 max_grad_norm: 1.0
 warmup_steps: 10
 
-# GRPO specific parameters
-num_generations: 2
-max_new_tokens: 32
-temperature: 0.8
+# Loss weights
+ce_weight: 1.0
+ot_weight: 0.5  # Reduced for faster training
+structural_weight: 0.2
 
-# Reward function weights
-ot_weight: 1.0
-validity_weight: 0.1
+# Structural loss components
+predicate_weight: 1.0
+argument_weight: 1.0
 
 # Logging
 logging_steps: 1

@@ -1,6 +1,13 @@
-# Quick Start Guide
+# EXACT - 5-Minute Quickstart
 
-Get up and running with EXACT GRPO training in 5 minutes!
+Train an inverse behavior model that generates humanoid motion programs from motion sequences in minutes.
+
+## What It Does
+
+Given a motion sequence (poses + actions), the model learns to generate the program specification that would produce similar motions. Uses supervised fine-tuning (SFT) with a dual loss function:
+- **Cross-entropy loss**: Standard token prediction
+- **Optimal transport loss**: Motion reconstruction quality
+- **Structural loss**: Predicate and argument matching
 
 ## 1. Installation
 
@@ -33,14 +40,14 @@ To skip WandB, add `wandb.mode=disabled` to any training command.
 Run a fast training loop with small dataset to verify everything works:
 
 ```bash
-python scripts/train_grpo.py training=fast data=small
+python scripts/train_sft.py training=fast data=small
 ```
 
 This will:
 You should see:
 - Load Qwen2.5-Coder-3B-Instruct model
 - Train motion encoder prefix tokens
-- Log rewards, OT distance, and validity
+- Log CE loss, OT distance, and structural metrics
 - Save checkpoints
 - (Optional) Log to WandB
 
@@ -52,10 +59,10 @@ Once you've verified everything works, run a full training:
 
 ```bash
 # Default configuration (Qwen Coder, 500 train samples, 10 epochs)
-python scripts/train_grpo.py
+python scripts/train_sft.py
 
 # Or with larger dataset
-python scripts/train_grpo.py data=large
+python scripts/train_sft.py data=large
 ```
 
 ## 5. Monitor Training
@@ -69,9 +76,11 @@ If WandB is enabled, you can monitor training in real-time:
 
 ## Common Configurations
 
+## 5. Common Configurations
+
 ### Debug Run (Fastest)
 ```bash
-python scripts/train_grpo.py \
+python scripts/train_sft.py \
     training=fast \
     data=small \
     wandb.mode=disabled
@@ -79,14 +88,14 @@ python scripts/train_grpo.py \
 
 ### Development Run
 ```bash
-python scripts/train_grpo.py \
+python scripts/train_sft.py \
     data=small \
     training.num_train_epochs=5
 ```
 
 ### Production Run
 ```bash
-python scripts/train_grpo.py \
+python scripts/train_sft.py \
     data=large \
     training.num_train_epochs=20
 ```
@@ -95,13 +104,13 @@ python scripts/train_grpo.py \
 ```bash
 accelerate config  # Run once to configure
 
-accelerate launch scripts/train_grpo.py \
+accelerate launch scripts/train_sft.py \
     data=large
 ```
 
 ### Hyperparameter Sweep
 ```bash
-python scripts/train_grpo.py -m \
+python scripts/train_sft.py -m \
     training.learning_rate=1e-6,5e-6,1e-5 \
     training.ot_weight=0.5,1.0,2.0
 ```
@@ -117,21 +126,29 @@ python scripts/train_grpo.py -m \
 | `data` | default | Data generation config |
 | `training.learning_rate` | 5e-6 | Learning rate |
 | `training.num_train_epochs` | 10 | Number of epochs |
+| `training.ce_weight` | 1.0 | Cross-entropy loss weight |
 | `training.ot_weight` | 1.0 | Optimal transport weight |
+| `training.structural_weight` | 0.5 | Structural loss weight |
 | `data.num_train_samples` | 500 | Training samples |
 | `wandb.mode` | online | WandB mode (online/offline/disabled) |
 
-### Override Examples
+### Override Individual Parameters
 
 ```bash
 # Change learning rate
-python scripts/train_grpo.py training.learning_rate=1e-5
+python scripts/train_sft.py training.learning_rate=1e-5
 
 # Change dataset size
-python scripts/train_grpo.py data.num_train_samples=2000
+python scripts/train_sft.py data.num_train_samples=2000
+
+# Adjust loss weights
+python scripts/train_sft.py \
+    training.ce_weight=1.0 \
+    training.ot_weight=1.5 \
+    training.structural_weight=0.3
 
 # Change multiple parameters
-python scripts/train_grpo.py \
+python scripts/train_sft.py \
     training.learning_rate=3e-6 \
     data.num_train_samples=1000 \
     wandb.project=my-project
@@ -167,13 +184,25 @@ uv sync  # or pip install wandb
 
 ### "CUDA out of memory"
 ```bash
+### "CUDA out of memory"
+```bash
 # Reduce batch size
-python scripts/train_grpo.py training.per_device_train_batch_size=1
+python scripts/train_sft.py training.per_device_train_batch_size=1
 
 # Or use gradient accumulation
-python scripts/train_grpo.py \
+python scripts/train_sft.py \
     training.per_device_train_batch_size=1 \
     training.gradient_accumulation_steps=16
+```
+
+### "Training too slow"
+```bash
+# Use FP16 mixed precision
+python scripts/train_sft.py training.fp16=true
+
+# Or disable WandB logging
+python scripts/train_sft.py wandb.mode=disabled
+```
 ```
 
 ### "WandB login failed"
@@ -182,7 +211,7 @@ python scripts/train_grpo.py \
 export WANDB_API_KEY=your_key_here
 
 # Or disable WandB
-python scripts/train_grpo.py wandb.mode=disabled
+python scripts/train_sft.py wandb.mode=disabled
 ```
 
 ## Next Steps
@@ -203,19 +232,19 @@ python scripts/train_grpo.py wandb.mode=disabled
 
 ```bash
 # 1. Quick test (5 min)
-python scripts/train_grpo.py training=fast data=small wandb.mode=disabled
+python scripts/train_sft.py training=fast data=small wandb.mode=disabled
 
 # 2. Development run (30 min)
-python scripts/train_grpo.py data=small
+python scripts/train_sft.py data=small
 
 # 3. Full run (1-2 hours)
-python scripts/train_grpo.py
+python scripts/train_sft.py
 
 # 4. Production run (4-8 hours)
-python scripts/train_grpo.py data=large
+python scripts/train_sft.py data=large
 
 # 5. Multi-GPU run
-accelerate launch scripts/train_grpo.py data=large
+accelerate launch scripts/train_sft.py data=large
 ```
 
 Happy training! 🚀

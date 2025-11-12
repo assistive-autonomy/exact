@@ -1,6 +1,6 @@
 # Configuration Guide
 
-This directory contains Hydra configuration files for training the inverse behavior model with GRPO.
+This directory contains Hydra configuration files for training the inverse behavior model with supervised fine-tuning (SFT).
 
 ## Structure
 
@@ -24,14 +24,14 @@ configs/
 
 Run with default configuration:
 ```bash
-python scripts/train_grpo.py
+python scripts/train_sft.py
 ```
 
 ### Override Parameters
 
 Override specific parameters from command line:
 ```bash
-python scripts/train_grpo.py training.learning_rate=1e-5 data.num_train_samples=1000
+python scripts/train_sft.py training.learning_rate=1e-5 data.num_train_samples=1000
 ```
 
 ### Use Different Config Presets
@@ -39,17 +39,17 @@ python scripts/train_grpo.py training.learning_rate=1e-5 data.num_train_samples=
 Use different training or data configurations:
 ```bash
 # Use fast training with small dataset
-python scripts/train_grpo.py training=fast data=small
+python scripts/train_sft.py training=fast data=small
 
 # Use large dataset with default training
-python scripts/train_grpo.py data=large
+python scripts/train_sft.py data=large
 ```
 
 ### Multi-GPU Training
 
 With Accelerate:
 ```bash
-accelerate launch scripts/train_grpo.py
+accelerate launch scripts/train_sft.py
 ```
 
 ### WandB Configuration
@@ -57,22 +57,23 @@ accelerate launch scripts/train_grpo.py
 Enable/disable WandB logging:
 ```bash
 # Disable WandB
-python scripts/train_grpo.py wandb.mode=disabled
+python scripts/train_sft.py wandb.mode=disabled
 
 # Set WandB project and entity
-python scripts/train_grpo.py wandb.project=my-project wandb.entity=my-team
+python scripts/train_sft.py wandb.project=my-project wandb.entity=my-team
 
 # Run offline (sync later with `wandb sync`)
-python scripts/train_grpo.py wandb.mode=offline
+python scripts/train_sft.py wandb.mode=offline
 ```
 
 ### Hydra Sweeps
 
 Run hyperparameter sweeps:
 ```bash
-python scripts/train_grpo.py -m \
+python scripts/train_sft.py -m \
     training.learning_rate=1e-6,5e-6,1e-5 \
-    training.ot_weight=0.5,1.0,2.0
+    training.ot_weight=0.5,1.0,2.0 \
+    training.structural_weight=0.2,0.5,1.0
 ```
 
 ## Configuration Options
@@ -127,19 +128,20 @@ python scripts/train_grpo.py -m \
 
 ### Quick Debug Run
 ```bash
-python scripts/train_grpo.py training=fast data=small wandb.mode=disabled
+python scripts/train_sft.py training=fast data=small wandb.mode=disabled
 ```
 
 ### Full Training Run
 ```bash
-python scripts/train_grpo.py data=large wandb.project=my-project
+python scripts/train_sft.py data=large wandb.project=my-project
 ```
 
 ### Hyperparameter Search
 ```bash
-python scripts/train_grpo.py -m \
+python scripts/train_sft.py -m \
     training.learning_rate=1e-6,5e-6 \
-    training.ot_weight=0.5,1.0,2.0
+    training.ot_weight=0.5,1.0,2.0 \
+    training.structural_weight=0.2,0.5,1.0
 ```
 
 ## Output Structure

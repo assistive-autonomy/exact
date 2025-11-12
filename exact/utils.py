@@ -20,7 +20,7 @@ def wasserstein_distance(X: torch.Tensor, Y: torch.Tensor) -> float:
 
 
 class MotionProgramDataset(Dataset):
-    """Dataset of motion sequences for GRPO training."""
+    """Dataset of motion sequences and their corresponding programs for SFT training."""
     
     def __init__(
         self,

@@ -1,4 +1,4 @@
-# Default training configuration
+# Default training configuration for SFT
 num_train_epochs: 10
 per_device_train_batch_size: 2  # Reduced for larger model
 per_device_eval_batch_size: 2
@@ -7,14 +7,14 @@ learning_rate: 5.0e-6
 max_grad_norm: 1.0
 warmup_steps: 100
 
-# GRPO specific parameters
-num_generations: 4
-max_new_tokens: 64
-temperature: 0.8
+# Loss weights
+ce_weight: 1.0        # Cross-entropy loss for token prediction
+ot_weight: 1.0        # Optimal transport loss for motion reconstruction
+structural_weight: 0.5  # Structural program similarity loss
 
-# Reward function weights
-ot_weight: 1.0
-validity_weight: 0.1
+# Structural loss components
+predicate_weight: 1.0   # Weight for predicate matching (Jaccard)
+argument_weight: 1.0    # Weight for argument matching (MSE)
 
 # Logging
 logging_steps: 10

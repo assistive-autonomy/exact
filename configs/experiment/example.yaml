@@ -1,6 +1,6 @@
 # Example: Custom experiment configuration
 # Save as configs/experiment/my_experiment.yaml
-# Usage: python scripts/train_grpo.py +experiment=my_experiment
+# Usage: python scripts/train_sft.py +experiment=my_experiment
 
 # @package _global_
 
@@ -23,7 +23,9 @@ training:
   num_train_epochs: 20
   per_device_train_batch_size: 2
   gradient_accumulation_steps: 8
+  ce_weight: 1.0
   ot_weight: 1.5
+  structural_weight: 0.3
   
 # Use a specific seed for this experiment
 seed: 123

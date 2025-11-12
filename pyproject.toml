@@ -16,7 +16,6 @@ dependencies = [
     "pyparsing>=3.2.3",
     "syncode>=0.4.16",
     "transformers>=4.30.0",
-    "trl>=0.8.0",
     "wandb>=0.16.0",
 ]
 

@@ -1,25 +1,30 @@
 """
-Train inverse behavior model using GRPO (Group Relative Policy Optimization).
+Train inverse behavior model using Supervised Fine-Tuning (SFT).
+
+Uses a dual loss function:
+- Cross-entropy loss for program token prediction
+- Optimal transport loss for motion reconstruction quality  
+- Structural loss for predicate and argument matching
 
 This script uses Hydra for configuration management. Example usage:
 
     # Default training
-    python scripts/train_grpo.py
+    python scripts/train_sft.py
 
     # Override specific parameters
-    python scripts/train_grpo.py training.learning_rate=1e-5 data.num_train_samples=1000
+    python scripts/train_sft.py training.learning_rate=1e-5 data.num_train_samples=1000
 
     # Use different config presets
-    python scripts/train_grpo.py training=fast data=small
+    python scripts/train_sft.py training=fast data=small
 
     # Multi-run with hyperparameter search
-    python scripts/train_grpo.py -m training.learning_rate=1e-6,5e-6,1e-5
+    python scripts/train_sft.py -m training.learning_rate=1e-6,5e-6,1e-5
 
     # Disable WandB
-    python scripts/train_grpo.py wandb.mode=disabled
+    python scripts/train_sft.py wandb.mode=disabled
 
     # Multi-GPU with accelerate
-    accelerate launch scripts/train_grpo.py
+    accelerate launch scripts/train_sft.py
 """
 
 import os
@@ -30,7 +35,7 @@ import wandb
 
 from exact.bm import BehaviourModel
 from exact.programs import generate_programs, RewardBuilder
-from exact.trainer_grpo import train_motion_to_program_grpo
+from exact.trainer_sft import train_motion_to_program_sft
 from exact.utils import generate_program
 
 def generate_training_data(
@@ -165,9 +170,9 @@ def main(cfg: DictConfig):
     if cfg.wandb.mode != "disabled":
         wandb.log({"data/num_val_samples": len(val_motions)})
     
-    # Train the model with GRPO
-    print("\n4. Training inverse model with GRPO...")
-    trainer = train_motion_to_program_grpo(
+    # Train the model with SFT
+    print("\n4. Training inverse model with SFT...")
+    trainer = train_motion_to_program_sft(
         train_motions=train_motions,
         train_programs=train_programs,
         val_motions=val_motions,
