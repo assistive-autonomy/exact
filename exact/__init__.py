@@ -1,18 +1,17 @@
 from exact.programs import (
     Reward,
     RewardBuilder,
-    GenerationConfig,
-    generate_programs,
-    generate_programs_with_config,
+    generate_program,
 )
 from exact.bm import BehaviourModel
-
+from exact.config import ExperimentConfig
+from exact.motion_encoder import MotionEncoder
 
 __all__ = [
     "Reward",
     "RewardBuilder",
-    "GenerationConfig",
-    "generate_programs",
-    "generate_programs_with_config",
+    "generate_program",
     "BehaviourModel",
+    "ExperimentConfig",
+    "MotionEncoder",
 ]

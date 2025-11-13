@@ -1,30 +1,3 @@
-"""
-Train inverse behavior model using Supervised Fine-Tuning (SFT).
-
-Uses a dual loss function:
-- Cross-entropy loss for program token prediction
-- Optimal transport loss for motion reconstruction quality
-
-This script uses Hydra for configuration management. Example usage:
-
-    # Default training
-    python scripts/train_sft.py
-
-    # Override specific parameters
-    python scripts/train_sft.py training.learning_rate=1e-5 data.num_train_samples=1000
-
-    # Use different config presets
-    python scripts/train_sft.py training=fast data=small
-
-    # Multi-run with hyperparameter search
-    python scripts/train_sft.py -m training.learning_rate=1e-6,5e-6,1e-5
-
-    # Disable WandB
-    python scripts/train_sft.py wandb.mode=disabled
-
-    # Multi-GPU with accelerate
-    accelerate launch scripts/train_sft.py
-"""
 import torch
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -168,7 +141,7 @@ def main(cfg: DictConfig):
         wandb.log({"data/num_val_samples": len(val_motions)})
 
     # Train the inverse behavior model
-    print("\n4. Training inverse behavior model...")
+    print("\n4. Training inverse behavior model with LoRA...")
     trainer = train_inverse_behavior_model(
         train_motions=train_motions,
         train_programs=train_programs,
@@ -177,15 +150,11 @@ def main(cfg: DictConfig):
         model_name=cfg.model.name,
         behaviour_model=behaviour_model,
         output_dir=cfg.output_dir,
-        training_config={
-            "num_train_epochs": cfg.training.num_epochs,
-            "per_device_train_batch_size": cfg.training.batch_size,
-            "learning_rate": cfg.training.learning_rate,
-            "warmup_ratio": cfg.training.warmup_ratio,
-            "weight_decay": cfg.training.weight_decay,
-            "max_program_length": cfg.data.max_program_length,
-        },
+        training_config=OmegaConf.to_container(cfg.training, resolve=True),
+        motion_encoder_config=OmegaConf.to_container(cfg.model.motion_encoder, resolve=True),
+        lora_config=OmegaConf.to_container(cfg.model.lora, resolve=True),
         wandb_enabled=(cfg.wandb.mode != "disabled"),
+        device=DEVICE,
     )
 
     # Test inference

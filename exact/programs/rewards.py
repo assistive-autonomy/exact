@@ -379,8 +379,10 @@ def make_from_name(
         sys.modules["exact.programs.rewards"], inspect.isclass
     )
     for _, reward_cls in all_rewards:
-        if not inspect.isabstract(reward_cls) and not isinstance(
-            reward_cls, RewardBuilder
+        if (
+            not inspect.isabstract(reward_cls)
+            and reward_cls is not RewardBuilder
+            and issubclass(reward_cls, Reward)
         ):
             reward_obj = reward_cls.reward_from_name(name)
             if reward_obj is not None:

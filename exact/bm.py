@@ -12,7 +12,7 @@ from exact.programs import Reward
 
 
 class BehaviourModel:
-    """Behaviour model using a pre-trained FBcprModel from MetaMotivo."""
+    """Behaviour model (pre-trained FBcprModel from MetaMotivo) that generates motions from reward functions."""
 
     def __init__(
         self,
@@ -68,11 +68,12 @@ class BehaviourModel:
         # sample a batch from the buffer
         batch = self.buffer.sample(batch_size=self.batch_size)
         # relabel buffer with new rewards
+        # Move tensors to CPU before passing to relabel (it calls .numpy() internally)
         rewards = relabel(
             self.env,
-            qpos=batch["qpos"],
-            qvel=batch["qvel"],
-            action=batch["action"],
+            qpos=batch["qpos"].cpu(),
+            qvel=batch["qvel"].cpu(),
+            action=batch["action"].cpu(),
             reward_fn=reward_fn,
             max_workers=max_workers,
         )

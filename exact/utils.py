@@ -4,7 +4,7 @@ import ot
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
-from transformers import PreTrainedTokenizer, PreTrainedModel
+from transformers import PreTrainedTokenizer
 
 
 def wasserstein_distance(X: torch.Tensor, Y: torch.Tensor) -> float:
@@ -39,59 +39,25 @@ class MotionProgramDataset(Dataset):
         return len(self.motions)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        return {
-            "motion": self.motions[idx],
-            "reference_program": self.programs[idx],
+        item = {
+            "motion": self.motions[idx].cpu() if self.motions[idx].is_cuda else self.motions[idx],
         }
+        
+        # Tokenize the program if tokenizer is provided
+        if self.tokenizer is not None and self.programs[idx] is not None:
+            tokenized = self.tokenizer(
+                self.programs[idx],
+                truncation=True,
+                padding=False,  # Padding handled by data collator
+                return_tensors=None,  # Return lists, not tensors
+            )
+            item["input_ids"] = tokenized["input_ids"]
+            item["attention_mask"] = tokenized["attention_mask"]
+            # Labels are the same as input_ids for causal language modeling
+            item["labels"] = tokenized["input_ids"]
+        
+        return item
 
 
-def generate_program(
-    model: PreTrainedModel,
-    tokenizer: PreTrainedTokenizer,
-    motion: torch.Tensor,
-    num_beams: int = 5,
-    max_new_tokens: int = 64,
-    temperature: float = 0.8,
-) -> List[str]:
-    """Generate programs from motion sequences using the inverse behavior model.
 
-    Args:
-        model: The trained inverse behavior model
-        tokenizer: Tokenizer for the model
-        motion: Input motion sequence tensor of shape [batch_size, seq_len, motion_dim]
-        num_beams: Number of beams for beam search
-        max_new_tokens: Maximum number of new tokens to generate
-        temperature: Temperature for sampling
 
-    Returns:
-        List of generated program strings
-    """
-    model.eval()
-
-    with torch.no_grad():
-        # Average pool the motion sequence to get a fixed-size representation
-        motion_embeddings = motion.mean(dim=1)  # [batch_size, motion_dim]
-
-        # Project motion embeddings to match the model's hidden size
-        motion_projection = nn.Linear(
-            motion_embeddings.size(-1),
-            model.config.hidden_size,
-            device=motion_embeddings.device,
-        )
-        hidden_states = motion_projection(motion_embeddings).unsqueeze(
-            1
-        )  # [batch_size, 1, hidden_size]
-
-        # Generate programs
-        outputs = model.generate(
-            inputs_embeds=hidden_states,
-            max_new_tokens=max_new_tokens,
-            num_beams=num_beams,
-            temperature=temperature,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-
-        programs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-
-    return programs
