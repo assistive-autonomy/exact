@@ -19,11 +19,13 @@ class Reward(abc.ABC):
         self,
         model: mujoco.MjModel,
         data: mujoco.MjData,
-    ) -> float: ...
+    ) -> float:
+        ...
 
     @staticmethod
     @abc.abstractmethod
-    def reward_from_name(name: str) -> Optional["Reward"]: ...
+    def reward_from_name(name: str) -> Optional["Reward"]:
+        ...
 
     def __call__(
         self,
@@ -37,8 +39,10 @@ class Reward(abc.ABC):
         data.qvel[:] = qvel.detach().cpu().numpy()
         data.ctrl[:] = ctrl.detach().cpu().numpy()
         mujoco.mj_forward(model, data)
-        return torch.tensor(self.compute(model, data), device=qpos.device, dtype=qpos.dtype)
-    
+        return torch.tensor(
+            self.compute(model, data), device=qpos.device, dtype=qpos.dtype
+        )
+
 
 @dataclasses.dataclass
 class PoseReward(Reward):
@@ -59,11 +63,13 @@ class PoseReward(Reward):
         data: mujoco.MjData,
     ) -> float:
         current_pos = get_xpos(model, data, name=self.obj_body)[-1]
-        return float(rewards.tolerance(
-            current_pos,
-            bounds=(self.target_pose - 0.1, self.target_pose + 0.1),
-            margin=0.1,
-        ))
+        return float(
+            rewards.tolerance(
+                current_pos,
+                bounds=(self.target_pose - 0.1, self.target_pose + 0.1),
+                margin=0.1,
+            )
+        )
 
 
 @dataclasses.dataclass
@@ -369,9 +375,13 @@ class RHand(PoseReward):
 def make_from_name(
     name: str | None = None,
 ):
-    all_rewards = inspect.getmembers(sys.modules["exact.programs.rewards"], inspect.isclass)
+    all_rewards = inspect.getmembers(
+        sys.modules["exact.programs.rewards"], inspect.isclass
+    )
     for _, reward_cls in all_rewards:
-        if not inspect.isabstract(reward_cls) and not isinstance(reward_cls, RewardBuilder):
+        if not inspect.isabstract(reward_cls) and not isinstance(
+            reward_cls, RewardBuilder
+        ):
             reward_obj = reward_cls.reward_from_name(name)
             if reward_obj is not None:
                 return reward_obj
@@ -381,6 +391,7 @@ def make_from_name(
 @dataclasses.dataclass
 class RewardBuilder(Reward):
     """Combines multiple reward functions by multiplying their outputs."""
+
     rewards: list[Reward]
 
     def compute(
@@ -388,7 +399,11 @@ class RewardBuilder(Reward):
         model: mujoco.MjModel,
         data: mujoco.MjData,
     ) -> float:
-        return reduce(lambda acc, reward_fn: acc * reward_fn.compute(model, data), self.rewards, 1.0)
+        return reduce(
+            lambda acc, reward_fn: acc * reward_fn.compute(model, data),
+            self.rewards,
+            1.0,
+        )
 
     @staticmethod
     def reward_from_name(name: str) -> Optional["RewardBuilder"]:

@@ -10,11 +10,6 @@ warmup_steps: 100
 # Loss weights
 ce_weight: 1.0        # Cross-entropy loss for token prediction
 ot_weight: 1.0        # Optimal transport loss for motion reconstruction
-structural_weight: 0.5  # Structural program similarity loss
-
-# Structural loss components
-predicate_weight: 1.0   # Weight for predicate matching (Jaccard)
-argument_weight: 1.0    # Weight for argument matching (MSE)
 
 # Logging
 logging_steps: 10

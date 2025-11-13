@@ -5,10 +5,10 @@ import mujoco
 
 def rot2eul(R: torch.Tensor) -> torch.Tensor:
     """Convert rotation matrix to Euler angles.
-    
+
     Args:
         R: Rotation matrix of shape (3, 3)
-        
+
     Returns:
         torch.Tensor: Euler angles (alpha, beta, gamma) in radians
     """
@@ -21,12 +21,12 @@ def rot2eul(R: torch.Tensor) -> torch.Tensor:
 
 def get_xpos(model: mujoco.MjModel, data: mujoco.MjData, name: str) -> torch.Tensor:
     """Get the position of a body as a PyTorch tensor.
-    
+
     Args:
         model: MuJoCo model
         data: MuJoCo data
         name: Name of the body
-        
+
     Returns:
         torch.Tensor: Position vector (x, y, z)
     """
@@ -37,12 +37,12 @@ def get_xpos(model: mujoco.MjModel, data: mujoco.MjData, name: str) -> torch.Ten
 
 def get_xmat(model: mujoco.MjModel, data: mujoco.MjData, name: str) -> torch.Tensor:
     """Get the rotation matrix of a body as a PyTorch tensor.
-    
+
     Args:
         model: MuJoCo model
         data: MuJoCo data
         name: Name of the body
-        
+
     Returns:
         torch.Tensor: Rotation matrix of shape (3, 3)
     """
@@ -53,11 +53,11 @@ def get_xmat(model: mujoco.MjModel, data: mujoco.MjData, name: str) -> torch.Ten
 
 def get_chest_upright(model: mujoco.MjModel, data: mujoco.MjData) -> torch.Tensor:
     """Get the upright orientation of the chest.
-    
+
     Args:
         model: MuJoCo model
         data: MuJoCo data
-        
+
     Returns:
         torch.Tensor: Upright orientation value
     """
@@ -66,14 +66,16 @@ def get_chest_upright(model: mujoco.MjModel, data: mujoco.MjData) -> torch.Tenso
     return torch.tensor(data.xmat[chest_index][-2], dtype=torch.float32)
 
 
-def get_sensor_data(model: mujoco.MjModel, data: mujoco.MjData, name: str) -> torch.Tensor:
+def get_sensor_data(
+    model: mujoco.MjModel, data: mujoco.MjData, name: str
+) -> torch.Tensor:
     """Get sensor data as a PyTorch tensor.
-    
+
     Args:
         model: MuJoCo model
         data: MuJoCo data
         name: Name of the sensor
-        
+
     Returns:
         torch.Tensor: Sensor data
     """
@@ -84,13 +86,15 @@ def get_sensor_data(model: mujoco.MjModel, data: mujoco.MjData, name: str) -> to
     return torch.tensor(data.sensordata[start:end].copy(), dtype=torch.float32)
 
 
-def get_center_of_mass_linvel(model: mujoco.MjModel, data: mujoco.MjData) -> torch.Tensor:
+def get_center_of_mass_linvel(
+    model: mujoco.MjModel, data: mujoco.MjData
+) -> torch.Tensor:
     """Get the linear velocity of the center of mass.
-    
+
     Args:
         model: MuJoCo model
         data: MuJoCo data
-        
+
     Returns:
         torch.Tensor: Linear velocity vector (vx, vy, vz)
     """

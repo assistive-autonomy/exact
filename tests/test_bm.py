@@ -19,6 +19,6 @@ def test_generate(behaviour_model, head_reward):
     """Test that generate returns poses and actions with expected shapes."""
     steps = 50
     poses, actions = behaviour_model.generate(head_reward, steps=steps)
-    
+
     assert poses.shape[0] == steps
     assert actions.shape[0] == steps

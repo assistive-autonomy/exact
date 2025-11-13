@@ -10,11 +10,6 @@ warmup_steps: 10
 # Loss weights
 ce_weight: 1.0
 ot_weight: 0.5  # Reduced for faster training
-structural_weight: 0.2
-
-# Structural loss components
-predicate_weight: 1.0
-argument_weight: 1.0
 
 # Logging
 logging_steps: 1
