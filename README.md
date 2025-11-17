@@ -14,61 +14,64 @@ uv sync
 pip install -e .
 ```
 
-## Running Experiments
+## Quick Start
 
-**Basic Training (default config):**
+### 1. Generate Training Data
+
+First, generate training and evaluation datasets:
+
 ```bash
-uv run scripts/train_sft.py
+# Generate training data
+uv run scripts/generate_data.py name=train num_samples=1000
+
+# Generate evaluation data
+uv run scripts/generate_data.py name=eval num_samples=200
 ```
 
-**Quick Debug Run (small dataset):**
-```bash
-uv run scripts/train_sft.py --config-name config_small wandb.mode=disabled
-```
+This creates `train.hdf5` and `eval.hdf5` files containing motion-program pairs.
 
-**Fast Training (fewer epochs, more frequent evals):**
-```bash
-uv run scripts/train_sft.py --config-name config_fast wandb.mode=disabled
-```
+### 2. Train Inverse Behavior Model
 
-**Override Parameters:**
-```bash
-uv run scripts/train_sft.py training.learning_rate=1e-5 data.num_train_samples=1000
-```
-
-### Configuration
-
-All configuration is now in a single file: `configs/config.yaml`
-
-There are also two variant configs:
-- `configs/config_small.yaml` - Small dataset for quick testing (50 train / 10 val samples)
-- `configs/config_fast.yaml` - Fast training with frequent evaluation (2 epochs, eval every 10 steps)
-
-### Examples
+Train the model to predict programs from motion sequences:
 
 ```bash
-# Disable WandB logging
-uv run scripts/train_sft.py wandb.mode=disabled
+# Basic training
+uv run scripts/train_ibm.py
 
-# Set WandB project
-uv run scripts/train_sft.py wandb.project=my-project wandb.entity=my-team
-
-# Custom training configuration
-uv run scripts/train_sft.py \
+# With custom parameters
+uv run scripts/train_ibm.py \
     training.num_train_epochs=20 \
     training.learning_rate=1e-5 \
-    training.per_device_train_batch_size=8 \
+    wandb.mode=disabled
+```
+
+## Configuration
+
+The project uses Hydra for configuration management:
+
+- `configs/train.yaml` - Training configuration (model, LoRA, hyperparameters)
+- `configs/data.yaml` - Data generation configuration (program parameters)
+
+All parameters can be overridden from the command line using Hydra syntax.
+
+## Usage Examples
+
+```bash
+# Generate small dataset for quick testing
+uv run scripts/generate_data.py name=train num_samples=50
+
+# Train with disabled WandB logging
+uv run scripts/train_ibm.py wandb.mode=disabled
+
+# Train with custom learning rate and batch size
+uv run scripts/train_ibm.py \
+    training.learning_rate=1e-4 \
+    training.batch_size=4
+
+# Train with different loss weights
+uv run scripts/train_ibm.py \
     training.ce_weight=1.0 \
-    training.ot_weight=1.5
-
-# Use small dataset variant
-uv run scripts/train_sft.py --config-name config_small
-
-# Use fast training variant
-uv run scripts/train_sft.py --config-name config_fast
-
-# Combine variant with overrides
-uv run scripts/train_sft.py --config-name config_small training.num_train_epochs=5
+    training.ot_weight=0.5
 ```
 
 

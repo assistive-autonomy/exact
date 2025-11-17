@@ -1,0 +1,33 @@
+name: train
+seed: 42
+num_samples: 10
+min_preds: 1
+max_preds: 10
+min_value: 0.0
+max_value: 1.0
+value_step: 0.1
+num_motion_steps: 10
+allowed_parts:
+  - lhip
+  - lknee
+  - lankle
+  - ltoe
+  - rhip
+  - rknee
+  - rankle
+  - rtoe
+  - torso
+  - spine
+  - chest
+  - neck
+  - head
+  - lthorax
+  - lshoulder
+  - lelbow
+  - lwrist
+  - lhand
+  - rthorax
+  - rshoulder
+  - relbow
+  - rwrist
+  - rhand

@@ -1,32 +1,43 @@
 import torch
 import hydra
+from tqdm import tqdm
+from loguru import logger
 from omegaconf import OmegaConf
+import h5py
+import numpy as np
 from exact.bm import BehaviourModel
 from exact.programs import generate_program, RewardBuilder
 from exact.config import DataConfig 
 
-@hydra.main(version_base=None, config_path="../configs/data", config_name="default")
+@hydra.main(version_base=None, config_path="../configs", config_name="data")
 def main(cfg: DataConfig):
-    """Generate and save data based on the provided configuration."""
-    print("Generating data with the following configuration:")
-    print(OmegaConf.to_yaml(cfg))
+    logger.info(f"Generating {cfg.name} data with the following configuration:")
+    logger.info(OmegaConf.to_yaml(cfg))
 
     torch.manual_seed(cfg.seed)
 
     bm = BehaviourModel()
-    for i in range(cfg.num_samples):
-        print(f"Generating sample {i+1}/{cfg.num_samples}...")
-        program = generate_program(
-            min_units=cfg.min_units,
-            max_units=cfg.max_units,
-            min_value=cfg.min_value,
-            max_value=cfg.max_value,
-            value_step=cfg.value_step,
-            allowed_parts=cfg.allowed_parts,
-        )
-        print(f"Generated program: {program}")
-        # reward_fn = RewardBuilder.reward_from_name(program)
-        # poses, _ = bm.generate(reward_fn,steps=cfg.num_steps,render=False)
+    
+    with h5py.File(f"{cfg.name}.hdf5", 'w') as f:
+
+        for i in tqdm(range(cfg.num_samples), desc="Generating samples"):
+            program = generate_program(
+                min_preds=cfg.min_preds,
+                max_preds=cfg.max_preds,
+                min_value=cfg.min_value,
+                max_value=cfg.max_value,
+                value_step=cfg.value_step,
+                allowed_parts=cfg.allowed_parts,
+            )
+            reward_fn = RewardBuilder.reward_from_name(program)
+            poses, actions = bm.generate(reward_fn, steps=cfg.num_motion_steps, render=False)
+            motion = torch.cat([poses, actions], dim=-1)
+            
+            grp = f.create_group(f"motion_{i}")
+            grp.create_dataset("motion", data=motion.numpy().astype(np.float32))
+            grp.attrs['program'] = str(program)
+
+    logger.info(f"Data saved to {cfg.name}.hdf5")
 
 if __name__ == "__main__":
     main()

@@ -29,8 +29,8 @@ BODY_PARTS = [
 
 
 def generate_program(
-    min_units: int = 1,
-    max_units: int = 5,
+    min_preds: int = 1,
+    max_preds: int = 5,
     min_value: float = 0.1,
     max_value: float = 1.0,
     value_step: float = 0.1,
@@ -40,8 +40,8 @@ def generate_program(
     Generate a single reward program string.
 
     Args:
-        min_units: Minimum number of units in the program
-        max_units: Maximum number of units in the program
+        min_preds: Minimum number of units in the program
+        max_preds: Maximum number of units in the program
         min_value: Minimum value for reward weights
         max_value: Maximum value for reward weights
         value_step: Step size for reward weights
@@ -59,7 +59,7 @@ def generate_program(
             raise ValueError(f"Invalid body parts specified: {invalid_parts}")
     
     # Generate random number of units
-    num_units = random.randint(min_units, max_units)
+    num_units = random.randint(min_preds, max_preds)
     
     # Generate each unit
     program_parts = []

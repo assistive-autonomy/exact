@@ -2,8 +2,7 @@ import torch
 import torch.nn as nn
 
 class MotionEncoder(nn.Module):
-    """Encodes motion sequences into embeddings compatible with LLM."""
-    
+        
     def __init__(
         self,
         motion_dim: int = 256,

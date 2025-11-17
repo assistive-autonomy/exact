@@ -121,4 +121,4 @@ class BehaviourModel:
         if render:
             media.write_video(render_path, frames, fps=30)
             print(f"Saved video to {render_path}")
-        return torch.stack(poses_list), torch.stack(actions_list)
+        return torch.stack(poses_list).squeeze(1), torch.stack(actions_list).squeeze(1)
