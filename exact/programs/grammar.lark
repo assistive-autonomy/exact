@@ -1,13 +1,19 @@
-start: function_call ("*" function_call)*
+start: motion (";" motion)*
 
-function_call: obj_body "(" float ")"
+motion: "[" INT "," INT "]" sensor ("*" sensor)*
 
-obj_body: "lhip"|"lknee"|"lankle"|"ltoe"
-    |"rhip"|"rknee"|"rankle"|"rtoe"
-    |"torso"|"spine"|"chest"|"neck"|"head"
-    |"lthorax"|"lshoulder"|"lelbow"|"lwrist"|"lhand"
-    |"rthorax"|"rshoulder"|"relbow"|"rwrist"|"rhand"
+sensor: JOINT "." AXIS "(" REAL ")"
 
-float: /[0-9]*\.?[0-9]+/
+JOINT: "pelvis" | "torso" | "spine" | "chest" | "neck" | "head"
+    | "lhip" | "lknee" | "lankle" | "ltoe"
+    | "rhip" | "rknee" | "rankle" | "rtoe"
+    | "lthorax" | "lshoulder" | "lelbow" | "lwrist" | "lhand"
+    | "rthorax" | "rshoulder" | "relbow" | "rwrist" | "rhand"
+
+AXIS: "x" | "y" | "z"
+
+INT: /[0-9]+/
+
+REAL: /-?[0-9]+\.[0-9]+/
 
 

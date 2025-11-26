@@ -12,6 +12,8 @@ class DataConfig(BaseModel):
     max_value: float
     value_step: float
     num_motion_steps: int
+    num_intervals: int
+    min_interval_time: int
     allowed_parts: List[str]
 
 
@@ -33,7 +35,7 @@ class ModelConfig(BaseModel):
     tokenizer: str
 
 
-class BehaviourModelConfig(BaseModel):
+class MotionModelConfig(BaseModel):
     name: str
     batch_size: int
     max_episode_steps: int
@@ -44,7 +46,7 @@ class TrainingConfig(BaseModel):
     model: ModelConfig
     lora: LoraConfig
     motion_encoder: MotionEncoderConfig
-    behaviour_model: BehaviourModelConfig
+    motion_model: MotionModelConfig
     num_train_epochs: int
     num_workers: int
     mx_seq_length: int
@@ -66,3 +68,7 @@ class WandbConfig(BaseModel):
 class ExperimentConfig(BaseModel):
     training: TrainingConfig
     wandb: WandbConfig
+
+
+# Backward compatibility
+BehaviourModelConfig = MotionModelConfig

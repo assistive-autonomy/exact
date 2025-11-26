@@ -2,12 +2,20 @@ name: train
 seed: 42
 num_samples: 10
 min_preds: 1
-max_preds: 10
+max_preds: 5
 min_value: 0.0
-max_value: 1.0
+max_value: 2.0
 value_step: 0.1
-num_motion_steps: 10
+num_motion_steps: 1000
+num_intervals: 2
+min_interval_time: 100
 allowed_parts:
+  - pelvis
+  - torso
+  - spine
+  - chest
+  - neck
+  - head
   - lhip
   - lknee
   - lankle
@@ -16,11 +24,6 @@ allowed_parts:
   - rknee
   - rankle
   - rtoe
-  - torso
-  - spine
-  - chest
-  - neck
-  - head
   - lthorax
   - lshoulder
   - lelbow

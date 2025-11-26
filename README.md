@@ -1,13 +1,11 @@
-# Executable Activity Models
+# EXACT: Executable Activity Models
 
-Learning and reasoning with executable activity models for motion generation and inverse behavior modeling using supervised fine-tuning with PEFT/LoRA.
+Learning inverse motion models that map motion sequences to reward programs using supervised fine-tuning with PEFT/LoRA.
 
 ## Installation
 
-This project uses [uv](https://docs.astral.sh/uv/getting-started/installation/) for dependency management.
-
 ```bash
-# Install dependencies
+# Using uv (recommended)
 uv sync
 
 # Or with pip
@@ -18,21 +16,17 @@ pip install -e .
 
 ### 1. Generate Training Data
 
-First, generate training and evaluation datasets:
-
 ```bash
-# Generate training data
+# Training data
 uv run scripts/generate_data.py name=train num_samples=1000
 
-# Generate evaluation data
+# Evaluation data  
 uv run scripts/generate_data.py name=eval num_samples=200
 ```
 
-This creates `train.hdf5` and `eval.hdf5` files containing motion-program pairs.
+Creates `train.hdf5` and `eval.hdf5` with motion-program pairs.
 
-### 2. Train Inverse Behavior Model
-
-Train the model to predict programs from motion sequences:
+### 2. Train Inverse Motion Model
 
 ```bash
 # Basic training
@@ -45,36 +39,50 @@ uv run scripts/train_ibm.py \
     wandb.mode=disabled
 ```
 
-## Configuration
+## Architecture
 
-The project uses Hydra for configuration management:
+- **Motion Model**: Pre-trained MetaMotivo model that generates motion from reward programs
+- **Inverse Motion Model**: LLM fine-tuned with LoRA + motion encoder to predict programs from motion
+- **Reward Programs**: Time-indexed predicates specifying body part positions over intervals
 
-- `configs/train.yaml` - Training configuration (model, LoRA, hyperparameters)
-- `configs/data.yaml` - Data generation configuration (program parameters)
+## Reward Program Grammar
 
-All parameters can be overridden from the command line using Hydra syntax.
+Programs consist of time-indexed motions separated by commas:
 
-## Usage Examples
-
-```bash
-# Generate small dataset for quick testing
-uv run scripts/generate_data.py name=train num_samples=50
-
-# Train with disabled WandB logging
-uv run scripts/train_ibm.py wandb.mode=disabled
-
-# Train with custom learning rate and batch size
-uv run scripts/train_ibm.py \
-    training.learning_rate=1e-4 \
-    training.batch_size=4
-
-# Train with different loss weights
-uv run scripts/train_ibm.py \
-    training.ce_weight=1.0 \
-    training.ot_weight=0.5
+```
+[start,end]sensor*sensor*...,[start,end]sensor*sensor*...
 ```
 
+Each sensor specifies a body part, axis, and target value:
+```
+body_part.axis(value)
+```
 
+**Example:**
+```
+[0,500]head.z(1.4)*lhand.x(0.5),[500,1000]pelvis.y(0.8)
+```
 
+This means:
+- Timesteps 0-500: head at z=1.4m, left hand at x=0.5m
+- Timesteps 500-1000: pelvis at y=0.8m
 
+**Components:**
+- **Body parts** (23): `pelvis`, `torso`, `spine`, `chest`, `neck`, `head`, `lhip`, `lknee`, `lankle`, `ltoe`, `rhip`, `rknee`, `rankle`, `rtoe`, `lthorax`, `lshoulder`, `lelbow`, `lwrist`, `lhand`, `rthorax`, `rshoulder`, `relbow`, `rwrist`, `rhand`
+- **Axes**: `x`, `y`, `z`
+- **Values**: floating point with decimal (e.g., `1.4`, `-0.5`)
 
+### Tolerance Function
+
+Reward uses Gaussian tolerance: $r = \exp\left(-\frac{(h - t)^2}{2\sigma^2}\right)$ where $\sigma = 1.0$
+
+## Configuration
+
+- `configs/train.yaml` - Training config (model, LoRA, motion encoder)
+- `configs/data.yaml` - Data generation config (intervals, predicates, body parts)
+
+Override via command line:
+```bash
+uv run scripts/generate_data.py num_samples=500 num_intervals=3
+uv run scripts/train_ibm.py training.learning_rate=1e-4
+```

@@ -1,32 +1,54 @@
-import abc
-import re
-import sys
-import dataclasses
+import os
 from functools import reduce
-import inspect
-from typing import Optional
+from typing import Callable
+from dataclasses import dataclass
 
 import torch
 import mujoco
-from dm_control.utils import rewards
+from lark import Lark, Transformer
 
-from exact.programs.utils import get_xpos
+# Body name mapping: program names -> MuJoCo body names
+BODY_NAMES = {
+    "pelvis": "Pelvis", "torso": "Torso", "spine": "Spine", "chest": "Chest",
+    "neck": "Neck", "head": "Head",
+    "lhip": "L_Hip", "lknee": "L_Knee", "lankle": "L_Ankle", "ltoe": "L_Toe",
+    "rhip": "R_Hip", "rknee": "R_Knee", "rankle": "R_Ankle", "rtoe": "R_Toe",
+    "lthorax": "L_Thorax", "lshoulder": "L_Shoulder", "lelbow": "L_Elbow",
+    "lwrist": "L_Wrist", "lhand": "L_Hand",
+    "rthorax": "R_Thorax", "rshoulder": "R_Shoulder", "relbow": "R_Elbow",
+    "rwrist": "R_Wrist", "rhand": "R_Hand",
+}
+
+AXIS_INDEX = {"x": 0, "y": 1, "z": 2}
+
+def get_joint_position(model: mujoco.MjModel, data: mujoco.MjData, joint: str) -> tuple:
+    index = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, joint)
+    assert index > -1, f"Joint {joint} not found in model"
+    return torch.tensor(data.xpos[index].copy(), dtype=torch.float32)
 
 
-class Reward(abc.ABC):
-    @abc.abstractmethod
-    def compute(
-        self,
-        model: mujoco.MjModel,
-        data: mujoco.MjData,
-    ) -> float:
-        ...
+def make_base_reward(body: str, axis: str, target: float, sigma: float = 1.0) -> Callable:
+    """Create a reward function for a single sensor."""
+    mujoco_body = BODY_NAMES[body]
+    axis_idx = AXIS_INDEX[axis]
+    
+    def reward_fn(model: mujoco.MjModel, data: mujoco.MjData) -> float:
+        value = get_joint_position(model, data, mujoco_body)[axis_idx]
+        return torch.exp(-((value - target) ** 2) / (2 * sigma ** 2))
+    
+    return reward_fn
 
-    @staticmethod
-    @abc.abstractmethod
-    def reward_from_name(name: str) -> Optional["Reward"]:
-        ...
 
+class SensorReward:
+    """Callable reward that can evaluate motion states."""
+    
+    def __init__(self, reward_fns: list[Callable]):
+        self.reward_fns = reward_fns
+    
+    def compute(self, model: mujoco.MjModel, data: mujoco.MjData) -> float:
+        """Compute combined reward (product of all predicates)."""
+        return reduce(lambda acc, fn: acc * fn(model, data), self.reward_fns, 1.0)
+    
     def __call__(
         self,
         model: mujoco.MjModel,
@@ -39,376 +61,54 @@ class Reward(abc.ABC):
         data.qvel[:] = qvel.detach().cpu().numpy()
         data.ctrl[:] = ctrl.detach().cpu().numpy()
         mujoco.mj_forward(model, data)
-        return torch.tensor(
-            self.compute(model, data), device=qpos.device, dtype=qpos.dtype
-        )
+        result = self.compute(model, data)
+        return torch.as_tensor(result, device=qpos.device, dtype=qpos.dtype)
+    
+
+@dataclass
+class MotionReward:
+    """Reward for a motion interval."""
+    start: int
+    end: int
+    sensor_reward: SensorReward
 
 
-@dataclasses.dataclass
-class PoseReward(Reward):
-    obj_body: str = "Head"
-    target_pose: float = 1.4
+@dataclass
+class Reward:
+    """Reward for ExAct program."""
+    motions: list[MotionReward]
 
-    @staticmethod
-    def get_pose_from_pattern(name: str, pattern: str) -> Optional[float]:
-        match = re.search(pattern, name)
-        if match:
-            target_pos = float(match.group(1))
-            return target_pos
-        return None
-
-    def compute(
-        self,
-        model: mujoco.MjModel,
-        data: mujoco.MjData,
-    ) -> float:
-        current_pos = get_xpos(model, data, name=self.obj_body)[-1]
-        return float(
-            rewards.tolerance(
-                current_pos,
-                bounds=(self.target_pose - 0.1, self.target_pose + 0.1),
-                margin=0.1,
-            )
-        )
-
-
-@dataclasses.dataclass
-class LHip(PoseReward):
-    obj_body: str = "L_Hip"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["LHip"]:
-        pattern = r"^lhip\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return LHip(target_pose=target_pos)
+    def get_reward_fn(self, timestep: int) -> SensorReward | None:
+        for motion in self.motions:
+            if motion.start <= timestep < motion.end:
+                return motion.sensor_reward
         return None
 
 
-@dataclasses.dataclass
-class LKnee(PoseReward):
-    obj_body: str = "L_Knee"
+class ProgramTransformer(Transformer):
+    """Transform parsed tree into reward objects."""
+    
+    def sensor(self, children):
+        # children: [JOINT token, AXIS token, REAL token]
+        joint, axis, value = children
+        return (str(joint), str(axis), float(value))
+    
+    def motion(self, children):
+        # children: [INT, INT, sensor tuples...]
+        start, end, *sensors = children
+        reward_fns = [make_base_reward(j, a, v) for j, a, v in sensors]
+        return MotionReward(int(start), int(end), SensorReward(reward_fns))
+    
+    def start(self, children):
+        return Reward(list(children))
+
+
+def parse_program(program: str, grm:str = "grammar.lark") -> Reward:
+    """Parse a program string into a Reward object."""
+    with open(os.path.join(os.path.dirname(__file__), grm), "r") as file:
+        grammar = file.read()
+    parser = Lark(grammar, start="start", parser="earley")
+    tree = parser.parse(program)
+
+    return ProgramTransformer().transform(tree)
 
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["LKnee"]:
-        pattern = r"^lknee\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return LKnee(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class LAnkle(PoseReward):
-    obj_body: str = "L_Ankle"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["LAnkle"]:
-        pattern = r"^lankle\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return LAnkle(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class LToe(PoseReward):
-    obj_body: str = "L_Toe"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["LToe"]:
-        pattern = r"^ltoe\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return LToe(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class RHip(PoseReward):
-    obj_body: str = "R_Hip"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["RHip"]:
-        pattern = r"^rhip\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return RHip(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class RKnee(PoseReward):
-    obj_body: str = "R_Knee"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["RKnee"]:
-        pattern = r"^rknee\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return RKnee(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class RAnkle(PoseReward):
-    obj_body: str = "R_Ankle"
-    target_pose: float = 0.5
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["RAnkle"]:
-        pattern = r"^rankle\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return RAnkle(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class RToe(PoseReward):
-    obj_body: str = "R_Toe"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["RToe"]:
-        pattern = r"^rtoe\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return RToe(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class Torso(PoseReward):
-    obj_body: str = "Torso"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["Torso"]:
-        pattern = r"^torso\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return Torso(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class Spine(PoseReward):
-    obj_body: str = "Spine"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["Spine"]:
-        pattern = r"^spine\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return Spine(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class Chest(PoseReward):
-    obj_body: str = "Chest"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["Chest"]:
-        pattern = r"^chest\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return Chest(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class Neck(PoseReward):
-    obj_body: str = "Neck"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["Neck"]:
-        pattern = r"^neck\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return Neck(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class Head(PoseReward):
-    obj_body: str = "Head"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["Head"]:
-        pattern = r"^head\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return Head(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class LThorax(PoseReward):
-    obj_body: str = "L_Thorax"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["LThorax"]:
-        pattern = r"^lthorax\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return LThorax(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class LShoulder(PoseReward):
-    obj_body: str = "L_Shoulder"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["LShoulder"]:
-        pattern = r"^lshoulder\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return LShoulder(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class LElbow(PoseReward):
-    obj_body: str = "L_Elbow"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["LElbow"]:
-        pattern = r"^lelbow\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return LElbow(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class LWrist(PoseReward):
-    obj_body: str = "L_Wrist"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["LWrist"]:
-        pattern = r"^lwrist\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return LWrist(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class LHand(PoseReward):
-    obj_body: str = "L_Hand"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["LHand"]:
-        pattern = r"^lhand\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return LHand(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class RThorax(PoseReward):
-    obj_body: str = "R_Thorax"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["RThorax"]:
-        pattern = r"^rthorax\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return RThorax(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class RShoulder(PoseReward):
-    obj_body: str = "R_Shoulder"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["RShoulder"]:
-        pattern = r"^rshoulder\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return RShoulder(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class RElbow(PoseReward):
-    obj_body: str = "R_Elbow"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["RElbow"]:
-        pattern = r"^relbow\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return RElbow(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class RWrist(PoseReward):
-    obj_body: str = "R_Wrist"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["RWrist"]:
-        pattern = r"^rwrist\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return RWrist(target_pose=target_pos)
-        return None
-
-
-@dataclasses.dataclass
-class RHand(PoseReward):
-    obj_body: str = "R_Hand"
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["RHand"]:
-        pattern = r"^rhand\((\d+\.?\d*)\)$"
-        target_pos = PoseReward.get_pose_from_pattern(name, pattern)
-        if target_pos is not None:
-            return RHand(target_pose=target_pos)
-        return None
-
-
-def make_from_name(
-    name: str | None = None,
-):
-    all_rewards = inspect.getmembers(
-        sys.modules["exact.programs.rewards"], inspect.isclass
-    )
-    for _, reward_cls in all_rewards:
-        if (
-            not inspect.isabstract(reward_cls)
-            and reward_cls is not RewardBuilder
-            and issubclass(reward_cls, Reward)
-        ):
-            reward_obj = reward_cls.reward_from_name(name)
-            if reward_obj is not None:
-                return reward_obj
-    raise ValueError(f"Unknown reward name: {name}")
-
-
-@dataclasses.dataclass
-class RewardBuilder(Reward):
-    """Combines multiple reward functions by multiplying their outputs."""
-
-    rewards: list[Reward]
-
-    def compute(
-        self,
-        model: mujoco.MjModel,
-        data: mujoco.MjData,
-    ) -> float:
-        return reduce(
-            lambda acc, reward_fn: acc * reward_fn.compute(model, data),
-            self.rewards,
-            1.0,
-        )
-
-    @staticmethod
-    def reward_from_name(name: str) -> Optional["RewardBuilder"]:
-        reward_parts = name.split("*")
-        rewards = [make_from_name(part) for part in reward_parts]
-        return RewardBuilder(rewards=rewards)

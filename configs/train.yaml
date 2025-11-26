@@ -8,26 +8,28 @@ training:
     alpha: 16           
     dropout: 0.05      
   motion_encoder:
-    motion_dim: 214  # Poses only (not including actions)
+    motion_dim: 214
     hidden_dim: 1024
     num_layers: 6
     num_prefix_tokens: 8
-  behaviour_model:
+  motion_model:
     name: facebook/metamotivo-M-1
     batch_size: 256
     max_episode_steps: 1000
+  train_data_path: train.hdf5
+  eval_data_path: null
   num_train_epochs: 10
   num_workers: 4
-  mx_seq_length: 512
+  max_seq_length: 512
   batch_size: 2
+  gradient_accumulation_steps: 4
   learning_rate: 5.0e-6
+  weight_decay: 0.01
   max_grad_norm: 1.0
   warmup_steps: 100
-  ce_weight: 1.0
-  ot_weight: 1.0
+  save_every: 5
 wandb:
   project: exact
   entity: assistive-autonomy
-  name: qwen-coder_${training.learning_rate}_${data.num_train_samples} 
+  name: parser-training
   mode: online
-
