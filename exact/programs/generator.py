@@ -60,6 +60,7 @@ def generate_program(
     The intervals are non-overlapping and cover the full time from 0 to max_timesteps.
     Interval sizes vary randomly but are at least min_interval_time.
     """
+    num_intervals = random.randint(1, num_intervals)
     if num_intervals * min_interval_time > max_timesteps:
         raise ValueError(f"Cannot fit {num_intervals} intervals of minimum size {min_interval_time} into {max_timesteps} timesteps")
     

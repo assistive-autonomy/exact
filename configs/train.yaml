@@ -1,23 +1,22 @@
 training:
   seed: 42
   model:
-    name: Qwen/Qwen2.5-Coder-3B-Instruct
-    tokenizer: Qwen/Qwen2.5-Coder-3B-Instruct
+    name: microsoft/phi-2
+    tokenizer: microsoft/phi-2
   lora:
     r: 8
     alpha: 16           
     dropout: 0.05      
   motion_encoder:
-    motion_dim: 214
-    hidden_dim: 1024
+    motion_dim: 69      # local_body_pos: 23 bodies * 3 axes
+    hidden_dim: 256
     num_layers: 6
     num_prefix_tokens: 8
   motion_model:
     name: facebook/metamotivo-M-1
     batch_size: 256
-    max_episode_steps: 1000
-  train_data_path: train.hdf5
-  eval_data_path: null
+  train_data_path: data/humenv/train.hdf5
+  eval_data_path: data/humenv/eval.hdf5
   num_train_epochs: 10
   num_workers: 4
   max_seq_length: 512
@@ -32,4 +31,4 @@ wandb:
   project: exact
   entity: assistive-autonomy
   name: parser-training
-  mode: online
+  mode: disabled

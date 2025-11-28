@@ -3,24 +3,23 @@ import os
 
 import hydra
 import torch
+from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from peft import LoraConfig, TaskType, get_peft_model
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import wandb
-from exact.data import Program2PoseDataset
-from exact.parser import MotionConditionedParser, TrajectoryEncoder
+from exact.data import TrajectoryGenerationDataset
+from exact.parser import MotionConditionedParser, TrajectoryEncoder, create_grammar_processor
 from exact.trainer import ParserTrainer
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="train")
 def main(cfg: DictConfig):
     """Train the motion-conditioned parser."""
-    print("=" * 80)
-    print("Training Configuration")
-    print("=" * 80)
-    print(OmegaConf.to_yaml(cfg))
+    logger.info("Training Configuration")
+    logger.info(f"\n{OmegaConf.to_yaml(cfg)}")
 
     # Set random seeds
     torch.manual_seed(cfg.training.seed)
@@ -28,7 +27,7 @@ def main(cfg: DictConfig):
         torch.cuda.manual_seed_all(cfg.training.seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"\nUsing device: {device}")
+    logger.info(f"Using device: {device}")
 
     # Initialize wandb
     wandb_enabled = cfg.wandb.mode != "disabled"
@@ -42,10 +41,15 @@ def main(cfg: DictConfig):
         )
 
     # Load tokenizer and model
-    print("\n[1/5] Loading model and tokenizer...")
+    logger.info("[1/5] Loading model and tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(cfg.training.model.tokenizer)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    
+    # Create grammar processor for constrained decoding
+    grammar_path = cfg.training.get("grammar_path", None)
+    grammar_processor = create_grammar_processor(tokenizer, grammar_path)
+    logger.info(f"Grammar processor created (path: {grammar_path or 'default'})")
 
     model = AutoModelForCausalLM.from_pretrained(
         cfg.training.model.name,
@@ -53,10 +57,10 @@ def main(cfg: DictConfig):
         device_map=device,
     )
     model_hidden_size = model.config.hidden_size
-    print(f"Model: {cfg.training.model.name}, hidden_size: {model_hidden_size}")
+    logger.info(f"Model: {cfg.training.model.name}, hidden_size: {model_hidden_size}")
 
     # Apply LoRA
-    print("\n[2/5] Applying LoRA...")
+    logger.info("[2/5] Applying LoRA...")
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=cfg.training.lora.r,
@@ -77,14 +81,15 @@ def main(cfg: DictConfig):
     model.print_trainable_parameters()
 
     # Initialize trajectory encoder
-    print("\n[3/5] Initializing trajectory encoder...")
+    logger.info("[3/5] Initializing trajectory encoder...")
+    model_dtype = torch.float16 if device == "cuda" else torch.float32
     trajectory_encoder = TrajectoryEncoder(
         trajectory_dim=cfg.training.motion_encoder.motion_dim,
         hidden_dim=cfg.training.motion_encoder.hidden_dim,
         output_dim=model_hidden_size,
         num_layers=cfg.training.motion_encoder.num_layers,
         num_prefix_tokens=cfg.training.motion_encoder.num_prefix_tokens,
-    ).to(device)
+    ).to(device, dtype=model_dtype)
 
     # Create motion-conditioned parser
     parser = MotionConditionedParser(
@@ -93,19 +98,19 @@ def main(cfg: DictConfig):
     )
 
     # Load datasets
-    print("\n[4/5] Loading datasets...")
+    logger.info("[4/5] Loading datasets...")
     train_data_path = cfg.training.train_data_path
     eval_data_path = cfg.training.get("eval_data_path", None)
 
     if not os.path.exists(train_data_path):
         raise FileNotFoundError(f"Training data not found: {train_data_path}")
 
-    train_dataset = Program2PoseDataset(
+    train_dataset = TrajectoryGenerationDataset(
         path=train_data_path,
         tokenizer=tokenizer,
         max_seq_length=cfg.training.max_seq_length,
     )
-    print(f"Loaded {len(train_dataset)} training samples")
+    logger.info(f"Loaded {len(train_dataset)} training samples")
 
     train_loader = DataLoader(
         train_dataset,
@@ -117,12 +122,12 @@ def main(cfg: DictConfig):
 
     eval_loader = None
     if eval_data_path and os.path.exists(eval_data_path):
-        eval_dataset = Program2PoseDataset(
+        eval_dataset = TrajectoryGenerationDataset(
             path=eval_data_path,
             tokenizer=tokenizer,
             max_seq_length=cfg.training.max_seq_length,
         )
-        print(f"Loaded {len(eval_dataset)} evaluation samples")
+        logger.info(f"Loaded {len(eval_dataset)} evaluation samples")
 
         eval_loader = DataLoader(
             eval_dataset,
@@ -133,7 +138,7 @@ def main(cfg: DictConfig):
         )
 
     # Setup optimizer and scheduler
-    print("\n[5/5] Setting up training...")
+    logger.info("[5/5] Setting up training...")
     optimizer = torch.optim.AdamW(
         [
             {"params": parser.trajectory_encoder.parameters()},
@@ -159,12 +164,13 @@ def main(cfg: DictConfig):
         optimizer=optimizer,
         scheduler=scheduler,
         device=device,
+        dtype=model_dtype,
         gradient_accumulation_steps=cfg.training.get("gradient_accumulation_steps", 4),
         max_grad_norm=cfg.training.max_grad_norm,
     )
 
     # Training loop
-    print("\nStarting training...")
+    logger.info("Starting training...")
     output_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
     checkpoints_dir = os.path.join(output_dir, "checkpoints")
     os.makedirs(checkpoints_dir, exist_ok=True)
@@ -177,14 +183,18 @@ def main(cfg: DictConfig):
             epoch,
             logger=wandb if wandb_enabled else None,
         )
-        print(f"Epoch {epoch} - Train Loss: {train_metrics['loss']:.4f}")
+        logger.info(f"Epoch {epoch} - Train Loss: {train_metrics['loss']:.4f}")
 
         if eval_loader is not None:
             eval_metrics = trainer.evaluate(
                 eval_loader,
+                tokenizer=tokenizer,
+                grammar_processor=grammar_processor,
                 logger=wandb if wandb_enabled else None,
             )
-            print(f"Epoch {epoch} - Eval Loss: {eval_metrics['loss']:.4f}")
+            logger.info(f"Epoch {epoch} - Eval Loss: {eval_metrics['loss']:.4f}")
+            if "validity_rate" in eval_metrics:
+                logger.info(f"Epoch {epoch} - Validity Rate: {eval_metrics['validity_rate']:.2%}")
 
             # Save best model
             if eval_metrics["loss"] < best_eval_loss:
@@ -193,7 +203,7 @@ def main(cfg: DictConfig):
                     os.path.join(checkpoints_dir, "best_model.pt"),
                     epoch,
                 )
-                print(f"  -> New best model saved!")
+                logger.success("New best model saved!")
 
         # Save periodic checkpoint
         if epoch % cfg.training.get("save_every", 5) == 0:
@@ -217,7 +227,7 @@ def main(cfg: DictConfig):
     # Save LoRA adapter
     model.save_pretrained(os.path.join(output_dir, "lora_adapter"))
 
-    print(f"\nTraining complete! Models saved to: {output_dir}")
+    logger.success(f"Training complete! Models saved to: {output_dir}")
 
     if wandb_enabled:
         wandb.finish()

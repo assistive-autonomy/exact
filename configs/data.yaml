@@ -1,14 +1,15 @@
 name: train
 seed: 42
 num_samples: 10
+render: false
 min_preds: 1
 max_preds: 5
 min_value: 0.0
 max_value: 2.0
 value_step: 0.1
-num_motion_steps: 1000
-num_intervals: 2
-min_interval_time: 100
+num_motion_steps: 600
+num_intervals: 30
+min_interval_time: 10
 allowed_parts:
   - pelvis
   - torso

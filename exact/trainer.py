@@ -1,11 +1,11 @@
-"""Trainer module for motion-conditioned parser."""
-import os
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+from syncode import SyncodeLogitsProcessor
 
 
 class ParserTrainer:
@@ -17,6 +17,7 @@ class ParserTrainer:
         optimizer: torch.optim.Optimizer,
         scheduler=None,
         device: str = "cuda",
+        dtype: torch.dtype = torch.float32,
         gradient_accumulation_steps: int = 1,
         max_grad_norm: float = 1.0,
     ):
@@ -24,6 +25,7 @@ class ParserTrainer:
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.device = device
+        self.dtype = dtype
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.max_grad_norm = max_grad_norm
         self.global_step = 0
@@ -57,7 +59,7 @@ class ParserTrainer:
         for step, batch in enumerate(progress_bar):
             input_ids = batch["input_ids"].to(self.device)
             attention_mask = batch["attention_mask"].to(self.device)
-            poses = batch["poses"].to(self.device)
+            local_body_pos = batch["local_body_pos"].to(self.device, dtype=self.dtype)
 
             # Labels are input_ids shifted (model handles internally)
             labels = input_ids.clone()
@@ -65,7 +67,7 @@ class ParserTrainer:
             outputs = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                motion=poses,
+                motion=local_body_pos,
                 labels=labels,
             )
 
@@ -109,12 +111,16 @@ class ParserTrainer:
     def evaluate(
         self,
         eval_loader: DataLoader,
+        tokenizer=None,
+        grammar_processor: SyncodeLogitsProcessor | None = None,
         logger=None,
     ) -> dict:
         """Evaluate the model.
         
         Args:
             eval_loader: DataLoader for evaluation data
+            tokenizer: Tokenizer for decoding generated programs
+            grammar_processor: SyncodeLogitsProcessor for grammar-constrained generation
             logger: Optional logger
             
         Returns:
@@ -130,35 +136,56 @@ class ParserTrainer:
             leave=False,
         )
 
+        num_valid_programs = 0
+        total_samples = 0
+        
         for batch in progress_bar:
             input_ids = batch["input_ids"].to(self.device)
             attention_mask = batch["attention_mask"].to(self.device)
-            poses = batch["poses"].to(self.device)
+            local_body_pos = batch["local_body_pos"].to(self.device, dtype=self.dtype)
             labels = input_ids.clone()
 
             outputs = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                motion=poses,
+                motion=local_body_pos,
                 labels=labels,
             )
 
             total_loss += outputs.loss.item()
             num_batches += 1
+            total_samples += input_ids.shape[0]
+            
+            # Generate with grammar constraints if processor is provided
+            if grammar_processor is not None and tokenizer is not None:
+                generated_ids = self.model.generate(
+                    motion=local_body_pos,
+                    max_new_tokens=128,
+                    grammar_processor=grammar_processor,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+                # All grammar-constrained outputs are valid by construction
+                num_valid_programs += generated_ids.shape[0]
 
             progress_bar.set_postfix({"loss": f"{outputs.loss.item():.4f}"})
 
         avg_loss = total_loss / num_batches
+        validity_rate = num_valid_programs / total_samples if grammar_processor is not None else None
 
+        metrics = {"loss": avg_loss}
+        if validity_rate is not None:
+            metrics["validity_rate"] = validity_rate
+        
         if logger is not None:
-            logger.log({
+            log_dict = {
                 "eval/loss": avg_loss,
                 "eval/step": self.global_step,
-            })
+            }
+            if validity_rate is not None:
+                log_dict["eval/validity_rate"] = validity_rate
+            logger.log(log_dict)
 
-        return {
-            "loss": avg_loss,
-        }
+        return metrics
 
     def save_checkpoint(self, path: str, epoch: int):
         """Save model checkpoint.

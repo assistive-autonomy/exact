@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 
 
@@ -15,6 +15,7 @@ class DataConfig(BaseModel):
     num_intervals: int
     min_interval_time: int
     allowed_parts: List[str]
+    render: bool = False
 
 
 class LoraConfig(BaseModel):
@@ -38,8 +39,6 @@ class ModelConfig(BaseModel):
 class MotionModelConfig(BaseModel):
     name: str
     batch_size: int
-    max_episode_steps: int
-
 
 class TrainingConfig(BaseModel):
     seed: int
@@ -47,15 +46,19 @@ class TrainingConfig(BaseModel):
     lora: LoraConfig
     motion_encoder: MotionEncoderConfig
     motion_model: MotionModelConfig
+    train_data_path: str
+    eval_data_path: Optional[str] = None
+    grammar_path: Optional[str] = None
     num_train_epochs: int
     num_workers: int
-    mx_seq_length: int
+    max_seq_length: int
     batch_size: int
+    gradient_accumulation_steps: int = 4
     learning_rate: float
+    weight_decay: float = 0.01
     max_grad_norm: float
     warmup_steps: int
-    ce_weight: float
-    ot_weight: float
+    save_every: int = 5
 
 
 class WandbConfig(BaseModel):
@@ -68,7 +71,3 @@ class WandbConfig(BaseModel):
 class ExperimentConfig(BaseModel):
     training: TrainingConfig
     wandb: WandbConfig
-
-
-# Backward compatibility
-BehaviourModelConfig = MotionModelConfig

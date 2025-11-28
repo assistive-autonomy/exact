@@ -1,6 +1,37 @@
-"""Parser module: motion-conditioned program generation."""
+from pathlib import Path
+
 import torch
 import torch.nn as nn
+
+from syncode import SyncodeLogitsProcessor, Grammar
+
+DEFAULT_GRAMMAR_PATH = Path(__file__).parent / "programs" / "grammar.lark"
+
+
+def create_grammar_processor(
+    tokenizer,
+    grammar_path: str | Path | None = None,
+) -> SyncodeLogitsProcessor:
+    """Create a SynCode logits processor for grammar-constrained decoding.
+    
+    Args:
+        tokenizer: HuggingFace tokenizer
+        grammar_path: Path to .lark grammar file (default: exact/programs/grammar.lark)
+        
+    Returns:
+        SyncodeLogitsProcessor configured with the grammar
+    """
+    if grammar_path is None:
+        grammar_path = DEFAULT_GRAMMAR_PATH
+    
+    grammar_str = Path(grammar_path).read_text()
+    grammar = Grammar(grammar_str)
+    
+    return SyncodeLogitsProcessor(
+        grammar=grammar,
+        tokenizer=tokenizer,
+        parse_output_only=True,
+    )
 
 
 class TrajectoryEncoder(nn.Module):
@@ -122,6 +153,7 @@ class MotionConditionedParser(nn.Module):
         self,
         motion: torch.Tensor,
         max_new_tokens: int = 128,
+        grammar_processor: SyncodeLogitsProcessor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """Generate program from motion sequence.
@@ -129,11 +161,17 @@ class MotionConditionedParser(nn.Module):
         Args:
             motion: [batch_size, motion_len, motion_dim] motion sequence
             max_new_tokens: maximum tokens to generate
+            grammar_processor: SyncodeLogitsProcessor for grammar-constrained decoding
             
         Returns:
             generated_ids: [batch_size, generated_len]
         """
         motion_embeddings = self.trajectory_encoder(motion)
+        
+        # Reset grammar processor state if provided
+        if grammar_processor is not None:
+            grammar_processor.reset()
+            kwargs["logits_processor"] = kwargs.get("logits_processor", []) + [grammar_processor]
 
         return self.model.generate(
             inputs_embeds=motion_embeddings,

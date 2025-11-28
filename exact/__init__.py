@@ -4,8 +4,8 @@ from exact.programs import Reward, generate_program, parse_program
 from exact.config import DataConfig
 from exact.parser import TrajectoryEncoder, MotionConditionedParser
 from exact.trainer import ParserTrainer
-from exact.data import Program2PoseDataset
-from exact.trajectories import motion_generation, trajectory_generation
+from exact.data import TrajectoryGenerationDataset
+from exact.generation import generate_motion, generate_trajectory
 
 __all__ = [
     "HumEnv",
@@ -17,7 +17,7 @@ __all__ = [
     "TrajectoryEncoder",
     "MotionConditionedParser",
     "ParserTrainer",
-    "Program2PoseDataset",
-    "motion_generation",
-    "trajectory_generation",
+    "TrajectoryGenerationDataset",
+    "generate_motion",
+    "generate_trajectory",
 ]
