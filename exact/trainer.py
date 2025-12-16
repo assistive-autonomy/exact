@@ -37,12 +37,12 @@ class ParserTrainer:
         logger=None,
     ) -> dict:
         """Train for one epoch.
-        
+
         Args:
             train_loader: DataLoader for training data
             epoch: Current epoch number
             logger: Optional WandB or other logger
-            
+
         Returns:
             Dictionary with training metrics
         """
@@ -88,17 +88,21 @@ class ParserTrainer:
                 self.optimizer.zero_grad()
                 self.global_step += 1
 
-            progress_bar.set_postfix({
-                "loss": f"{outputs.loss.item():.4f}",
-                "avg_loss": f"{total_loss / num_batches:.4f}",
-            })
+            progress_bar.set_postfix(
+                {
+                    "loss": f"{outputs.loss.item():.4f}",
+                    "avg_loss": f"{total_loss / num_batches:.4f}",
+                }
+            )
 
             if logger is not None and self.global_step % 10 == 0:
-                logger.log({
-                    "train/loss": outputs.loss.item(),
-                    "train/lr": self.optimizer.param_groups[0]["lr"],
-                    "train/step": self.global_step,
-                })
+                logger.log(
+                    {
+                        "train/loss": outputs.loss.item(),
+                        "train/lr": self.optimizer.param_groups[0]["lr"],
+                        "train/step": self.global_step,
+                    }
+                )
 
         avg_loss = total_loss / num_batches
 
@@ -116,13 +120,13 @@ class ParserTrainer:
         logger=None,
     ) -> dict:
         """Evaluate the model.
-        
+
         Args:
             eval_loader: DataLoader for evaluation data
             tokenizer: Tokenizer for decoding generated programs
             grammar_processor: SyncodeLogitsProcessor for grammar-constrained generation
             logger: Optional logger
-            
+
         Returns:
             Dictionary with evaluation metrics
         """
@@ -138,7 +142,7 @@ class ParserTrainer:
 
         num_valid_programs = 0
         total_samples = 0
-        
+
         for batch in progress_bar:
             input_ids = batch["input_ids"].to(self.device)
             attention_mask = batch["attention_mask"].to(self.device)
@@ -155,7 +159,7 @@ class ParserTrainer:
             total_loss += outputs.loss.item()
             num_batches += 1
             total_samples += input_ids.shape[0]
-            
+
             # Generate with grammar constraints if processor is provided
             if grammar_processor is not None and tokenizer is not None:
                 generated_ids = self.model.generate(
@@ -170,12 +174,16 @@ class ParserTrainer:
             progress_bar.set_postfix({"loss": f"{outputs.loss.item():.4f}"})
 
         avg_loss = total_loss / num_batches
-        validity_rate = num_valid_programs / total_samples if grammar_processor is not None else None
+        validity_rate = (
+            num_valid_programs / total_samples
+            if grammar_processor is not None
+            else None
+        )
 
         metrics = {"loss": avg_loss}
         if validity_rate is not None:
             metrics["validity_rate"] = validity_rate
-        
+
         if logger is not None:
             log_dict = {
                 "eval/loss": avg_loss,
@@ -189,7 +197,7 @@ class ParserTrainer:
 
     def save_checkpoint(self, path: str, epoch: int):
         """Save model checkpoint.
-        
+
         Args:
             path: Path to save checkpoint
             epoch: Current epoch number
@@ -208,10 +216,10 @@ class ParserTrainer:
 
     def load_checkpoint(self, path: str):
         """Load model checkpoint.
-        
+
         Args:
             path: Path to checkpoint file
-            
+
         Returns:
             Epoch number from checkpoint
         """

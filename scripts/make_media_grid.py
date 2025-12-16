@@ -1,4 +1,4 @@
-"""Create a 5x2 grid GIF from videos in the media folder."""
+"""Create a 5x1 grid GIF from videos in the media folder."""
 import argparse
 from pathlib import Path
 
@@ -9,11 +9,13 @@ from loguru import logger
 from tqdm import tqdm
 
 
-def load_video_frames(video_path: str, max_frames: int | None = None) -> list[np.ndarray]:
+def load_video_frames(
+    video_path: str, max_frames: int | None = None
+) -> list[np.ndarray]:
     """Load frames from a video file."""
     cap = cv2.VideoCapture(video_path)
     frames = []
-    
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -21,10 +23,10 @@ def load_video_frames(video_path: str, max_frames: int | None = None) -> list[np
         # Convert BGR to RGB
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frames.append(frame)
-        
+
         if max_frames and len(frames) >= max_frames:
             break
-    
+
     cap.release()
     return frames
 
@@ -43,25 +45,25 @@ def create_grid_frame(
     """Create a single grid frame from multiple videos at a given frame index."""
     rows, cols = grid_shape
     cell_w, cell_h = cell_size
-    
+
     grid = np.zeros((rows * cell_h, cols * cell_w, 3), dtype=np.uint8)
-    
+
     for i, frames in enumerate(video_frames):
         if i >= rows * cols:
             break
-            
+
         row = i // cols
         col = i % cols
-        
+
         # Get frame (loop if video is shorter)
         if len(frames) > 0:
             f_idx = frame_idx % len(frames)
             frame = resize_frame(frames[f_idx], cell_size)
-            
+
             y_start = row * cell_h
             x_start = col * cell_w
-            grid[y_start:y_start + cell_h, x_start:x_start + cell_w] = frame
-    
+            grid[y_start : y_start + cell_h, x_start : x_start + cell_w] = frame
+
     return grid
 
 
@@ -82,7 +84,7 @@ def main():
     parser.add_argument(
         "--rows",
         type=int,
-        default=2,
+        default=1,
         help="Number of rows in grid",
     )
     parser.add_argument(
@@ -124,28 +126,27 @@ def main():
     args = parser.parse_args()
 
     media_dir = Path(args.media_dir)
-    
+
     # Find all video files
     video_extensions = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
-    video_files = sorted([
-        f for f in media_dir.iterdir()
-        if f.suffix.lower() in video_extensions
-    ])
-    
+    video_files = sorted(
+        [f for f in media_dir.iterdir() if f.suffix.lower() in video_extensions]
+    )
+
     if not video_files:
         logger.warning(f"No video files found in {media_dir}")
         return
-    
+
     logger.info(f"Found {len(video_files)} videos")
     for v in video_files:
         logger.debug(f"  - {v.name}")
-    
+
     # Limit to grid size
     max_videos = args.rows * args.cols
     if len(video_files) > max_videos:
         logger.info(f"Using first {max_videos} videos for {args.rows}x{args.cols} grid")
         video_files = video_files[:max_videos]
-    
+
     # Load all video frames
     logger.info("Loading videos...")
     all_video_frames = []
@@ -153,18 +154,18 @@ def main():
         frames = load_video_frames(str(video_path), args.max_frames)
         all_video_frames.append(frames)
         logger.debug(f"  {video_path.name}: {len(frames)} frames")
-    
+
     # Find the longest video
     max_frame_count = max(len(f) for f in all_video_frames)
     if args.max_frames:
         max_frame_count = min(max_frame_count, args.max_frames)
-    
+
     logger.info(f"Creating {args.rows}x{args.cols} grid with {max_frame_count} frames")
-    
+
     # Create grid frames
     cell_size = (args.cell_width, args.cell_height)
     grid_shape = (args.rows, args.cols)
-    
+
     grid_frames = []
     for frame_idx in tqdm(range(max_frame_count), desc="Creating grid"):
         grid_frame = create_grid_frame(
@@ -174,12 +175,12 @@ def main():
             cell_size,
         )
         grid_frames.append(grid_frame)
-    
+
     # Save as GIF
     logger.info(f"Saving GIF to {args.output}")
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     duration = 1000 / args.fps  # milliseconds per frame
     imageio.mimsave(
         str(output_path),
@@ -188,9 +189,10 @@ def main():
         duration=duration,
         loop=args.loop,
     )
-    
-    
-    logger.success(f"Done! Grid size: {args.cols * args.cell_width}x{args.rows * args.cell_height}")
+
+    logger.success(
+        f"Done! Grid size: {args.cols * args.cell_width}x{args.rows * args.cell_height}"
+    )
 
 
 if __name__ == "__main__":

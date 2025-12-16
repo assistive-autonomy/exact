@@ -13,20 +13,20 @@ def create_grammar_processor(
     grammar_path: str | Path | None = None,
 ) -> SyncodeLogitsProcessor:
     """Create a SynCode logits processor for grammar-constrained decoding.
-    
+
     Args:
         tokenizer: HuggingFace tokenizer
         grammar_path: Path to .lark grammar file (default: exact/programs/grammar.lark)
-        
+
     Returns:
         SyncodeLogitsProcessor configured with the grammar
     """
     if grammar_path is None:
         grammar_path = DEFAULT_GRAMMAR_PATH
-    
+
     grammar_str = Path(grammar_path).read_text()
     grammar = Grammar(grammar_str)
-    
+
     return SyncodeLogitsProcessor(
         grammar=grammar,
         tokenizer=tokenizer,
@@ -66,10 +66,10 @@ class TrajectoryEncoder(nn.Module):
 
     def forward(self, motion: torch.Tensor) -> torch.Tensor:
         """Encode motion sequence into prefix embeddings.
-        
+
         Args:
             motion: [batch_size, seq_len, trajectory_dim]
-            
+
         Returns:
             embeddings: [batch_size, num_prefix_tokens, output_dim]
         """
@@ -106,13 +106,13 @@ class MotionConditionedParser(nn.Module):
         labels: torch.Tensor = None,
     ):
         """Forward pass with motion conditioning.
-        
+
         Args:
             input_ids: [batch_size, seq_len] token ids
             attention_mask: [batch_size, seq_len] attention mask
             motion: [batch_size, motion_len, motion_dim] motion sequence
             labels: [batch_size, seq_len] target labels (optional)
-            
+
         Returns:
             Model outputs with loss if labels provided
         """
@@ -157,21 +157,23 @@ class MotionConditionedParser(nn.Module):
         **kwargs,
     ) -> torch.Tensor:
         """Generate program from motion sequence.
-        
+
         Args:
             motion: [batch_size, motion_len, motion_dim] motion sequence
             max_new_tokens: maximum tokens to generate
             grammar_processor: SyncodeLogitsProcessor for grammar-constrained decoding
-            
+
         Returns:
             generated_ids: [batch_size, generated_len]
         """
         motion_embeddings = self.trajectory_encoder(motion)
-        
+
         # Reset grammar processor state if provided
         if grammar_processor is not None:
             grammar_processor.reset()
-            kwargs["logits_processor"] = kwargs.get("logits_processor", []) + [grammar_processor]
+            kwargs["logits_processor"] = kwargs.get("logits_processor", []) + [
+                grammar_processor
+            ]
 
         return self.model.generate(
             inputs_embeds=motion_embeddings,

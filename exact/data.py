@@ -11,14 +11,14 @@ from exact.env import OBS_SLICES
 
 class TrajectoryGenerationDataset(Dataset):
     """Dataset for program-to-pose pairs from HDF5 files.
-    
+
     HDF5 format:
         motion_{i}/motion: numpy array of shape (T, 358 + 69)
             - First 358 dims: observation (use local_body_pos slice 1:70)
             - Last 69 dims: action
         motion_{i}.attrs['program']: program string
     """
-    
+
     def __init__(
         self,
         path: str,
@@ -26,7 +26,7 @@ class TrajectoryGenerationDataset(Dataset):
         max_seq_length: int = 512,
     ):
         """Initialize dataset from HDF5 file.
-        
+
         Args:
             path: Path to HDF5 file
             tokenizer: Tokenizer for encoding programs
@@ -35,40 +35,40 @@ class TrajectoryGenerationDataset(Dataset):
         self.path = path
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
-        
+
         # Get local_body_pos slice indices
         self.pos_start, self.pos_end = OBS_SLICES["local_body_pos"]
-        
+
         # Load the HDF5 file and extract data
         self.programs: List[str] = []
         self.local_body_pos: List[torch.Tensor] = []
         self.actions: List[torch.Tensor] = []
-        
-        with h5py.File(path, 'r') as f:
+
+        with h5py.File(path, "r") as f:
             for key in f.keys():
-                motion = f[key]['motion'][()]
-                program = f[key].attrs['program']
-                
+                motion = f[key]["motion"][()]
+                program = f[key].attrs["program"]
+
                 # Extract local_body_pos from obs (dims 1:70 of first 358)
                 obs = motion[..., :358]
-                local_pos = obs[..., self.pos_start:self.pos_end]
-                
+                local_pos = obs[..., self.pos_start : self.pos_end]
+
                 # Extract actions (last 69 dims)
                 action = motion[..., 358:]
-                
+
                 self.programs.append(program)
                 self.local_body_pos.append(torch.tensor(local_pos, dtype=torch.float32))
                 self.actions.append(torch.tensor(action, dtype=torch.float32))
-        
+
     def __len__(self) -> int:
         return len(self.programs)
-    
+
     def __getitem__(self, idx: int) -> dict:
         """Get a single sample.
-        
+
         Args:
             idx: Sample index
-            
+
         Returns:
             Dictionary with:
                 - input_ids: tokenized program (max_seq_length,)
@@ -79,19 +79,19 @@ class TrajectoryGenerationDataset(Dataset):
         program = self.programs[idx]
         local_pos = self.local_body_pos[idx]
         action = self.actions[idx]
-        
+
         # Tokenize the program
         encoded = self.tokenizer(
             program,
-            padding='max_length',
+            padding="max_length",
             truncation=True,
             max_length=self.max_seq_length,
-            return_tensors='pt'
+            return_tensors="pt",
         )
-        
+
         return {
-            'input_ids': encoded['input_ids'].squeeze(0),
-            'attention_mask': encoded['attention_mask'].squeeze(0),
-            'local_body_pos': local_pos,
-            'actions': action,
+            "input_ids": encoded["input_ids"].squeeze(0),
+            "attention_mask": encoded["attention_mask"].squeeze(0),
+            "local_body_pos": local_pos,
+            "actions": action,
         }

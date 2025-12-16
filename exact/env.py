@@ -5,20 +5,20 @@ from gymnasium.wrappers import FlattenObservation
 
 # Observation slices for SMPL humanoid (total 358 dims)
 OBS_SLICES = {
-    "root_h_obs": (0, 1),           # 1 dim
-    "local_body_pos": (1, 70),      # 69 dims (23 bodies * 3)
-    "local_body_rot_obs": (70, 214), # 144 dims (24 bodies * 6)
-    "local_body_vel": (214, 286),   # 72 dims (24 bodies * 3)
-    "local_body_ang_vel": (286, 358), # 72 dims (24 bodies * 3)
+    "root_h_obs": (0, 1),  # 1 dim
+    "local_body_pos": (1, 70),  # 69 dims (23 bodies * 3)
+    "local_body_rot_obs": (70, 214),  # 144 dims (24 bodies * 6)
+    "local_body_vel": (214, 286),  # 72 dims (24 bodies * 3)
+    "local_body_ang_vel": (286, 358),  # 72 dims (24 bodies * 3)
 }
 
 
 def unpack_obs(obs: np.ndarray) -> dict[str, np.ndarray]:
     """Unpack flattened observation into named components.
-    
+
     Args:
         obs: Flattened observation array of shape (358,) or (batch, 358)
-        
+
     Returns:
         Dictionary with named observation components:
             - root_h_obs: (1,) or (batch, 1)
@@ -35,20 +35,23 @@ def unpack_obs(obs: np.ndarray) -> dict[str, np.ndarray]:
 
 def pack_obs(obs_dict: dict[str, np.ndarray]) -> np.ndarray:
     """Pack observation dictionary back into flattened array.
-    
+
     Args:
         obs_dict: Dictionary with named observation components
-        
+
     Returns:
         Flattened observation array of shape (358,) or (batch, 358)
     """
-    return np.concatenate([
-        obs_dict["root_h_obs"],
-        obs_dict["local_body_pos"],
-        obs_dict["local_body_rot_obs"],
-        obs_dict["local_body_vel"],
-        obs_dict["local_body_ang_vel"],
-    ], axis=-1)
+    return np.concatenate(
+        [
+            obs_dict["root_h_obs"],
+            obs_dict["local_body_pos"],
+            obs_dict["local_body_rot_obs"],
+            obs_dict["local_body_vel"],
+            obs_dict["local_body_ang_vel"],
+        ],
+        axis=-1,
+    )
 
 
 class HumEnv:

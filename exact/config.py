@@ -40,6 +40,7 @@ class MotionModelConfig(BaseModel):
     name: str
     batch_size: int
 
+
 class TrainingConfig(BaseModel):
     seed: int
     model: ModelConfig

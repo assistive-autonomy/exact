@@ -50,7 +50,7 @@ class BehaviourModel:
         )
         rewards = torch.tensor(rewards, device=self.device, dtype=torch.float32)
         return self.model.reward_wr_inference(batch["next_observation"], rewards)
- 
+
     def act(self, obs: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         """Get action from observation and latent z."""
         return self.model.act(obs, z)

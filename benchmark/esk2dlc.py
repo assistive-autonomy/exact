@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Convert ESK pose data for DLC2Action."""
+
+import ast
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from loguru import logger
+
+# Configure logger
+logger.remove()
+logger.add(lambda msg: print(msg, end=""), format="<level>{message}</level>")
+
+# SMPL keypoint names (24 keypoints)
+SMPL_KEYPOINTS = [
+    "Pelvis",
+    "L_Hip",
+    "L_Knee",
+    "L_Ankle",
+    "L_Toe",
+    "R_Hip",
+    "R_Knee",
+    "R_Ankle",
+    "R_Toe",
+    "Torso",
+    "Spine",
+    "Chest",
+    "Neck",
+    "Head",
+    "L_Thorax",
+    "L_Shoulder",
+    "L_Elbow",
+    "L_Wrist",
+    "L_Hand",
+    "R_Thorax",
+    "R_Shoulder",
+    "R_Elbow",
+    "R_Wrist",
+    "R_Hand",
+]
+
+
+def extract_episode_info(file_path: Path) -> tuple[str, str, str] | None:
+    """
+    Extract split, subject, and datetime from file path.
+
+    Path format: annotations_dir/split/subject/datetime/...
+
+    Returns:
+        Tuple of (split, subject, datetime) or None if extraction fails
+    """
+    parts = file_path.parts
+
+    # Find split folder (train or test)
+    split_name = None
+    split_idx = None
+    for i, part in enumerate(parts):
+        if part in ["train", "test"]:
+            split_name = part
+            split_idx = i
+            break
+
+    if split_idx is None or split_idx + 2 >= len(parts):
+        return None
+
+    subject = parts[split_idx + 1]
+    datetime = parts[split_idx + 2]
+
+    return split_name, subject, datetime
+
+
+def convert_pose_file(pose_file: Path, output_path: Path) -> bool:
+    """
+    Convert a single pose3d_smpl.csv file to HDF5 format.
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Extract episode info from path
+        episode_info = extract_episode_info(pose_file)
+        if episode_info is None:
+            logger.warning(f"Could not determine subject/datetime for: {pose_file}")
+            return False
+
+        split_name, subject, datetime_formatted = episode_info
+        # Individual ID should be the full video ID for proper annotation matching
+        individual_id = f"{subject}_{datetime_formatted}"
+
+        # Read pose data from CSV
+        pose_df = pd.read_csv(pose_file)
+        poses_list = pose_df["poses"].apply(ast.literal_eval).tolist()
+        pose_array = np.array(poses_list, dtype=np.float32)
+
+        n_frames, n_params = pose_array.shape
+        n_keypoints = len(SMPL_KEYPOINTS)
+        expected_size = n_keypoints * 3  # 24 * 3 = 72
+
+        # Pad or trim to expected size
+        if n_params < expected_size:
+            pose_padded = np.pad(
+                pose_array, ((0, 0), (0, expected_size - n_params)), mode="constant"
+            )
+        else:
+            pose_padded = pose_array[:, :expected_size]
+
+        # Reshape to (frames, keypoints, 3)
+        pose_array = pose_padded.reshape(n_frames, n_keypoints, 3)
+
+        # Create likelihood column based on coordinate variance
+        # Padded coordinates (0, 0, 0) get low likelihood, real coordinates get high likelihood
+        # This adds variance needed for DLC2Action's feature importance calculations
+        likelihood = np.ones((n_frames, n_keypoints, 1), dtype=np.float32)
+        for kp in range(n_keypoints):
+            # If all coords are 0 (padded), likelihood is low; otherwise high
+            is_zero = (pose_array[:, kp, 0] == 0) & (pose_array[:, kp, 1] == 0) & (pose_array[:, kp, 2] == 0)
+            likelihood[is_zero, kp, 0] = 0.1
+        
+        pose_with_likelihood = np.concatenate([pose_array, likelihood], axis=-1)
+
+        # Reshape to (frames, keypoints * 4) for DataFrame
+        pose_reshaped = pose_with_likelihood.reshape(n_frames, -1)
+
+        # Create MultiIndex columns for DLC2Action format
+        individuals = [individual_id]
+        columnindex = pd.MultiIndex.from_product(
+            [["ESK"], individuals, SMPL_KEYPOINTS, ["x", "y", "z", "likelihood"]],
+            names=["scorer", "individuals", "bodyparts", "coords"],
+        )
+
+        df_pose = pd.DataFrame(pose_reshaped, columns=columnindex)
+
+        # Save as HDF5
+        pose_suffix = "_pose3d_smpl.h5"
+        pose_filename = f"{individual_id}{pose_suffix}"
+        pose_h5_file = output_path / "D2A_converted_pose_smpl" / pose_filename
+        df_pose.to_hdf(pose_h5_file, key="tracks", format="table", mode="w")
+
+        logger.info(f"✓ Pose converted: {subject}/{datetime_formatted}")
+        logger.info(f"  → Saved: D2A_converted_pose_smpl/{pose_filename}")
+        return True
+
+    except Exception as e:
+        logger.error(f"✗ Failed to convert pose: {pose_file}")
+        logger.error(f"  Error: {str(e)}")
+        return False
+
+
+def main(annotations_dir: str = "data/esk", output_dir: str = "data/esk_30") -> None:
+    """
+    Convert ESK pose data for DLC2Action.
+
+    Creates esk_30/D2A_converted_pose_smpl/ folder with HDF5 pose files.
+
+    Args:
+        annotations_dir: Path to the annotations directory
+        output_dir: Path to the output directory
+    """
+    annotations_path = Path(annotations_dir)
+    output_path = Path(output_dir)
+
+    if not annotations_path.exists():
+        logger.error(f"Annotations directory not found: {annotations_dir}")
+        return
+
+    # Create output directory structure
+    (output_path / "D2A_converted_pose_smpl").mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"Created DLC poses directory at {output_path}/D2A_converted_pose_smpl\n")
+
+    # Process pose files
+    pose_files = sorted(list(annotations_path.rglob("pose3d_smpl.csv")))
+    logger.info(f"Found {len(pose_files)} pose files to convert")
+    poses_converted = sum(convert_pose_file(f, output_path) for f in pose_files)
+    poses_failed = len(pose_files) - poses_converted
+
+    # Print summary
+    logger.info(f"\n{'='*60}")
+    logger.info("Conversion complete!")
+    logger.info(f"  Pose files: {poses_converted} converted, {poses_failed} failed")
+    logger.info(f"  Output directory: {output_path}/D2A_converted_pose_smpl")
+    logger.info(f"{'='*60}\n")
+
+
+if __name__ == "__main__":
+    main()

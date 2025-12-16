@@ -5,11 +5,15 @@ description = "Learning and Reasoning with Executable Activity Models"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "dlc2action",
     "hydra-core>=1.3.0",
+    "imageio>=2.37.2",
+    "ipywidgets>=8.1.8",
     "lark>=1.3.1",
     "loguru>=0.7.3",
     "mediapy>=1.2.4",
     "metamotivo[all]",
+    "opencv-python>=4.12.0.88",
     "pandas>=2.3.3",
     "peft>=0.8.0",
     "pydantic>=2.0.0",
@@ -35,6 +39,7 @@ filterwarnings = [
 
 [tool.uv.sources]
 metamotivo = { git = "https://github.com/facebookresearch/metamotivo.git" }
+dlc2action = {git = "https://github.com/amathislab/DLC2action.git"}
 
 [tool.setuptools.package-dir]
 exact = "exact"

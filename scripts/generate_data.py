@@ -10,6 +10,7 @@ from exact.programs import generate_program, parse_program
 from exact.generation import generate_trajectory
 from exact.config import DataConfig
 
+
 @hydra.main(version_base=None, config_path="../configs", config_name="data")
 def main(cfg: DataConfig):
     logger.info(f"Generating {cfg.name} data")
@@ -42,23 +43,26 @@ def main(cfg: DataConfig):
     logger.info("Generating trajectories...")
     with h5py.File(f"{cfg.name}.hdf5", "w") as f:
         from tqdm import tqdm
+
         for i, (program, reward) in tqdm(
             enumerate(zip(programs, rewards)),
             total=len(programs),
             desc="Generating samples",
         ):
             obs, actions = generate_trajectory(
-                model, 
-                reward, 
-                device=device, 
-                render=cfg.render, 
-                render_path=f"media/{cfg.name}_sample_{i}.mp4" if cfg.render else None
+                model,
+                reward,
+                device=device,
+                render=cfg.render,
+                render_path=f"media/{cfg.name}_sample_{i}.mp4" if cfg.render else None,
             )
-            
+
             motion_data = torch.cat([obs, actions], dim=-1)
 
             grp = f.create_group(f"motion_{i}")
-            grp.create_dataset("motion", data=motion_data.cpu().numpy().astype(np.float32))
+            grp.create_dataset(
+                "motion", data=motion_data.cpu().numpy().astype(np.float32)
+            )
             grp.attrs["program"] = program
 
     logger.info(f"Data saved to {cfg.name}.hdf5")

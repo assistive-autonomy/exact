@@ -11,7 +11,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import wandb
 from exact.data import TrajectoryGenerationDataset
-from exact.parser import MotionConditionedParser, TrajectoryEncoder, create_grammar_processor
+from exact.parser import (
+    MotionConditionedParser,
+    TrajectoryEncoder,
+    create_grammar_processor,
+)
 from exact.trainer import ParserTrainer
 
 
@@ -45,7 +49,7 @@ def main(cfg: DictConfig):
     tokenizer = AutoTokenizer.from_pretrained(cfg.training.model.tokenizer)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
+
     # Create grammar processor for constrained decoding
     grammar_path = cfg.training.get("grammar_path", None)
     grammar_processor = create_grammar_processor(tokenizer, grammar_path)
@@ -194,7 +198,9 @@ def main(cfg: DictConfig):
             )
             logger.info(f"Epoch {epoch} - Eval Loss: {eval_metrics['loss']:.4f}")
             if "validity_rate" in eval_metrics:
-                logger.info(f"Epoch {epoch} - Validity Rate: {eval_metrics['validity_rate']:.2%}")
+                logger.info(
+                    f"Epoch {epoch} - Validity Rate: {eval_metrics['validity_rate']:.2%}"
+                )
 
             # Save best model
             if eval_metrics["loss"] < best_eval_loss:
