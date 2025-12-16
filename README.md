@@ -1,6 +1,9 @@
 # EXACT: Executable Activity Models
 
-Learning inverse motion models that map motion sequences to reward programs using supervised fine-tuning with PEFT/LoRA.
+![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)
+![Ubuntu 22.04](https://img.shields.io/badge/ubuntu-22.04-orange.svg)
+
+Learning inverse motion models that map motion sequences to executable activity programs using supervised fine-tuning with PEFT/LoRA. The system supports both synthetic motion data generation and real-world pose data from the ESK dataset.
 
 ## Installation
 
@@ -14,75 +17,39 @@ pip install -e .
 
 ## Quick Start
 
-### 1. Generate Training Data
+### 1. Generate Synthetic Training Data
 
 ```bash
-# Training data
+# Training data (1000 motion-program pairs)
 uv run scripts/generate_data.py name=train num_samples=1000
 
-# Evaluation data  
+# Evaluation data (200 pairs)
 uv run scripts/generate_data.py name=eval num_samples=200
 ```
 
-Creates `train.hdf5` and `eval.hdf5` with motion-program pairs.
+Creates `train.hdf5` and `eval.hdf5` with motion-program pairs from synthetic environment.
 
-### 2. Train Inverse Motion Model
+### 2. Train Parser
 
 ```bash
-# Basic training
-uv run scripts/train_ibm.py
+# Basic training (from synthetic data)
+uv run scripts/train_parser.py
 
 # With custom parameters
-uv run scripts/train_ibm.py \
+uv run scripts/train_parser.py \
     training.num_train_epochs=20 \
     training.learning_rate=1e-5 \
     wandb.mode=disabled
 ```
 
-## Architecture
+Trains LoRA-adapted language model to predict activity programs from motion sequences.
 
-- **Motion Model**: Pre-trained MetaMotivo model that generates motion from reward programs
-- **Inverse Motion Model**: LLM fine-tuned with LoRA + motion encoder to predict programs from motion
-- **Reward Programs**: Time-indexed predicates specifying body part positions over intervals
+### 3. Train on Real ESK Pose Data (Optional)
 
-## Reward Program Grammar
-
-Programs consist of time-indexed motions separated by commas:
-
-```
-[start,end]sensor*sensor*...,[start,end]sensor*sensor*...
-```
-
-Each sensor specifies a body part, axis, and target value:
-```
-body_part.axis(value)
-```
-
-**Example:**
-```
-[0,500]head.z(1.4)*lhand.x(0.5),[500,1000]pelvis.y(0.8)
-```
-
-This means:
-- Timesteps 0-500: head at z=1.4m, left hand at x=0.5m
-- Timesteps 500-1000: pelvis at y=0.8m
-
-**Components:**
-- **Body parts** (23): `pelvis`, `torso`, `spine`, `chest`, `neck`, `head`, `lhip`, `lknee`, `lankle`, `ltoe`, `rhip`, `rknee`, `rankle`, `rtoe`, `lthorax`, `lshoulder`, `lelbow`, `lwrist`, `lhand`, `rthorax`, `rshoulder`, `relbow`, `rwrist`, `rhand`
-- **Axes**: `x`, `y`, `z`
-- **Values**: floating point with decimal (e.g., `1.4`, `-0.5`)
-
-### Tolerance Function
-
-Reward uses Gaussian tolerance: $r = \exp\left(-\frac{(h - t)^2}{2\sigma^2}\right)$ where $\sigma = 1.0$
-
-## Configuration
-
-- `configs/train.yaml` - Training config (model, LoRA, motion encoder)
-- `configs/data.yaml` - Data generation config (intervals, predicates, body parts)
-
-Override via command line:
 ```bash
-uv run scripts/generate_data.py num_samples=500 num_intervals=3
-uv run scripts/train_ibm.py training.learning_rate=1e-4
+# Convert ESK poses to DLC2Action format
+uv run exps/esk2dlc.py --annotations-dir data/esk --output-dir data/esk_30
+
+# Run DLC2Action training pipeline
+uv run exps/workflow.py
 ```
