@@ -2,7 +2,6 @@
 .vscode
 outputs
 notebooks
-data
 cache
 multirun  # Hydra multi-run outputs
 out
