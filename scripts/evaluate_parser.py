@@ -11,6 +11,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from exact.parser import MotionConditionedParser, TrajectoryEncoder
+from exact.parser.utils import create_grammar_processor
 
 
 def load_model(checkpoint_dir: str, device: str = "cuda"):
@@ -109,6 +110,7 @@ def predict(
     max_new_tokens: int = 256,
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
+    grammar_processor=None,
 ) -> str:
     """Generate program prediction from motion.
 
@@ -119,6 +121,7 @@ def predict(
         max_new_tokens: Maximum tokens to generate
         device: Device
         dtype: Model dtype
+        grammar_processor: SyncodeLogitsProcessor for grammar-constrained decoding
 
     Returns:
         Predicted program string
@@ -132,6 +135,7 @@ def predict(
             do_sample=False,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
+            grammar_processor=grammar_processor,
         )
 
     predicted = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
@@ -146,6 +150,7 @@ def evaluate_dataset(
     max_new_tokens: int = 256,
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
+    grammar_processor=None,
 ):
     """Evaluate model on dataset and write results to CSV.
 
@@ -157,6 +162,7 @@ def evaluate_dataset(
         max_new_tokens: Maximum tokens to generate
         device: Device
         dtype: Model dtype
+        grammar_processor: SyncodeLogitsProcessor for grammar-constrained decoding
     """
     logger.info(f"Loading data from: {h5_path}")
     data = load_data(h5_path)
@@ -165,7 +171,7 @@ def evaluate_dataset(
     results = []
     for motion, target_program, key in tqdm(data, desc="Predicting"):
         predicted_program = predict(
-            model, tokenizer, motion, max_new_tokens, device, dtype
+            model, tokenizer, motion, max_new_tokens, device, dtype, grammar_processor
         )
         exact_match = predicted_program == target_program
         results.append({
@@ -239,13 +245,17 @@ def main():
     model, tokenizer, config, model_dtype = load_model(args.checkpoint, args.device)
     logger.info("Model loaded successfully")
 
+    # Create grammar processor for constrained decoding
+    logger.info("Creating grammar processor...")
+    grammar_processor = create_grammar_processor(tokenizer)
+
     # Evaluate on training data
     if os.path.exists(args.train_data):
         train_csv = os.path.join(output_dir, "predictions_train.csv")
         logger.info(f"Evaluating on training data: {args.train_data}")
         evaluate_dataset(
             model, tokenizer, args.train_data, train_csv,
-            args.max_new_tokens, args.device, model_dtype
+            args.max_new_tokens, args.device, model_dtype, grammar_processor
         )
     else:
         logger.warning(f"Training data not found: {args.train_data}")
@@ -256,7 +266,7 @@ def main():
         logger.info(f"Evaluating on evaluation data: {args.eval_data}")
         evaluate_dataset(
             model, tokenizer, args.eval_data, eval_csv,
-            args.max_new_tokens, args.device, model_dtype
+            args.max_new_tokens, args.device, model_dtype, grammar_processor
         )
     else:
         logger.warning(f"Evaluation data not found: {args.eval_data}")
