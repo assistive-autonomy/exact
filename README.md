@@ -3,8 +3,6 @@
 ![Python 3.10](https://img.shields.io/badge/python-3.10-blue.svg)
 ![Ubuntu 22.04](https://img.shields.io/badge/ubuntu-22.04-orange.svg)
 
-Learning inverse motion models that map motion sequences to executable activity programs.
-
 ## Installation
 
 ```bash
