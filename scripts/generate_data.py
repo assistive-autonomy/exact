@@ -1,72 +1,73 @@
-import torch
-import hydra
-from loguru import logger
-from omegaconf import OmegaConf
+"""Generate synthetic motion-program training data."""
+import argparse
+from pathlib import Path
+
 import h5py
 import numpy as np
+import torch
+from loguru import logger
+from tqdm import tqdm
 
 from exact.bm import BehaviourModel
 from exact.programs import generate_program, parse_program
-from exact.generation import generate_trajectory
-from exact.config import DataConfig
+from exact.data.utils import generate_trajectory
+
+# Body parts available for program generation
+BODY_PARTS = [
+    "pelvis", "torso", "spine", "chest", "neck", "head",
+    "lhip", "lknee", "lankle", "ltoe",
+    "rhip", "rknee", "rankle", "rtoe",
+    "lthorax", "lshoulder", "lelbow", "lwrist", "lhand",
+    "rthorax", "rshoulder", "relbow", "rwrist", "rhand",
+]
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="data")
-def main(cfg: DataConfig):
-    logger.info(f"Generating {cfg.name} data")
-    logger.info(OmegaConf.to_yaml(cfg))
+def main():
+    parser = argparse.ArgumentParser(description="Generate synthetic motion-program data")
+    parser.add_argument("--name", type=str, default="train", help="Dataset name (train/eval)")
+    parser.add_argument("--num-samples", type=int, default=1000, help="Number of samples")
+    parser.add_argument("--output-dir", type=str, default=".", help="Output directory")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    args = parser.parse_args()
 
-    torch.manual_seed(cfg.seed)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = BehaviourModel(device=device)
+    logger.info(f"Generating {args.name} data with {args.num_samples} samples")
+    torch.manual_seed(args.seed)
 
-    # Pre-generate all programs
+    # Program generation parameters (fixed, opinionated defaults)
+    program_kwargs = dict(
+        min_preds=1,
+        max_preds=5,
+        min_value=0.0,
+        max_value=2.0,
+        value_step=0.1,
+        allowed_parts=BODY_PARTS,
+        max_timesteps=600,
+        num_intervals=30,
+        min_interval_time=10,
+    )
+
     logger.info("Generating programs...")
-    programs = []
-    rewards = []
-    for _ in range(cfg.num_samples):
-        program = generate_program(
-            min_preds=cfg.min_preds,
-            max_preds=cfg.max_preds,
-            min_value=cfg.min_value,
-            max_value=cfg.max_value,
-            value_step=cfg.value_step,
-            allowed_parts=cfg.allowed_parts,
-            max_timesteps=cfg.num_motion_steps,
-            num_intervals=cfg.num_intervals,
-            min_interval_time=cfg.min_interval_time,
-        )
-        programs.append(program)
-        rewards.append(parse_program(program))
+    programs = [generate_program(**program_kwargs) for _ in range(args.num_samples)]
 
-    # Generate trajectories and save to HDF5
-    logger.info("Generating trajectories...")
-    with h5py.File(f"{cfg.name}.hdf5", "w") as f:
-        from tqdm import tqdm
+    output_path = Path(args.output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    hdf5_path = output_path / f"{args.name}.h5"
 
-        for i, (program, reward) in tqdm(
-            enumerate(zip(programs, rewards)),
-            total=len(programs),
-            desc="Generating samples",
-        ):
-            obs, actions = generate_trajectory(
-                model,
-                reward,
-                device=device,
-                render=cfg.render,
-                render_path=f"media/{cfg.name}_sample_{i}.mp4" if cfg.render else None,
-            )
+    logger.info(f"Generating trajectories and saving to {hdf5_path}")
+    model = BehaviourModel(device="cpu")
 
-            motion_data = torch.cat([obs, actions], dim=-1)
+    with h5py.File(str(hdf5_path), "w") as f:
+        for idx, program in tqdm(enumerate(programs), total=len(programs), desc="Generating"):
+            reward = parse_program(program)
+            obs, _ = generate_trajectory(model, reward, device="cpu")
 
-            grp = f.create_group(f"motion_{i}")
-            grp.create_dataset(
-                "motion", data=motion_data.cpu().numpy().astype(np.float32)
-            )
+            grp = f.create_group(f"motion_{idx}")
+            grp.create_dataset("motion", data=obs.cpu().numpy().astype(np.float32))
             grp.attrs["program"] = program
 
-    logger.info(f"Data saved to {cfg.name}.hdf5")
+    logger.info(f"Done! Saved {args.num_samples} samples to {hdf5_path}")
 
 
 if __name__ == "__main__":
     main()
+

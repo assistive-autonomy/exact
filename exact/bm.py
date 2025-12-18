@@ -1,4 +1,3 @@
-"""Motion model using pre-trained MetaMotivo."""
 import h5py
 import torch
 from huggingface_hub import hf_hub_download
@@ -6,19 +5,14 @@ from metamotivo.fb_cpr.huggingface import FBcprModel
 from metamotivo.buffers.buffers import DictBuffer
 from metamotivo.wrappers.humenvbench import relabel
 
-from exact.env import HumEnv
+from exact.data import HumEnv
 from exact.programs import SensorReward
 
 
 class BehaviourModel:
     """Generates motions from reward programs using pre-trained MetaMotivo model."""
 
-    def __init__(
-        self,
-        model_name: str = "facebook/metamotivo-M-1",
-        batch_size: int = 256,
-        device: str = "cuda",
-    ):
+    def __init__(self, model_name: str = "facebook/metamotivo-M-1", batch_size: int = 256, device: str = "cpu"):
         self.model_name = model_name
         self.batch_size = batch_size
         self.device = device

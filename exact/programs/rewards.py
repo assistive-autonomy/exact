@@ -45,15 +45,20 @@ def get_joint_position(model: mujoco.MjModel, data: mujoco.MjData, joint: str) -
 
 
 def make_base_reward(
-    body: str, axis: str, target: float, sigma: float = 1.0
+    body: str, axis: str, target: float
 ) -> Callable:
-    """Create a reward function for a single sensor."""
+    """Create a reward function for a single sensor using sigmoid activation.
+    
+    Reward is computed as sigmoid of the negated distance between current value and target.
+    This provides smooth activation based on proximity to the target position.
+    """
     mujoco_body = BODY_NAMES[body]
     axis_idx = AXIS_INDEX[axis]
 
     def reward_fn(model: mujoco.MjModel, data: mujoco.MjData) -> float:
         value = get_joint_position(model, data, mujoco_body)[axis_idx]
-        return torch.exp(-((value - target) ** 2) / (2 * sigma ** 2))
+        distance = torch.abs(value - target)
+        return torch.sigmoid(-distance)
 
     return reward_fn
 

@@ -1,16 +1,9 @@
-#!/usr/bin/env python3
-"""Convert ESK pose data for DLC2Action."""
-
 import ast
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from loguru import logger
-
-# Configure logger
-logger.remove()
-logger.add(lambda msg: print(msg, end=""), format="<level>{message}</level>")
 
 # SMPL keypoint names (24 keypoints)
 SMPL_KEYPOINTS = [
@@ -147,7 +140,7 @@ def convert_pose_file(pose_file: Path, output_path: Path) -> bool:
         return False
 
 
-def main(annotations_dir: str = "data/esk", output_dir: str = "data/esk_30") -> None:
+def main(annotations_dir: str = "/pvc/esk_annotations", output_dir: str = "/pvc/esk") -> None:
     """
     Convert ESK pose data for DLC2Action.
 
