@@ -81,7 +81,7 @@ def load_model(checkpoint_dir: str, device: str = "cuda"):
     )
     model.eval()
 
-    return model, tokenizer, config
+    return model, tokenizer, config, model_dtype
 
 
 def load_data(h5_path: str):
@@ -108,6 +108,7 @@ def predict(
     motion: torch.Tensor,
     max_new_tokens: int = 256,
     device: str = "cuda",
+    dtype: torch.dtype = torch.bfloat16,
 ) -> str:
     """Generate program prediction from motion.
 
@@ -117,11 +118,12 @@ def predict(
         motion: Motion tensor of shape (T, motion_dim)
         max_new_tokens: Maximum tokens to generate
         device: Device
+        dtype: Model dtype
 
     Returns:
         Predicted program string
     """
-    motion = motion.unsqueeze(0).to(device)
+    motion = motion.unsqueeze(0).to(device=device, dtype=dtype)
 
     with torch.no_grad():
         generated_ids = model.generate(
@@ -143,6 +145,7 @@ def evaluate_dataset(
     output_csv: str,
     max_new_tokens: int = 256,
     device: str = "cuda",
+    dtype: torch.dtype = torch.bfloat16,
 ):
     """Evaluate model on dataset and write results to CSV.
 
@@ -153,6 +156,7 @@ def evaluate_dataset(
         output_csv: Path to output CSV file
         max_new_tokens: Maximum tokens to generate
         device: Device
+        dtype: Model dtype
     """
     logger.info(f"Loading data from: {h5_path}")
     data = load_data(h5_path)
@@ -161,7 +165,7 @@ def evaluate_dataset(
     results = []
     for motion, target_program, key in tqdm(data, desc="Predicting"):
         predicted_program = predict(
-            model, tokenizer, motion, max_new_tokens, device
+            model, tokenizer, motion, max_new_tokens, device, dtype
         )
         exact_match = predicted_program == target_program
         results.append({
@@ -232,7 +236,7 @@ def main():
 
     # Load model
     logger.info("Loading model...")
-    model, tokenizer, config = load_model(args.checkpoint, args.device)
+    model, tokenizer, config, model_dtype = load_model(args.checkpoint, args.device)
     logger.info("Model loaded successfully")
 
     # Evaluate on training data
@@ -241,7 +245,7 @@ def main():
         logger.info(f"Evaluating on training data: {args.train_data}")
         evaluate_dataset(
             model, tokenizer, args.train_data, train_csv,
-            args.max_new_tokens, args.device
+            args.max_new_tokens, args.device, model_dtype
         )
     else:
         logger.warning(f"Training data not found: {args.train_data}")
@@ -252,7 +256,7 @@ def main():
         logger.info(f"Evaluating on evaluation data: {args.eval_data}")
         evaluate_dataset(
             model, tokenizer, args.eval_data, eval_csv,
-            args.max_new_tokens, args.device
+            args.max_new_tokens, args.device, model_dtype
         )
     else:
         logger.warning(f"Evaluation data not found: {args.eval_data}")
