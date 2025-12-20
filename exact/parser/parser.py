@@ -88,6 +88,14 @@ class MotionConditionedParser(nn.Module):
         """
         motion_embeddings = self.trajectory_encoder(motion)
 
+        # Create attention mask for motion embeddings (all ones since no padding)
+        attention_mask = torch.ones(
+            motion_embeddings.shape[0],
+            motion_embeddings.shape[1],
+            dtype=torch.long,
+            device=motion.device,
+        )
+
         # Reset grammar processor state if provided
         if grammar_processor is not None:
             grammar_processor.reset()
@@ -97,6 +105,7 @@ class MotionConditionedParser(nn.Module):
 
         return self.model.generate(
             inputs_embeds=motion_embeddings,
+            attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
             **kwargs,
         )
