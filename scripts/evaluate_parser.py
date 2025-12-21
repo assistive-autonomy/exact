@@ -35,9 +35,7 @@ def load_model(checkpoint_dir: str, device: str = "cuda"):
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
-    # Determine dtype
-    use_bf16 = config.get("bf16", True) and torch.cuda.is_bf16_supported() and device == "cuda"
-    model_dtype = torch.bfloat16 if use_bf16 else torch.float32
+    model_dtype = torch.float32
 
     # Load tokenizer and base model
     logger.info(f"Loading base model: {config['model_name']}")
@@ -48,8 +46,7 @@ def load_model(checkpoint_dir: str, device: str = "cuda"):
     base_model = AutoModelForCausalLM.from_pretrained(
         config["model_name"],
         torch_dtype=model_dtype,
-        device_map="auto",
-    )
+    ).to(device)
     model_hidden_size = base_model.config.hidden_size
 
     # Load LoRA adapter
@@ -79,6 +76,7 @@ def load_model(checkpoint_dir: str, device: str = "cuda"):
     model = MotionConditionedParser(
         model=base_model,
         trajectory_encoder=trajectory_encoder,
+        tokenizer=tokenizer,
     )
     model.eval()
 

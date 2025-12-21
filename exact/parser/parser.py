@@ -1,9 +1,21 @@
 import torch
 import torch.nn as nn
+from transformers import PreTrainedTokenizer
 
 from syncode import SyncodeLogitsProcessor
 
 from .encoder import TrajectoryEncoder
+
+# Default system prompt describing the motion-to-program task
+DEFAULT_SYSTEM_PROMPT = """You are a motion analysis assistant. Given a human motion sequence represented as a context vector, generate a program that describes the motion using sensor observations.
+
+The program format uses temporal segments [start, end] with joint sensor readings:
+- Joints: pelvis, torso, spine, chest, neck, head, lhip, lknee, lankle, ltoe, rhip, rknee, rankle, rtoe, lthorax, lshoulder, lelbow, lwrist, lhand, rthorax, rshoulder, relbow, rwrist, rhand
+- Axes: x, y, z
+- Example: [0,30] head.y(1.65) * rwrist.z(0.45); [30,60] pelvis.y(0.80)
+
+Generate a program that accurately captures the key motion patterns:"""
+
 
 class MotionConditionedParser(nn.Module):
     """LLM with motion prefix conditioning for program generation."""
@@ -12,11 +24,40 @@ class MotionConditionedParser(nn.Module):
         self,
         model,
         trajectory_encoder: TrajectoryEncoder,
+        tokenizer: PreTrainedTokenizer = None,
     ):
         super().__init__()
 
         self.model = model
         self.trajectory_encoder = trajectory_encoder
+        self.tokenizer = tokenizer
+        self.system_prompt = DEFAULT_SYSTEM_PROMPT
+
+    def _get_system_prompt_embeds(self, batch_size: int, device: torch.device):
+        """Get system prompt embeddings.
+        
+        Returns:
+            system_embeds: [batch_size, prompt_len, hidden_dim]
+            system_mask: [batch_size, prompt_len]
+        """
+        if self.tokenizer is None or not self.system_prompt:
+            return None, None
+        
+        # Tokenize system prompt
+        encoded = self.tokenizer(
+            self.system_prompt,
+            return_tensors="pt",
+            add_special_tokens=True,
+        )
+        prompt_ids = encoded["input_ids"].to(device)
+        prompt_mask = encoded["attention_mask"].to(device)
+        
+        # Get embeddings and expand for batch
+        prompt_embeds = self.model.get_input_embeddings()(prompt_ids)
+        prompt_embeds = prompt_embeds.expand(batch_size, -1, -1)
+        prompt_mask = prompt_mask.expand(batch_size, -1)
+        
+        return prompt_embeds, prompt_mask
 
     def forward(
         self,
@@ -36,25 +77,41 @@ class MotionConditionedParser(nn.Module):
         Returns:
             Model outputs with loss if labels provided
         """
+        batch_size = motion.shape[0]
+        device = motion.device
+        
+        # Get embeddings
         motion_embeddings = self.trajectory_encoder(motion)
         token_embeds = self.model.get_input_embeddings()(input_ids)
-        inputs_embeds = torch.cat([motion_embeddings, token_embeds], dim=1)
+        system_embeds, system_mask = self._get_system_prompt_embeds(batch_size, device)
+        
+        # Build inputs: [system_prompt] + [motion] + [tokens]
+        if system_embeds is not None:
+            inputs_embeds = torch.cat([system_embeds, motion_embeddings, token_embeds], dim=1)
+            prefix_len = system_embeds.shape[1] + motion_embeddings.shape[1]
+        else:
+            inputs_embeds = torch.cat([motion_embeddings, token_embeds], dim=1)
+            prefix_len = motion_embeddings.shape[1]
 
+        # Build attention mask
         motion_mask = torch.ones(
-            motion_embeddings.shape[0],
+            batch_size,
             motion_embeddings.shape[1],
             dtype=torch.long,
-            device=motion.device,
+            device=device,
         )
-        full_attention_mask = torch.cat([motion_mask, attention_mask], dim=1)
+        if system_mask is not None:
+            full_attention_mask = torch.cat([system_mask, motion_mask, attention_mask], dim=1)
+        else:
+            full_attention_mask = torch.cat([motion_mask, attention_mask], dim=1)
 
-        # Prepare labels: mask out motion prefix tokens
+        # Prepare labels: mask out system prompt and motion prefix tokens
         if labels is not None:
             prefix_labels = torch.full(
-                (motion_embeddings.shape[0], motion_embeddings.shape[1]),
+                (batch_size, prefix_len),
                 -100,
                 dtype=torch.long,
-                device=motion.device,
+                device=device,
             )
             full_labels = torch.cat([prefix_labels, labels], dim=1)
         else:
@@ -86,15 +143,30 @@ class MotionConditionedParser(nn.Module):
         Returns:
             generated_ids: [batch_size, generated_len]
         """
+        batch_size = motion.shape[0]
+        device = motion.device
+        
         motion_embeddings = self.trajectory_encoder(motion)
-
-        # Create attention mask for motion embeddings (all ones since no padding)
-        attention_mask = torch.ones(
-            motion_embeddings.shape[0],
-            motion_embeddings.shape[1],
-            dtype=torch.long,
-            device=motion.device,
-        )
+        system_embeds, system_mask = self._get_system_prompt_embeds(batch_size, device)
+        
+        # Build inputs: [system_prompt] + [motion]
+        if system_embeds is not None:
+            inputs_embeds = torch.cat([system_embeds, motion_embeddings], dim=1)
+            motion_mask = torch.ones(
+                batch_size,
+                motion_embeddings.shape[1],
+                dtype=torch.long,
+                device=device,
+            )
+            attention_mask = torch.cat([system_mask, motion_mask], dim=1)
+        else:
+            inputs_embeds = motion_embeddings
+            attention_mask = torch.ones(
+                batch_size,
+                motion_embeddings.shape[1],
+                dtype=torch.long,
+                device=device,
+            )
 
         # Reset grammar processor state if provided
         if grammar_processor is not None:
@@ -104,7 +176,7 @@ class MotionConditionedParser(nn.Module):
             ]
 
         return self.model.generate(
-            inputs_embeds=motion_embeddings,
+            inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
             **kwargs,

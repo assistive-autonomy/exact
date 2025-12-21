@@ -1,5 +1,9 @@
 """Train the motion-conditioned parser using HuggingFace Trainer."""
 import os
+import warnings
+
+# Suppress DataParallel scalar gather warning
+warnings.filterwarnings("ignore", message="Was asked to gather along dimension 0")
 
 import hydra
 import torch
@@ -46,8 +50,7 @@ def main(cfg: DictConfig):
         torch.cuda.manual_seed_all(cfg.seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    use_bf16 = cfg.get("bf16", True) and torch.cuda.is_bf16_supported() and device == "cuda"
-    model_dtype = torch.bfloat16 if use_bf16 else torch.float32
+    model_dtype = torch.float32
     logger.info(f"Using device: {device}, dtype: {model_dtype}")
 
     # Initialize wandb
@@ -68,8 +71,7 @@ def main(cfg: DictConfig):
     base_model = AutoModelForCausalLM.from_pretrained(
         cfg.model_name,
         torch_dtype=model_dtype,
-        device_map="auto",
-    )
+    ).to(device)
     model_hidden_size = base_model.config.hidden_size
     logger.info(f"Model: {cfg.model_name}, hidden_size: {model_hidden_size}")
 
@@ -100,6 +102,7 @@ def main(cfg: DictConfig):
     model = MotionConditionedParser(
         model=base_model,
         trajectory_encoder=trajectory_encoder,
+        tokenizer=tokenizer,
     )
 
     # Load datasets
@@ -142,12 +145,12 @@ def main(cfg: DictConfig):
         save_total_limit=cfg.save_total_limit,
         load_best_model_at_end=cfg.load_best_model_at_end if eval_dataset else False,
         metric_for_best_model=cfg.metric_for_best_model,
-        bf16=use_bf16,
         dataloader_num_workers=cfg.dataloader_num_workers,
         dataloader_pin_memory=device == "cuda",
         report_to="wandb" if cfg.wandb_mode != "disabled" else "none",
         seed=cfg.seed,
         remove_unused_columns=False,  # Important: keep motion column
+        save_safetensors=False,  # Avoid issues with tied weights (embed_tokens/lm_head)
     )
 
     # Initialize trainer

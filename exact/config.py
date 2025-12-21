@@ -44,7 +44,6 @@ class TrainConfig:
     save_total_limit: int = 2
     load_best_model_at_end: bool = True
     metric_for_best_model: str = "eval_loss"
-    bf16: bool = True
     report_to: str = "wandb"
     
     # Logging
