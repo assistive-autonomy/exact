@@ -1,6 +1,6 @@
 project:
-  project_name: esk
-  projects_path: dlc2a_benchmark
+  project_name: esk_verbs
+  projects_path: /pvc/dlc2a_benchmark
   data_type: dlc_track
   annotation_type: dlc
   data_path: /pvc/esk/D2A_converted_pose_smpl
@@ -41,7 +41,7 @@ training:
   temporal_subsampling_size: 0.85
   parallel: false
   partition_method: file
-  split_path: esk_split.txt
+  split_path: /pvc/esk/traintest_split.txt
 
 losses:
   ms_tcn:
@@ -58,7 +58,14 @@ metrics:
 features:
   keys:
     - coords
-  averaging_window: 25
+    - speed_joints
+    - acc_joints
+    - angle
+    - intra_distance
+    - coord_diff
+    - center
+    - speed_direction
+  averaging_window: 1
   distance_pairs: null
   angle_pairs: null
   zone_vertices: null
@@ -77,7 +84,9 @@ hyperparameter_search_metric: f1
 num_seeds: 3
 models:
   - c2f_tcn
-  - ms_tcn
+  # - c2f_transformer
+  # - ms_tcn3
+  # - edtcn
 output_dir: results
 training_curves_path: training_curves.png
 results_table_path: results.csv
