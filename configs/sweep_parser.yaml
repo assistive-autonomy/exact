@@ -1,4 +1,4 @@
-program: scripts/train_parser.py
+program: scripts/parser.py
 method: bayes
 metric:
   name: eval/loss

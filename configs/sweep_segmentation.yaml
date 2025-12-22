@@ -1,0 +1,45 @@
+# Wandb Sweep: Activity Segmentation (DLC2Action)
+
+program: scripts/segmentation.py
+method: bayes
+metric:
+  name: f1
+  goal: maximize
+
+parameters:
+  # Model architecture
+  general.model_name:
+    values: [c2f_tcn, ms_tcn]
+  general.len_segment:
+    values: [512, 1024, 2048]
+  general.overlap:
+    values: [0.5, 0.75, 0.9]
+
+  # Training
+  training.lr:
+    distribution: log_uniform_values
+    min: 1.0e-4
+    max: 1.0e-2
+  training.num_epochs:
+    values: [30, 50, 100]
+  training.batch_size:
+    values: [32, 64, 128]
+  training.temporal_subsampling_size:
+    distribution: uniform
+    min: 0.7
+    max: 1.0
+
+  # Loss configuration
+  losses.ms_tcn.gamma:
+    values: [1, 2, 3]
+  losses.ms_tcn.alpha:
+    distribution: log_uniform_values
+    min: 1.0e-4
+    max: 1.0e-2
+
+command:
+  - ${env}
+  - uv
+  - run
+  - ${program}
+  - ${args_no_hyphens}

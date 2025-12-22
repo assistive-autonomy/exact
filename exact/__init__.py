@@ -5,6 +5,9 @@ from exact.config import TrainConfig
 from exact.parser import TrajectoryEncoder, MotionConditionedParser
 from exact.data.utils import generate_motion, generate_trajectory
 
+# Anomaly detection subpackage
+from exact import anomaly
+
 __all__ = [
     "HumEnv",
     "BehaviourModel",
@@ -17,6 +20,7 @@ __all__ = [
     "TrajectoryGenerationDataset",
     "generate_motion",
     "generate_trajectory",
+    "anomaly",
 ]
 
 

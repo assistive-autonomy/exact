@@ -1,17 +1,16 @@
+# Activity Segmentation Configuration (DLC2Action)
+
 project:
   project_name: esk_verbs
-  projects_path: /pvc/dlc2a_benchmark
+  projects_path: dlc2a_benchmark
   data_type: dlc_track
   annotation_type: dlc
-  data_path: /pvc/esk/D2A_converted_pose_smpl
-  annotation_path: /pvc/esk/D2A_converted_label_verbs
+  data_path: esk/D2A_converted_pose_smpl
+  annotation_path: esk/D2A_converted_label_verbs
 
 general:
   model_name: c2f_tcn
-  metric_functions:
-    - precision
-    - recall
-    - f1
+  metric_functions: [precision, recall, f1]
   ignored_clips: null
   len_segment: 1028
   overlap: 0.75
@@ -41,7 +40,7 @@ training:
   temporal_subsampling_size: 0.85
   parallel: false
   partition_method: file
-  split_path: /pvc/esk/traintest_split.txt
+  split_path: esk/traintest_split.txt
 
 losses:
   ms_tcn:
@@ -56,15 +55,7 @@ metrics:
     threshold_value: 0.5
 
 features:
-  keys:
-    - coords
-    - speed_joints
-    - acc_joints
-    - angle
-    - intra_distance
-    - coord_diff
-    - center
-    - speed_direction
+  keys: [coords, speed_joints, acc_joints, angle, intra_distance, coord_diff, center, speed_direction]
   averaging_window: 1
   distance_pairs: null
   angle_pairs: null
@@ -77,16 +68,11 @@ model:
   num_f_maps: 128
   feature_dim: null
 
-# Evaluation settings
 hyperparameter_search_epochs: 10
 hyperparameter_search_trials: 20
 hyperparameter_search_metric: f1
 num_seeds: 3
-models:
-  - c2f_tcn
-  # - c2f_transformer
-  # - ms_tcn3
-  # - edtcn
-output_dir: results
+models: [c2f_tcn]
+output_dir: results/segmentation
 training_curves_path: training_curves.png
 results_table_path: results.csv

@@ -7,14 +7,7 @@ from omegaconf import DictConfig, OmegaConf
 
 
 def build_params_dict(cfg: DictConfig) -> dict:
-    """Build the parameters dictionary from config for dlc2action Project.
-    
-    Args:
-        cfg: OmegaConf config containing baseline parameters
-        
-    Returns:
-        Dictionary with parameters for dlc2action Project
-    """
+    """Build parameters dictionary for DLC2Action Project."""
     params = {
         "general": OmegaConf.to_container(cfg.general),
         "data": OmegaConf.to_container(cfg.data),
@@ -27,14 +20,10 @@ def build_params_dict(cfg: DictConfig) -> dict:
     return params
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="exp")
+@hydra.main(version_base=None, config_path="../configs", config_name="segmentation")
 def main(cfg: DictConfig):
-    """Run parser training experiment with hyperparameter search and training.
-    
-    Args:
-        cfg: OmegaConf configuration from baseline.yaml
-    """
-    logger.info("Baseline DLC2Action Evaluation Configuration")
+    """Run activity segmentation with DLC2Action framework."""
+    logger.info("Activity Segmentation Configuration")
     logger.info(f"\n{OmegaConf.to_yaml(cfg)}")
 
     # Extract project configuration
@@ -52,7 +41,7 @@ def main(cfg: DictConfig):
     )
 
     # Remove existing project if it exists
-    # Project.remove_project(project_cfg.project_name, projects_path=project_cfg.projects_path)
+    Project.remove_project(project_cfg.project_name, projects_path=project_cfg.projects_path)
 
     # Initialize project
     project = Project(
@@ -124,8 +113,8 @@ def main(cfg: DictConfig):
     results_df.to_csv(str(results_table_path), index=False)
     logger.info(f"Results table saved to {results_table_path}")
 
-    logger.success("Baseline evaluation complete!")
-    logger.info(f"Results directory: {output_dir.resolve()}")
+    logger.success("Activity segmentation complete!")
+    logger.info(f"Results: {output_dir.resolve()}")
 
 
 if __name__ == "__main__":

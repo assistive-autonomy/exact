@@ -1,0 +1,52 @@
+# Activity Assessment Configuration (STG-NF)
+
+experiment:
+  name: null
+  seed: 42
+  device: auto
+
+data:
+  esk_dir: esk
+  label_type: activity
+  target_activity: cooking
+  test_activities: null
+  seg_len: 24
+  seg_stride: 6
+  normalize: true
+
+model:
+  hidden_channels: 64
+  K: 8
+  L: 1
+  temporal_kernel: 9
+  adj_strategy: uniform
+  learn_prior: false
+  R: 3.0
+  permutation: invconv
+
+training:
+  epochs: 10
+  batch_size: 64
+  lr: 5e-4
+  lr_decay: 0.95
+  weight_decay: 5e-5
+  grad_clip: 100.0
+  num_workers: 4
+  log_interval: 100
+
+evaluation:
+  enabled: true
+  save_predictions: true
+
+output:
+  dir: results/assessment
+  save_checkpoints: true
+  checkpoint_interval: 1
+
+checkpoint:
+  path: null
+  eval_only: false
+
+wandb_project: exact
+wandb_entity: assistive-autonomy
+wandb_mode: online
