@@ -1,5 +1,8 @@
 # EXACT: Executable Activity Models
 
+![Python](https://img.shields.io/badge/Python-≥3.10-blue?logo=python&logoColor=white)
+![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04-orange?logo=ubuntu&logoColor=white)
+
 ## Installation
 
 ```bash
@@ -10,7 +13,7 @@ uv venv && uv sync
 
 ### Activity Segmentation
 
-Temporal action segmentation using DLC2Action framework with MS-TCN models.
+Temporal action segmentation using DLC2Action framework with multiple models (MS-TCN3, C2F-TCN, ED-TCN, C2F-Transformer).
 
 ```bash
 # Run segmentation experiment
@@ -70,7 +73,6 @@ All configs in `configs/`:
 - `assessment.yaml` - Activity assessment (STG-NF)
 - `parser.yaml` - Motion-conditioned parser training
 
-Sweep configs for wandb hyperparameter tuning:
-- `sweep_segmentation.yaml` - Segmentation sweep
-- `sweep_assessment.yaml` - Assessment sweep
-- `sweep_parser.yaml` - Parser sweep
+Sweep configs for wandb hyperparameter tuning in `configs/sweeps/`:
+- `assessment.yaml` - Assessment sweep
+- `parser.yaml` - Parser sweep
