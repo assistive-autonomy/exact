@@ -72,7 +72,7 @@ hyperparameter_search_epochs: 10
 hyperparameter_search_trials: 20
 hyperparameter_search_metric: f1
 num_seeds: 3
-models: [c2f_tcn]
+models: [ms_tcn3, c2f_tcn, edtcn, c2f_transformer]
 output_dir: results/segmentation
 training_curves_path: training_curves.png
 results_table_path: results.csv

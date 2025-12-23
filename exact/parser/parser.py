@@ -35,14 +35,14 @@ class MotionConditionedParser(nn.Module):
 
     def _get_system_prompt_embeds(self, batch_size: int, device: torch.device):
         """Get system prompt embeddings.
-        
+
         Returns:
             system_embeds: [batch_size, prompt_len, hidden_dim]
             system_mask: [batch_size, prompt_len]
         """
         if self.tokenizer is None or not self.system_prompt:
             return None, None
-        
+
         # Tokenize system prompt
         encoded = self.tokenizer(
             self.system_prompt,
@@ -51,12 +51,12 @@ class MotionConditionedParser(nn.Module):
         )
         prompt_ids = encoded["input_ids"].to(device)
         prompt_mask = encoded["attention_mask"].to(device)
-        
+
         # Get embeddings and expand for batch
         prompt_embeds = self.model.get_input_embeddings()(prompt_ids)
         prompt_embeds = prompt_embeds.expand(batch_size, -1, -1)
         prompt_mask = prompt_mask.expand(batch_size, -1)
-        
+
         return prompt_embeds, prompt_mask
 
     def forward(
@@ -79,15 +79,17 @@ class MotionConditionedParser(nn.Module):
         """
         batch_size = motion.shape[0]
         device = motion.device
-        
+
         # Get embeddings
         motion_embeddings = self.trajectory_encoder(motion)
         token_embeds = self.model.get_input_embeddings()(input_ids)
         system_embeds, system_mask = self._get_system_prompt_embeds(batch_size, device)
-        
+
         # Build inputs: [system_prompt] + [motion] + [tokens]
         if system_embeds is not None:
-            inputs_embeds = torch.cat([system_embeds, motion_embeddings, token_embeds], dim=1)
+            inputs_embeds = torch.cat(
+                [system_embeds, motion_embeddings, token_embeds], dim=1
+            )
             prefix_len = system_embeds.shape[1] + motion_embeddings.shape[1]
         else:
             inputs_embeds = torch.cat([motion_embeddings, token_embeds], dim=1)
@@ -101,7 +103,9 @@ class MotionConditionedParser(nn.Module):
             device=device,
         )
         if system_mask is not None:
-            full_attention_mask = torch.cat([system_mask, motion_mask, attention_mask], dim=1)
+            full_attention_mask = torch.cat(
+                [system_mask, motion_mask, attention_mask], dim=1
+            )
         else:
             full_attention_mask = torch.cat([motion_mask, attention_mask], dim=1)
 
@@ -145,10 +149,10 @@ class MotionConditionedParser(nn.Module):
         """
         batch_size = motion.shape[0]
         device = motion.device
-        
+
         motion_embeddings = self.trajectory_encoder(motion)
         system_embeds, system_mask = self._get_system_prompt_embeds(batch_size, device)
-        
+
         # Build inputs: [system_prompt] + [motion]
         if system_embeds is not None:
             inputs_embeds = torch.cat([system_embeds, motion_embeddings], dim=1)

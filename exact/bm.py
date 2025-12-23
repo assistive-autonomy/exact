@@ -12,7 +12,12 @@ from exact.programs import SensorReward
 class BehaviourModel:
     """Generates motions from reward programs using pre-trained MetaMotivo model."""
 
-    def __init__(self, model_name: str = "facebook/metamotivo-M-1", batch_size: int = 256, device: str = "cpu"):
+    def __init__(
+        self,
+        model_name: str = "facebook/metamotivo-M-1",
+        batch_size: int = 256,
+        device: str = "cpu",
+    ):
         self.model_name = model_name
         self.batch_size = batch_size
         self.device = device

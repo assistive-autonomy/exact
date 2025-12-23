@@ -1,4 +1,5 @@
 """Generate synthetic motion-program training data."""
+
 import argparse
 from pathlib import Path
 
@@ -14,18 +15,43 @@ from exact.data.utils import generate_trajectory
 
 # Body parts available for program generation
 BODY_PARTS = [
-    "pelvis", "torso", "spine", "chest", "neck", "head",
-    "lhip", "lknee", "lankle", "ltoe",
-    "rhip", "rknee", "rankle", "rtoe",
-    "lthorax", "lshoulder", "lelbow", "lwrist", "lhand",
-    "rthorax", "rshoulder", "relbow", "rwrist", "rhand",
+    "pelvis",
+    "torso",
+    "spine",
+    "chest",
+    "neck",
+    "head",
+    "lhip",
+    "lknee",
+    "lankle",
+    "ltoe",
+    "rhip",
+    "rknee",
+    "rankle",
+    "rtoe",
+    "lthorax",
+    "lshoulder",
+    "lelbow",
+    "lwrist",
+    "lhand",
+    "rthorax",
+    "rshoulder",
+    "relbow",
+    "rwrist",
+    "rhand",
 ]
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate synthetic motion-program data")
-    parser.add_argument("--name", type=str, default="train", help="Dataset name (train/eval)")
-    parser.add_argument("--num-samples", type=int, default=1000, help="Number of samples")
+    parser = argparse.ArgumentParser(
+        description="Generate synthetic motion-program data"
+    )
+    parser.add_argument(
+        "--name", type=str, default="train", help="Dataset name (train/eval)"
+    )
+    parser.add_argument(
+        "--num-samples", type=int, default=1000, help="Number of samples"
+    )
     parser.add_argument("--output-dir", type=str, default=".", help="Output directory")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
@@ -57,7 +83,9 @@ def main():
     model = BehaviourModel(device="cpu")
 
     with h5py.File(str(hdf5_path), "w") as f:
-        for idx, program in tqdm(enumerate(programs), total=len(programs), desc="Generating"):
+        for idx, program in tqdm(
+            enumerate(programs), total=len(programs), desc="Generating"
+        ):
             reward = parse_program(program)
             obs, _ = generate_trajectory(model, reward, device="cpu")
 
@@ -70,4 +98,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

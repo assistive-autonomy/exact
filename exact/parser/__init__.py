@@ -8,4 +8,3 @@ __all__ = [
     "create_grammar_processor",
     "DEFAULT_SYSTEM_PROMPT",
 ]
-

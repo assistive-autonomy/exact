@@ -7,9 +7,7 @@ metric:
   goal: maximize
 
 parameters:
-  # Model architecture
-  general.model_name:
-    values: [c2f_tcn, ms_tcn]
+  # Segment configuration
   general.len_segment:
     values: [512, 1024, 2048]
   general.overlap:

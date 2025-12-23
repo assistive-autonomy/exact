@@ -44,6 +44,7 @@ metric_for_best_model: eval_loss
 eval_samples: 8  # Number of samples for post-training evaluation
 
 # Wandb
+report_to: wandb
 wandb_project: exact
 wandb_entity: assistive-autonomy
 wandb_mode: online

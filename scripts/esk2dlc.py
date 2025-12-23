@@ -107,9 +107,13 @@ def convert_pose_file(pose_file: Path, output_path: Path) -> bool:
         likelihood = np.ones((n_frames, n_keypoints, 1), dtype=np.float32)
         for kp in range(n_keypoints):
             # If all coords are 0 (padded), likelihood is low; otherwise high
-            is_zero = (pose_array[:, kp, 0] == 0) & (pose_array[:, kp, 1] == 0) & (pose_array[:, kp, 2] == 0)
+            is_zero = (
+                (pose_array[:, kp, 0] == 0)
+                & (pose_array[:, kp, 1] == 0)
+                & (pose_array[:, kp, 2] == 0)
+            )
             likelihood[is_zero, kp, 0] = 0.1
-        
+
         pose_with_likelihood = np.concatenate([pose_array, likelihood], axis=-1)
 
         # Reshape to (frames, keypoints * 4) for DataFrame
@@ -140,7 +144,9 @@ def convert_pose_file(pose_file: Path, output_path: Path) -> bool:
         return False
 
 
-def main(annotations_dir: str = "/pvc/esk_annotations", output_dir: str = "/pvc/esk") -> None:
+def main(
+    annotations_dir: str = "/pvc/esk_annotations", output_dir: str = "/pvc/esk"
+) -> None:
     """
     Convert ESK pose data for DLC2Action.
 
@@ -160,7 +166,9 @@ def main(annotations_dir: str = "/pvc/esk_annotations", output_dir: str = "/pvc/
     # Create output directory structure
     (output_path / "D2A_converted_pose_smpl").mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Created DLC poses directory at {output_path}/D2A_converted_pose_smpl\n")
+    logger.info(
+        f"Created DLC poses directory at {output_path}/D2A_converted_pose_smpl\n"
+    )
 
     # Process pose files
     pose_files = sorted(list(annotations_path.rglob("pose3d_smpl.csv")))

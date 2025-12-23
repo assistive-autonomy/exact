@@ -32,6 +32,7 @@ from exact.parser import MotionConditionedParser, TrajectoryEncoder
 
 try:
     import wandb
+
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
@@ -40,13 +41,13 @@ except ImportError:
 def load_config(config_path: str, overrides: list[str] = None) -> DictConfig:
     """Load config file and apply CLI overrides."""
     base_cfg = OmegaConf.load(config_path)
-    
+
     if overrides:
         override_cfg = OmegaConf.from_dotlist(overrides)
         cfg = OmegaConf.merge(base_cfg, override_cfg)
     else:
         cfg = base_cfg
-    
+
     return cfg
 
 
@@ -66,17 +67,19 @@ def get_device(device_str: str) -> torch.device:
 
 def get_collate_fn(tokenizer):
     """Create a collate function for the dataloader."""
+
     def collate_fn(batch):
         input_ids = torch.stack([x["input_ids"] for x in batch])
         attention_mask = torch.stack([x["attention_mask"] for x in batch])
         obs = torch.stack([x["obs"] for x in batch])
-        
+
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "motion": obs,
             "labels": input_ids.clone(),
         }
+
     return collate_fn
 
 
@@ -104,13 +107,13 @@ def evaluate_samples(
 ) -> dict:
     """Evaluate model on sample batch and return metrics."""
     model.eval()
-    
+
     results = []
     exact_matches = 0
-    
+
     for sample in tqdm(samples, desc="Evaluating samples"):
         motion = sample["motion"].unsqueeze(0).to(device=device, dtype=dtype)
-        
+
         generated_ids = model.generate(
             motion=motion,
             max_new_tokens=max_new_tokens,
@@ -119,23 +122,25 @@ def evaluate_samples(
             eos_token_id=tokenizer.eos_token_id,
             grammar_processor=grammar_processor,
         )
-        
+
         predicted = tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
         target = sample["target"]
         is_match = predicted == target
-        
+
         if is_match:
             exact_matches += 1
-        
-        results.append({
-            "key": sample["key"],
-            "target": target,
-            "predicted": predicted,
-            "exact_match": is_match,
-        })
-    
+
+        results.append(
+            {
+                "key": sample["key"],
+                "target": target,
+                "predicted": predicted,
+                "exact_match": is_match,
+            }
+        )
+
     accuracy = exact_matches / len(samples) if samples else 0
-    
+
     return {
         "accuracy": accuracy,
         "exact_matches": exact_matches,
@@ -148,10 +153,10 @@ def log_samples_to_wandb(eval_results: dict, step: int = None):
     """Log sample predictions to wandb as a table."""
     if not WANDB_AVAILABLE:
         return
-    
+
     # Create wandb table
     table = wandb.Table(columns=["key", "target", "predicted", "exact_match"])
-    
+
     for sample in eval_results["samples"]:
         table.add_data(
             sample["key"],
@@ -159,13 +164,13 @@ def log_samples_to_wandb(eval_results: dict, step: int = None):
             sample["predicted"],
             "✓" if sample["exact_match"] else "✗",
         )
-    
+
     log_data = {
         "eval/sample_predictions": table,
         "eval/accuracy": eval_results["accuracy"],
         "eval/exact_matches": eval_results["exact_matches"],
     }
-    
+
     if step is not None:
         wandb.log(log_data, step=step)
     else:
@@ -177,44 +182,50 @@ def print_eval_results(eval_results: dict):
     print("\n" + "=" * 70)
     print("SAMPLE EVALUATION RESULTS")
     print("=" * 70)
-    print(f"Accuracy: {eval_results['exact_matches']}/{eval_results['total']} ({eval_results['accuracy']:.1%})")
+    print(
+        f"Accuracy: {eval_results['exact_matches']}/{eval_results['total']} ({eval_results['accuracy']:.1%})"
+    )
     print("-" * 70)
-    
+
     for sample in eval_results["samples"]:
         status = "✓" if sample["exact_match"] else "✗"
         print(f"\n[{status}] {sample['key']}")
         print(f"  Target:    {sample['target']}")
         print(f"  Predicted: {sample['predicted']}")
-    
+
     print("\n" + "=" * 70)
 
 
 def main():
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Motion-conditioned Parser")
-    parser.add_argument("--config", type=str, default="configs/parser.yaml", help="Config file")
-    parser.add_argument("--eval-only", type=str, default=None, help="Checkpoint dir for eval only")
+    parser.add_argument(
+        "--config", type=str, default="configs/parser.yaml", help="Config file"
+    )
+    parser.add_argument(
+        "--eval-only", type=str, default=None, help="Checkpoint dir for eval only"
+    )
     parser.add_argument("overrides", nargs="*", help="Config overrides (key=value)")
-    
+
     args = parser.parse_args()
-    
+
     # Load config
     cfg = load_config(args.config, args.overrides)
-    
+
     # Setup
     set_seed(cfg.seed)
     device = get_device(cfg.get("device", "auto"))
     model_dtype = torch.float32
-    
+
     # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(cfg.get("output_dir", "results/parser")) / timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Save config
     OmegaConf.save(cfg, output_dir / "config.yaml")
-    
+
     # Initialize wandb
     use_wandb = cfg.wandb_mode != "disabled" and WANDB_AVAILABLE
     if use_wandb:
@@ -225,7 +236,7 @@ def main():
             config=OmegaConf.to_container(cfg, resolve=True),
             mode=cfg.wandb_mode,
         )
-    
+
     print(f"\n{'='*70}")
     print("Motion-conditioned Parser")
     print(f"{'='*70}")
@@ -234,35 +245,42 @@ def main():
     if use_wandb:
         print(f"Wandb: {cfg.wandb_project}")
     print(f"{'='*70}\n")
-    
+
     # Eval-only mode
     if args.eval_only:
         logger.info(f"Eval-only mode: {args.eval_only}")
         model, tokenizer, _, model_dtype = load_checkpoint(args.eval_only, device)
-        
+
         # Load eval samples
-        eval_samples = load_eval_samples(cfg.eval_data, n_samples=cfg.get("eval_samples", 8))
-        
+        eval_samples = load_eval_samples(
+            cfg.eval_data, n_samples=cfg.get("eval_samples", 8)
+        )
+
         # Create grammar processor
         try:
             from exact.parser.utils import create_grammar_processor
+
             grammar_processor = create_grammar_processor(tokenizer)
         except Exception as e:
             logger.warning(f"Could not create grammar processor: {e}")
             grammar_processor = None
-        
+
         # Evaluate
         eval_results = evaluate_samples(
-            model, tokenizer, eval_samples, device, model_dtype,
+            model,
+            tokenizer,
+            eval_samples,
+            device,
+            model_dtype,
             grammar_processor=grammar_processor,
         )
         print_eval_results(eval_results)
-        
+
         if use_wandb:
             log_samples_to_wandb(eval_results)
             wandb.finish()
         return
-    
+
     # Training mode
     logger.info("[1/4] Loading model and tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
@@ -283,7 +301,15 @@ def main():
         r=cfg.lora_r,
         lora_alpha=cfg.lora_alpha,
         lora_dropout=cfg.lora_dropout,
-        target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        target_modules=[
+            "q_proj",
+            "v_proj",
+            "k_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ],
         bias="none",
     )
     base_model = get_peft_model(base_model, lora_config)
@@ -368,7 +394,7 @@ def main():
     # Save final model components
     logger.info("Saving model...")
     trainer.save_model()
-    
+
     # Save trajectory encoder
     torch.save(
         trajectory_encoder.state_dict(),
@@ -381,25 +407,32 @@ def main():
 
     # Post-training evaluation on samples
     logger.info("Running sample evaluation...")
-    eval_samples = load_eval_samples(cfg.eval_data, n_samples=cfg.get("eval_samples", 8))
-    
+    eval_samples = load_eval_samples(
+        cfg.eval_data, n_samples=cfg.get("eval_samples", 8)
+    )
+
     try:
         from exact.parser.utils import create_grammar_processor
+
         grammar_processor = create_grammar_processor(tokenizer)
     except Exception as e:
         logger.warning(f"Could not create grammar processor: {e}")
         grammar_processor = None
-    
+
     eval_results = evaluate_samples(
-        model, tokenizer, eval_samples, device, model_dtype,
+        model,
+        tokenizer,
+        eval_samples,
+        device,
+        model_dtype,
         grammar_processor=grammar_processor,
     )
     print_eval_results(eval_results)
-    
+
     # Save results
     with open(output_dir / "eval_results.json", "w") as f:
         json.dump(eval_results, f, indent=2)
-    
+
     if use_wandb:
         log_samples_to_wandb(eval_results)
         wandb.summary["final_accuracy"] = eval_results["accuracy"]
@@ -411,12 +444,12 @@ def main():
 def load_checkpoint(checkpoint_dir: str, device: torch.device):
     """Load trained model from checkpoint directory."""
     import yaml
-    
+
     config_path = os.path.join(checkpoint_dir, "config.yaml")
     if not os.path.exists(config_path):
         # Try hydra config location
         config_path = os.path.join(checkpoint_dir, ".hydra", "config.yaml")
-    
+
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Config not found in: {checkpoint_dir}")
 

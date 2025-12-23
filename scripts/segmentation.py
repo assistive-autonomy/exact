@@ -41,7 +41,9 @@ def main(cfg: DictConfig):
     )
 
     # Remove existing project if it exists
-    Project.remove_project(project_cfg.project_name, projects_path=project_cfg.projects_path)
+    Project.remove_project(
+        project_cfg.project_name, projects_path=project_cfg.projects_path
+    )
 
     # Initialize project
     project = Project(
