@@ -25,24 +25,36 @@ uv run scripts/segmentation.py project.annotation_path=esk/D2A_converted_label_a
 
 ### Activity Assessment
 
-Pose-based activity quality assessment using STG-NF normalizing flows. Trains on one activity (normal class) and evaluates separation from other activities.
+Pose-based activity quality assessment using STG-NF normalizing flows. Trains one model per target activity and evaluates separability.
 
 ```bash
-# List available activities
+# List available activities for a label type
 uv run scripts/assessment.py --list-activities
 
-# Run assessment experiment  
+# Run assessment (trains N models for N target_activities in config)
 uv run scripts/assessment.py
 
-# Override config
-uv run scripts/assessment.py data.target_activity=cleaning training.epochs=50
+# Override target activities
+uv run scripts/assessment.py data.target_activities='[cooking,cleaning]'
+
+# Change label type and activities
+uv run scripts/assessment.py data.label_type=verbs data.target_activities='[Cut,Pour,Stir]'
 
 # Disable wandb
 uv run scripts/assessment.py wandb_mode=disabled
-
-# Evaluate from checkpoint
-uv run scripts/assessment.py checkpoint.path=results/model.pth checkpoint.eval_only=true
 ```
+
+This automatically:
+1. Trains one model per activity in `target_activities`
+2. Evaluates each model on all target activities
+3. Generates separability matrix and summary plots
+4. Reports `mean_auc` for sweep optimization
+
+Output:
+- `separability_matrix.png` - Heatmap showing how each model scores each activity (diagonal should be highest)
+- `separation_summary.png` - Bar charts of separation and AUC scores per model
+- `aggregated.json` - Raw data for further analysis
+- `aggregated.json` - Raw data for further analysis
 
 ## Parser Training
 
@@ -76,3 +88,24 @@ All configs in `configs/`:
 Sweep configs for wandb hyperparameter tuning in `configs/sweeps/`:
 - `assessment.yaml` - Assessment sweep
 - `parser.yaml` - Parser sweep
+
+## ESK Dataset Labels
+
+The ESK dataset provides three label types that can be configured via `data.label_type` and `project.annotation_path`:
+
+### Activities (`D2A_converted_label_activity`)
+High-level activity categories:
+- `cleaning` - Kitchen cleanup tasks
+- `cooking` - Active cooking on stove
+- `experimental procedure` - Study-specific procedures
+- `getting ready` - Preparation before cooking
+- `other_annot` - Uncategorized actions
+- `preparing ingredients` - Ingredient preparation (cutting, peeling, etc.)
+
+### Verbs (`D2A_converted_label_verbs`)
+Action primitives (28 classes):
+`Add`, `Adjust`, `Carry`, `Clean`, `Close`, `Cut`, `Dry`, `Grab`, `Grate`, `Hold`, `Move`, `Open`, `Peel`, `Pour`, `Press`, `Put`, `Put_on`, `Read`, `Shake`, `Slide`, `Split`, `Stir`, `Switch`, `Take_off`, `Taste`, `Throw`, `Touch`, `Wash`
+
+### Nouns (`D2A_converted_label_nouns`)
+Object categories (62 classes):
+`Avocado`, `Bottle`, `Bowl`, `Box`, `Broth`, `Brush`, `Butter`, `Button`, `Carrots`, `Cheese`, `Colander`, `Cucumber`, `Cup`, `Cupboard`, `Cutting_board`, `Doser_Glass`, `Drawer`, `Eggplant`, `Fridge`, `Frying_Oil`, `Glove`, `Grater`, `Green_salad`, `Hand`, `Knife`, `Lemon`, `Onions`, `Package`, `Pan`, `Pasta_Spoon`, `Peeler`, `Plate`, `Pot`, `Pot_lid`, `Processed_ingredients`, `Radish`, `Recipe`, `Rice`, `Risotto`, `Salad_bowl`, `Salt`, `Sauce`, `Seasoning`, `Shallots`, `Sink`, `Sink_Sprayer`, `Soap`, `Spatula`, `Sponge`, `Spoon`, `Stock_cube`, `Stoves`, `Surimi`, `Tissue`, `Tomatoes`, `Towel`, `Trash`, `Trivet`, `Water`, `Whip`, `Zucchini`
