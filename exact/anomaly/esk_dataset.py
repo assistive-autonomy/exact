@@ -14,6 +14,7 @@ from typing import Optional, Literal, Union
 import numpy as np
 import pandas as pd
 import torch
+from loguru import logger
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -259,7 +260,7 @@ class ESKPoseDataset(Dataset):
             try:
                 pose_data, individual_id = load_pose_file(pose_path)
             except Exception as e:
-                print(f"Error loading {pose_path}: {e}")
+                logger.error(f"Error loading {pose_path}: {e}")
                 continue
 
             # Load labels

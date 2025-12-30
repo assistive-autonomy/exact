@@ -6,19 +6,19 @@ experiment:
   device: auto
 
 data:
-  esk_dir: esk
+  esk_dir: /pvc/esk
   label_type: verbs
   target_activities:
     - Cut
     - Pour
     - Stir
-    - Wash
-    - Grab
-    - Open
-    - Peel
-    - Grate
-    - Carry
-    - Add
+    # - Wash
+    # - Grab
+    # - Open
+    # - Peel
+    # - Grate
+    # - Carry
+    # - Add
   seg_len: 24
   seg_stride: 6
   normalize: true
@@ -34,7 +34,7 @@ model:
   permutation: invconv
 
 training:
-  epochs: 10
+  epochs: 50
   batch_size: 64
   lr: 5e-4
   lr_decay: 0.95

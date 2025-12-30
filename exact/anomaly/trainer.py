@@ -10,6 +10,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from loguru import logger
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -133,7 +134,7 @@ class Trainer:
                     self.global_step += 1
 
                 except KeyboardInterrupt:
-                    print("\nTraining interrupted.")
+                    logger.warning("Training interrupted.")
                     if self.checkpoint_dir:
                         self.save_checkpoint(epoch, filename="interrupted.pth")
                     return history
@@ -141,7 +142,7 @@ class Trainer:
             # Epoch summary
             avg_loss = sum(epoch_losses) / len(epoch_losses)
             history["train_loss"].append(avg_loss)
-            print(f"Epoch {epoch + 1}: avg_loss = {avg_loss:.4f}")
+            logger.info(f"Epoch {epoch + 1}: avg_loss = {avg_loss:.4f}")
 
             # Log epoch summary to wandb
             if self.use_wandb:
@@ -160,7 +161,7 @@ class Trainer:
             if self.scheduler is not None:
                 self.scheduler.step()
                 lr = self.scheduler.get_last_lr()[0]
-                print(f"  LR: {lr:.2e}")
+                logger.debug(f"LR: {lr:.2e}")
                 if self.use_wandb:
                     self._log_wandb({"epoch/lr": lr})
 
@@ -254,7 +255,7 @@ class Trainer:
 
         path = self.checkpoint_dir / filename
         torch.save(state, path)
-        print(f"  Checkpoint saved: {path}")
+        logger.debug(f"Checkpoint saved: {path}")
 
     def load_checkpoint(self, path: str):
         """Load model checkpoint."""
@@ -271,4 +272,4 @@ class Trainer:
 
         self.start_epoch = checkpoint.get("epoch", 0)
         self.global_step = checkpoint.get("global_step", 0)
-        print(f"Loaded checkpoint from epoch {self.start_epoch}")
+        logger.info(f"Loaded checkpoint from epoch {self.start_epoch}")

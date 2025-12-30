@@ -179,21 +179,16 @@ def log_samples_to_wandb(eval_results: dict, step: int = None):
 
 def print_eval_results(eval_results: dict):
     """Pretty print evaluation results."""
-    print("\n" + "=" * 70)
-    print("SAMPLE EVALUATION RESULTS")
-    print("=" * 70)
-    print(
+    logger.info("SAMPLE EVALUATION RESULTS")
+    logger.info(
         f"Accuracy: {eval_results['exact_matches']}/{eval_results['total']} ({eval_results['accuracy']:.1%})"
     )
-    print("-" * 70)
 
     for sample in eval_results["samples"]:
         status = "✓" if sample["exact_match"] else "✗"
-        print(f"\n[{status}] {sample['key']}")
-        print(f"  Target:    {sample['target']}")
-        print(f"  Predicted: {sample['predicted']}")
-
-    print("\n" + "=" * 70)
+        logger.info(f"[{status}] {sample['key']}")
+        logger.info(f"  Target:    {sample['target']}")
+        logger.info(f"  Predicted: {sample['predicted']}")
 
 
 def main():
@@ -237,14 +232,11 @@ def main():
             mode=cfg.wandb_mode,
         )
 
-    print(f"\n{'='*70}")
-    print("Motion-conditioned Parser")
-    print(f"{'='*70}")
-    print(f"Device: {device}")
-    print(f"Output: {output_dir}")
+    logger.info("Motion-conditioned Parser")
+    logger.info(f"Device: {device}")
+    logger.info(f"Output: {output_dir}")
     if use_wandb:
-        print(f"Wandb: {cfg.wandb_project}")
-    print(f"{'='*70}\n")
+        logger.info(f"Wandb: {cfg.wandb_project}")
 
     # Eval-only mode
     if args.eval_only:

@@ -1,5 +1,15 @@
 #!/usr/bin/env python
-"""Activity Assessment using STG-NF normalizing flows."""
+"""Activity Assessment using STG-NF normalizing flows.
+
+This script performs full evaluation of STG-NF models for activity recognition:
+- Trains N models (one per target activity)
+- Evaluates each model on ALL target activities (cross-activity evaluation)
+- Generates separability matrix showing how well each model distinguishes activities
+- Reports per-activity AUC and separation metrics
+
+For hyperparameter tuning, use tune_assessment.py instead which is faster
+and reports mean_auc for sweep optimization.
+"""
 
 import json
 import sys
@@ -9,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from loguru import logger
 from omegaconf import OmegaConf, DictConfig
 from sklearn.metrics import roc_auc_score
 from torch.optim import AdamW
@@ -159,16 +170,13 @@ def evaluate_by_activity(
 
 def print_results(results: dict):
     """Pretty print evaluation results."""
-    print("\n" + "=" * 70)
-    print("EVALUATION RESULTS")
-    print("=" * 70)
-
     target = results["target_activity"]
-    print(f"\nTarget Activity (trained on): {target}")
+    logger.info("EVALUATION RESULTS")
+    logger.info(f"Target Activity (trained on): {target}")
 
-    print("\n--- Per-Activity Log-Probability (higher = more likely) ---")
-    print(f"{'Activity':<25} {'Mean':>12} {'Std':>12} {'N Samples':>12}")
-    print("-" * 65)
+    logger.info("Per-Activity Log-Probability (higher = more likely)")
+    header = f"{'Activity':<25} {'Mean':>12} {'Std':>12} {'N Samples':>12}"
+    logger.info(header)
 
     # Sort by mean log-prob (target should be highest)
     sorted_activities = sorted(
@@ -179,18 +187,16 @@ def print_results(results: dict):
 
     for activity, stats in sorted_activities:
         marker = " <-- TARGET" if activity == target else ""
-        print(
+        logger.info(
             f"{activity:<25} {stats['mean_log_prob']:>12.4f} {stats['std_log_prob']:>12.4f} {stats['n_samples']:>12}{marker}"
         )
 
-    print("\n--- Separation Metrics ---")
     if "separation" in results:
-        print(f"Target mean log-prob:  {results['target_mean_log_prob']:.4f}")
-        print(f"Others mean log-prob:  {results['other_mean_log_prob']:.4f}")
-        print(f"Separation (target - others): {results['separation']:.4f}")
-        print(f"AUC (target vs others): {results['auc_target_vs_others']:.4f}")
-
-    print("\n" + "=" * 70)
+        logger.info("Separation Metrics")
+        logger.info(f"Target mean log-prob:  {results['target_mean_log_prob']:.4f}")
+        logger.info(f"Others mean log-prob:  {results['other_mean_log_prob']:.4f}")
+        logger.info(f"Separation (target - others): {results['separation']:.4f}")
+        logger.info(f"AUC (target vs others): {results['auc_target_vs_others']:.4f}")
 
 
 def aggregate_results(results_dirs: list[Path]) -> dict:
@@ -327,7 +333,7 @@ def plot_separability_matrix(
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"Saved separability matrix plot: {output_path}")
+    logger.info(f"Saved separability matrix plot: {output_path}")
 
 
 def plot_separation_summary(
@@ -375,43 +381,38 @@ def plot_separation_summary(
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"Saved separation summary plot: {output_path}")
+    logger.info(f"Saved separation summary plot: {output_path}")
 
 
 def print_aggregated_results(aggregated: dict):
     """Print aggregated results summary."""
-    print("\n" + "=" * 70)
-    print("AGGREGATED RESULTS SUMMARY")
-    print("=" * 70)
-
     activities = aggregated["activities"]
     separation = aggregated["separation_vector"]
     auc_diag = np.diag(aggregated["auc_matrix"])
 
-    print(f"\nModels evaluated: {aggregated['n_models']}")
-    print(f"Activities: {len(activities)}")
+    logger.info("AGGREGATED RESULTS SUMMARY")
+    logger.info(f"Models evaluated: {aggregated['n_models']}")
+    logger.info(f"Activities: {len(activities)}")
 
-    print("\n--- Per-Model Performance ---")
-    print(f"{'Activity (trained on)':<25} {'Separation':>12} {'AUC':>12}")
-    print("-" * 55)
+    logger.info("Per-Model Performance")
+    header = f"{'Activity (trained on)':<25} {'Separation':>12} {'AUC':>12}"
+    logger.info(header)
 
     for i, act in enumerate(activities):
         sep = separation[i]
         auc = auc_diag[i]
         sep_str = f"{sep:.4f}" if not np.isnan(sep) else "N/A"
         auc_str = f"{auc:.4f}" if not np.isnan(auc) else "N/A"
-        print(f"{act:<25} {sep_str:>12} {auc_str:>12}")
+        logger.info(f"{act:<25} {sep_str:>12} {auc_str:>12}")
 
     # Summary stats
     valid_sep = separation[~np.isnan(separation)]
     valid_auc = auc_diag[~np.isnan(auc_diag)]
 
     if len(valid_sep) > 0:
-        print(f"\nMean Separation: {np.mean(valid_sep):.4f} ± {np.std(valid_sep):.4f}")
+        logger.info(f"Mean Separation: {np.mean(valid_sep):.4f} ± {np.std(valid_sep):.4f}")
     if len(valid_auc) > 0:
-        print(f"Mean AUC: {np.mean(valid_auc):.4f} ± {np.std(valid_auc):.4f}")
-
-    print("\n" + "=" * 70)
+        logger.info(f"Mean AUC: {np.mean(valid_auc):.4f} ± {np.std(valid_auc):.4f}")
 
 
 def main():
@@ -443,9 +444,9 @@ def main():
 
     # Aggregate mode - combine results from multiple runs
     if args.aggregate:
-        print("\n=== Aggregating Results ===")
+        logger.info("Aggregating Results")
         results_dirs = [Path(d) for d in args.aggregate]
-        print(f"Input directories: {len(results_dirs)}")
+        logger.info(f"Input directories: {len(results_dirs)}")
 
         aggregated = aggregate_results(results_dirs)
         print_aggregated_results(aggregated)
@@ -478,7 +479,7 @@ def main():
             output_dir / "separation_summary.png",
         )
 
-        print(f"\nAggregated results saved to: {output_dir}")
+        logger.success(f"Aggregated results saved to: {output_dir}")
         return
 
     # Load config
@@ -486,10 +487,10 @@ def main():
 
     # List activities mode
     if args.list_activities:
-        print(f"\n=== Available Activities ({cfg.data.label_type}) ===")
+        logger.info(f"Available Activities ({cfg.data.label_type})")
         activities = get_unique_activities(cfg.data.esk_dir, cfg.data.label_type)
         for a in activities:
-            print(f"  {a}")
+            logger.info(f"  {a}")
         return
 
     # Set up
@@ -520,26 +521,21 @@ def main():
             mode=cfg.wandb_mode,
         )
 
-    print(f"\n{'='*70}")
-    print(f"Activity Assessment - STG-NF")
-    print(f"{'='*70}")
-    print(f"Label type: {cfg.data.label_type}")
-    print(f"Target activities: {target_activities}")
-    print(f"Number of models to train: {n_models}")
-    print(f"Device: {device}")
-    print(f"Output: {output_dir}")
+    logger.info("Activity Assessment - STG-NF")
+    logger.info(f"Label type: {cfg.data.label_type}")
+    logger.info(f"Target activities: {target_activities}")
+    logger.info(f"Number of models to train: {n_models}")
+    logger.info(f"Device: {device}")
+    logger.info(f"Output: {output_dir}")
     if use_wandb:
-        print(f"Wandb: {cfg.wandb_project}/{exp_name}")
-    print(f"{'='*70}\n")
+        logger.info(f"Wandb: {cfg.wandb_project}/{exp_name}")
 
     # Train one model per target activity
     all_results = []
     model_dirs = []
 
     for i, target_activity in enumerate(target_activities):
-        print(f"\n{'='*70}")
-        print(f"Model {i+1}/{n_models}: Training on '{target_activity}'")
-        print(f"{'='*70}")
+        logger.info(f"Model {i+1}/{n_models}: Training on '{target_activity}'")
 
         # Create model-specific output directory
         safe_name = target_activity.replace(" ", "_")
@@ -548,7 +544,7 @@ def main():
         model_dirs.append(model_dir)
 
         # Load data for this target activity
-        print("Loading data...")
+        logger.info("Loading data...")
         train_loader, test_loader, info = get_esk_dataloaders(
             esk_dir=cfg.data.esk_dir,
             label_type=cfg.data.label_type,
@@ -560,19 +556,19 @@ def main():
             num_workers=cfg.training.num_workers,
         )
 
-        print(f"Training samples ({target_activity} only): {info['n_train_samples']}")
-        print(f"Test samples: {info['n_test_samples']}")
-        print(f"Test activity distribution:")
+        logger.info(f"Training samples ({target_activity} only): {info['n_train_samples']}")
+        logger.info(f"Test samples: {info['n_test_samples']}")
+        logger.info("Test activity distribution:")
         for act, count in sorted(info["test_activity_counts"].items(), key=lambda x: -x[1]):
             marker = " <-- TARGET" if act == target_activity else ""
-            print(f"  {act}: {count}{marker}")
+            logger.info(f"  {act}: {count}{marker}")
 
         if info["n_train_samples"] == 0:
-            print(f"\nWARNING: No training samples for '{target_activity}', skipping...")
+            logger.warning(f"No training samples for '{target_activity}', skipping...")
             continue
 
         # Build model
-        print("\nBuilding model...")
+        logger.info("Building model...")
         pose_shape = (3, cfg.data.seg_len, 24)  # (C, T, V) for SMPL
 
         graph = Graph(
@@ -596,7 +592,7 @@ def main():
 
         if i == 0:
             n_params = sum(p.numel() for p in model.parameters())
-            print(f"Model parameters: {n_params:,}")
+            logger.info(f"Model parameters: {n_params:,}")
             if use_wandb:
                 wandb.log({"model/n_params": n_params})
 
@@ -624,7 +620,7 @@ def main():
 
         # Train
         if not cfg.checkpoint.eval_only:
-            print("\nTraining...")
+            logger.info("Training...")
             history = trainer.train(
                 epochs=cfg.training.epochs,
                 grad_clip=cfg.training.grad_clip,
@@ -636,7 +632,7 @@ def main():
 
         # Evaluate
         if cfg.evaluation.enabled:
-            print("\nEvaluating...")
+            logger.info("Evaluating...")
             results = evaluate_by_activity(
                 model=model,
                 test_loader=test_loader,
@@ -661,9 +657,7 @@ def main():
 
     # Aggregate results and generate separability matrix
     if len(all_results) > 1:
-        print(f"\n{'='*70}")
-        print("AGGREGATING RESULTS")
-        print(f"{'='*70}")
+        logger.info("AGGREGATING RESULTS")
 
         aggregated = aggregate_results(model_dirs)
         print_aggregated_results(aggregated)
@@ -758,8 +752,7 @@ def main():
     if use_wandb:
         wandb.finish()
 
-    print(f"\nResults saved to: {output_dir}")
-    print("\nDone!")
+    logger.success(f"Results saved to: {output_dir}")
 
 
 if __name__ == "__main__":

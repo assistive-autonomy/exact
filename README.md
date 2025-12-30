@@ -25,13 +25,35 @@ uv run scripts/segmentation.py project.annotation_path=esk/D2A_converted_label_a
 
 ### Activity Assessment
 
-Pose-based activity quality assessment using STG-NF normalizing flows. Trains one model per target activity and evaluates separability.
+Pose-based activity quality assessment using STG-NF normalizing flows. Two scripts are provided:
+
+#### Hyperparameter Tuning (`tune_assessment.py`)
+
+Fast script for wandb sweep optimization. Trains N models (one per activity) and evaluates each model only on its target activity test data.
+
+```bash
+# Run tuning (trains N models, reports mean_auc for sweep)
+uv run scripts/tune_assessment.py
+
+# Run wandb sweep for hyperparameter optimization
+wandb sweep configs/sweeps/assessment.yaml
+wandb agent <sweep-id>
+```
+
+This is optimized for speed:
+- Each model evaluated only on its target activity
+- Reports `mean_auc` to wandb summary for sweep optimization
+- No cross-activity evaluation matrix generation
+
+#### Full Evaluation (`assessment.py`)
+
+Comprehensive evaluation script. Run after hyperparameters are tuned.
 
 ```bash
 # List available activities for a label type
 uv run scripts/assessment.py --list-activities
 
-# Run assessment (trains N models for N target_activities in config)
+# Run full assessment (trains N models for N target_activities in config)
 uv run scripts/assessment.py
 
 # Override target activities
@@ -42,19 +64,26 @@ uv run scripts/assessment.py data.label_type=verbs data.target_activities='[Cut,
 
 # Disable wandb
 uv run scripts/assessment.py wandb_mode=disabled
+
+# Aggregate results from multiple runs
+uv run scripts/assessment.py --aggregate results/assessment/run1 results/assessment/run2
 ```
 
-This automatically:
+This performs full cross-activity evaluation:
 1. Trains one model per activity in `target_activities`
-2. Evaluates each model on all target activities
+2. Evaluates each model on **all** target activities
 3. Generates separability matrix and summary plots
-4. Reports `mean_auc` for sweep optimization
+4. Reports detailed per-activity metrics
 
 Output:
 - `separability_matrix.png` - Heatmap showing how each model scores each activity (diagonal should be highest)
 - `separation_summary.png` - Bar charts of separation and AUC scores per model
 - `aggregated.json` - Raw data for further analysis
-- `aggregated.json` - Raw data for further analysis
+
+#### Recommended Workflow
+
+1. **Tune**: Run sweep with `tune_assessment.py` to find optimal hyperparameters
+2. **Evaluate**: Run `assessment.py` with tuned hyperparameters for full evaluation
 
 ## Parser Training
 
@@ -86,7 +115,7 @@ All configs in `configs/`:
 - `parser.yaml` - Motion-conditioned parser training
 
 Sweep configs for wandb hyperparameter tuning in `configs/sweeps/`:
-- `assessment.yaml` - Assessment sweep
+- `assessment.yaml` - Assessment hyperparameter tuning sweep
 - `parser.yaml` - Parser sweep
 
 ## ESK Dataset Labels

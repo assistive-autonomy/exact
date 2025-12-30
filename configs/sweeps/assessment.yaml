@@ -1,15 +1,15 @@
-# Wandb Sweep: Activity Assessment (STG-NF)
-# Optimizes hyperparameters across all target_activities defined in config
-# The sweep trains N models (one per activity) and reports mean AUC
-# NOTE: Each trial trains 10 models, so sweeps are computationally expensive
+# Wandb Sweep: Hyperparameter Tuning for Activity Assessment (STG-NF)
+# Optimizes hyperparameters by training N models and maximizing mean AUC
+# Each model is evaluated on its target activity test data
+# This is faster than full assessment as it skips cross-activity evaluation
 
-program: scripts/assessment.py
+program: scripts/tune_assessment.py
 method: bayes
 metric:
   name: mean_auc
   goal: maximize
 
-# Limit number of trials (each trains 10 models)
+# Limit number of trials
 run_cap: 50
 
 parameters:
