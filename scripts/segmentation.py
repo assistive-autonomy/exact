@@ -1,9 +1,37 @@
+import pickle
 from pathlib import Path
 
 import hydra
 from dlc2action.project import Project
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+
+
+def get_cached_stats_path(cfg: DictConfig) -> Path:
+    """Generate cache path for normalization stats based on config."""
+    data_path = Path(cfg.project.data_path).name
+    annotation_path = Path(cfg.project.annotation_path).name
+    # Note: cfg.features.keys shadows dict method, use bracket notation
+    features_str = "_".join(sorted(cfg.features["keys"]))
+    
+    cache_dir = Path("cache/norm_stats")
+    cache_file = cache_dir / f"{data_path}_{annotation_path}_{features_str}_stats.pkl"
+    return cache_file
+
+
+def load_cached_stats(cfg: DictConfig) -> dict | None:
+    """Load pre-computed normalization stats if available."""
+    cache_path = get_cached_stats_path(cfg)
+    
+    if cache_path.exists():
+        logger.info(f"Loading cached normalization stats from {cache_path}")
+        with open(cache_path, "rb") as f:
+            stats = pickle.load(f)
+        logger.success(f"Loaded stats for {len(stats)} feature keys")
+        return stats
+    else:
+        logger.info(f"No cached stats found at {cache_path}")
+        return None
 
 
 def build_params_dict(cfg: DictConfig) -> dict:
@@ -34,6 +62,12 @@ def main(cfg: DictConfig):
 
     # Build parameters dict for dlc2action
     params = build_params_dict(cfg)
+
+    # Load cached normalization stats if available (HUGE speedup in slow I/O environments)
+    cached_stats = load_cached_stats(cfg)
+    if cached_stats is not None:
+        params["training"]["stats"] = cached_stats
+        logger.info("Using pre-computed normalization stats (skipping slow computation)")
 
     logger.info(
         f"Initializing project '{project_cfg.project_name}' with data type "
