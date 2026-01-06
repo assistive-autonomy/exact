@@ -17,18 +17,31 @@ def get_cached_stats_path(cfg: DictConfig) -> Path:
     cache_dir = Path("cache/norm_stats")
     cache_file = cache_dir / f"{data_path}_{annotation_path}_{features_str}_stats.pkl"
     return cache_file
+import numpy as np
 
 
 def load_cached_stats(cfg: DictConfig) -> dict | None:
-    """Load pre-computed normalization stats if available."""
+    """Load pre-computed normalization stats if available.
+    
+    Converts numpy arrays to plain Python lists for YAML serialization compatibility.
+    """
     cache_path = get_cached_stats_path(cfg)
     
     if cache_path.exists():
         logger.info(f"Loading cached normalization stats from {cache_path}")
         with open(cache_path, "rb") as f:
             stats = pickle.load(f)
-        logger.success(f"Loaded stats for {len(stats)} feature keys")
-        return stats
+        
+        # Convert numpy arrays to lists for YAML serialization
+        stats_converted = {}
+        for key, value in stats.items():
+            stats_converted[key] = {
+                "mean": value["mean"].tolist() if isinstance(value["mean"], np.ndarray) else value["mean"],
+                "std": value["std"].tolist() if isinstance(value["std"], np.ndarray) else value["std"],
+            }
+        
+        logger.success(f"Loaded stats for {len(stats_converted)} feature keys")
+        return stats_converted
     else:
         logger.info(f"No cached stats found at {cache_path}")
         return None
