@@ -32,7 +32,7 @@ def get_cache_path(cfg: DictConfig) -> Path:
     # Note: cfg.features.keys shadows dict method, use bracket notation
     features_str = "_".join(sorted(cfg.features["keys"]))
     
-    cache_dir = Path("cache/norm_stats")
+    cache_dir = Path("data/norm_stats")
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     cache_file = cache_dir / f"{data_path}_{annotation_path}_{features_str}_stats.pkl"
