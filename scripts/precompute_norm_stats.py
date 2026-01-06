@@ -17,6 +17,7 @@ import pickle
 from pathlib import Path
 
 import hydra
+import numpy as np
 import torch
 from dlc2action.data.dataset import BehaviorDataset
 from loguru import logger
@@ -84,12 +85,22 @@ def compute_and_save_stats(cfg: DictConfig) -> None:
     logger.info(f"Computing stats (skip_keys={skip_keys})...")
     stats = dataset.get_normalization_stats(skip_keys=skip_keys)
     
-    # Convert tensors to CPU for serialization
+    # Convert tensors to numpy arrays for serialization
+    # dlc2action expects numpy arrays, not torch tensors, when loading from cache
     stats_serializable = {}
     for key, value in stats.items():
+        mean_val = value["mean"]
+        std_val = value["std"]
+        
+        # Convert to numpy if tensor
+        if isinstance(mean_val, torch.Tensor):
+            mean_val = mean_val.cpu().numpy()
+        if isinstance(std_val, torch.Tensor):
+            std_val = std_val.cpu().numpy()
+            
         stats_serializable[key] = {
-            "mean": value["mean"].cpu() if isinstance(value["mean"], torch.Tensor) else value["mean"],
-            "std": value["std"].cpu() if isinstance(value["std"], torch.Tensor) else value["std"],
+            "mean": mean_val,
+            "std": std_val,
         }
     
     # Save to cache
