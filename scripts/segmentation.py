@@ -20,6 +20,28 @@ def build_params_dict(cfg: DictConfig) -> dict:
     return params
 
 
+def build_search_space(cfg: DictConfig) -> dict:
+    """Build search space dictionary for hyperparameter search.
+    
+    Converts the YAML config format to DLC2Action's expected format:
+    {'param_name': ('type', arg1, arg2)}
+    """
+    if cfg.hyperparameter_search_space is None:
+        return None
+    
+    search_space = {}
+    for param_name, param_cfg in cfg.hyperparameter_search_space.items():
+        param_type = param_cfg.type
+        if param_type == "categorical":
+            search_space[param_name] = ("categorical", list(param_cfg.choices))
+        elif param_type in ["float", "float_log", "int", "int_log"]:
+            search_space[param_name] = (param_type, param_cfg.low, param_cfg.high)
+        else:
+            raise ValueError(f"Unknown parameter type: {param_type}")
+    
+    return search_space
+
+
 @hydra.main(version_base=None, config_path="../configs", config_name="segmentation")
 def main(cfg: DictConfig):
     """Run activity segmentation with DLC2Action framework."""
@@ -60,17 +82,40 @@ def main(cfg: DictConfig):
 
     logger.info("Starting hyperparameter search, training, and evaluation...")
 
+    # Build custom search space if provided
+    search_space = build_search_space(cfg)
+
     # Hyperparameter search
     logger.info(f"Running hyperparameter search for {len(models)} models...")
+    if search_space:
+        logger.info(f"Using custom search space with {len(search_space)} parameters:")
+        for param_name, param_spec in search_space.items():
+            logger.info(f"  - {param_name}: {param_spec}")
+    
     for model in models:
         logger.info(f"  Searching for {model}...")
-        project.run_default_hyperparameter_search(
-            f"{model}_search",
-            model_name=model,
-            num_epochs=cfg.hyperparameter_search_epochs,
-            n_trials=cfg.hyperparameter_search_trials,
-            metric=cfg.hyperparameter_search_metric,
-        )
+        if search_space:
+            # Use custom search space
+            project.run_hyperparameter_search(
+                f"{model}_search",
+                search_space=search_space,
+                metric=cfg.hyperparameter_search_metric,
+                n_trials=cfg.hyperparameter_search_trials,
+                parameters_update={
+                    "general": {"model_name": model},
+                    "training": {"num_epochs": cfg.hyperparameter_search_epochs},
+                },
+                force=True,
+            )
+        else:
+            # Use default search space for model
+            project.run_default_hyperparameter_search(
+                f"{model}_search",
+                model_name=model,
+                num_epochs=cfg.hyperparameter_search_epochs,
+                n_trials=cfg.hyperparameter_search_trials,
+                metric=cfg.hyperparameter_search_metric,
+            )
 
     # Train best models
     logger.info(f"Training best models for {len(models)} architectures...")

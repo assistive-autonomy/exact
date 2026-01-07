@@ -73,6 +73,29 @@ hyperparameter_search_trials: 20
 hyperparameter_search_metric: f1
 num_seeds: 3
 models: [ms_tcn3, c2f_tcn, edtcn, c2f_transformer]
+
+# Custom hyperparameter search space (only search these parameters)
+# Set to null to use default search space for each model
+hyperparameter_search_space:
+  losses/ms_tcn/focal:
+    type: categorical
+    choices: [true, false]
+  losses/ms_tcn/alpha:
+    type: float_log
+    low: 0.00001
+    high: 0.01
+  training/temporal_subsampling_size:
+    type: float
+    low: 0.75
+    high: 1.0
+  model/num_f_maps:
+    type: int_log
+    low: 32
+    high: 128
+  general/len_segment:
+    type: categorical
+    choices: [256, 512, 1024, 2048]
+
 output_dir: results/segmentation
 training_curves_path: training_curves.png
 results_table_path: results.csv
