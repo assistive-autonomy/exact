@@ -71,6 +71,7 @@ model:
 hyperparameter_search_epochs: 10
 hyperparameter_search_trials: 20
 hyperparameter_search_metric: f1
+hyperparameter_val_frac: 0.2  # Fraction of train data used for validation during HP search
 num_seeds: 3
 models: [ms_tcn3, c2f_tcn, edtcn, c2f_transformer]
 
@@ -94,7 +95,7 @@ hyperparameter_search_space:
     high: 128
   general/len_segment:
     type: categorical
-    choices: [256, 512, 1024, 2048]
+    choices: [256, 512, 1024]
 
 output_dir: results/segmentation
 training_curves_path: training_curves.png

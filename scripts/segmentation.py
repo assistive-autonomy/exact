@@ -85,15 +85,34 @@ def main(cfg: DictConfig):
     # Build custom search space if provided
     search_space = build_search_space(cfg)
 
-    # Hyperparameter search
+    # =========================================================================
+    # PHASE 1: Hyperparameter Search
+    # Use only training data from split file, further split into train/val
+    # =========================================================================
     logger.info(f"Running hyperparameter search for {len(models)} models...")
+    logger.info("  Using train portion split into train/val for hyperparameter tuning")
     if search_space:
-        logger.info(f"Using custom search space with {len(search_space)} parameters:")
+        logger.info(f"  Custom search space with {len(search_space)} parameters:")
         for param_name, param_spec in search_space.items():
-            logger.info(f"  - {param_name}: {param_spec}")
+            logger.info(f"    - {param_name}: {param_spec}")
+    
+    # Parameters for hyperparameter search phase:
+    # - Override partition_method to allow train/val split (file-based doesn't support val_frac)
+    # - Use time-based splitting within training data for validation
+    hp_search_params = {
+        "general": {"model_name": None},  # Will be set per model
+        "training": {
+            "num_epochs": cfg.hyperparameter_search_epochs,
+            "partition_method": "time",  # Override to allow val_frac to work
+            "val_frac": cfg.get("hyperparameter_val_frac", 0.2),  # Split train into train/val
+            "test_frac": 0,  # Don't use test data during HP search
+        },
+    }
     
     for model in models:
         logger.info(f"  Searching for {model}...")
+        hp_search_params["general"]["model_name"] = model
+        
         if search_space:
             # Use custom search space
             project.run_hyperparameter_search(
@@ -101,10 +120,7 @@ def main(cfg: DictConfig):
                 search_space=search_space,
                 metric=cfg.hyperparameter_search_metric,
                 n_trials=cfg.hyperparameter_search_trials,
-                parameters_update={
-                    "general": {"model_name": model},
-                    "training": {"num_epochs": cfg.hyperparameter_search_epochs},
-                },
+                parameters_update=hp_search_params,
                 force=True,
             )
         else:
@@ -117,14 +133,28 @@ def main(cfg: DictConfig):
                 metric=cfg.hyperparameter_search_metric,
             )
 
-    # Train best models
-    logger.info(f"Training best models for {len(models)} architectures...")
+    # =========================================================================
+    # PHASE 2: Final Training
+    # Train on full training data (no validation split) with best hyperparameters
+    # =========================================================================
+    logger.info(f"Training final models for {len(models)} architectures...")
+    logger.info("  Using full train portion for final training")
+    
     for model in models:
-        logger.info(f"  Training best {model}...")
+        logger.info(f"  Training {model} with best hyperparameters...")
         project.run_episode(
             f"{model}_best",
             load_search=f"{model}_search",
-            parameters_update={"general": {"model_name": model}},
+            parameters_update={
+                "general": {"model_name": model},
+                "training": {
+                    "num_epochs": cfg.training.num_epochs,  # Full training epochs
+                    "partition_method": "file",  # Use original file-based split
+                    "split_path": cfg.training.split_path,  # Restore split file path
+                    "val_frac": 0,  # No validation split - use full train data
+                    "test_frac": 0,  # Test is determined by split file
+                },
+            },
             n_seeds=cfg.num_seeds,
             force=True,
         )
@@ -140,10 +170,15 @@ def main(cfg: DictConfig):
     )
     logger.info(f"Training curves saved to {training_curves_path}")
 
-    # Evaluate additional metrics
-    logger.info("Evaluating additional metrics...")
+    # =========================================================================
+    # PHASE 3: Final Evaluation on Test Set
+    # Evaluate trained models on held-out test data from split file
+    # =========================================================================
+    logger.info("Evaluating models on held-out test set...")
+    logger.info("  Using test portion from split file for final evaluation")
+    
     for model in models:
-        logger.info(f"  Evaluating {model}...")
+        logger.info(f"  Evaluating {model} on test set...")
         project.evaluate(
             [f"{model}_best"],
             parameters_update={
