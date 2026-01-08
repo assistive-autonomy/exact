@@ -29,13 +29,14 @@ data:
   filter_background: false
   visibility_min_score: 0
   visibility_min_frac: 0
+  num_cpus: 2  # Limit parallel workers to reduce memory usage
 
 training:
   lr: 0.001
   device: auto
   num_epochs: 50
   to_ram: false
-  batch_size: 64
+  batch_size: 32  # Reduced from 64 to lower memory usage
   normalize: true
   temporal_subsampling_size: 0.85
   parallel: false
@@ -95,7 +96,7 @@ hyperparameter_search_space:
     high: 128
   general/len_segment:
     type: categorical
-    choices: [256, 512, 1024]
+    choices: [1024]  # Fixed to avoid memory-heavy feature recomputation
 
 output_dir: results/segmentation
 training_curves_path: training_curves.png

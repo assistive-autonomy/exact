@@ -1,9 +1,19 @@
+import gc
 from pathlib import Path
 
 import hydra
+import torch
 from dlc2action.project import Project
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
+
+
+def cleanup_memory():
+    """Force garbage collection and clear CUDA cache to free memory."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
 
 
 def build_params_dict(cfg: DictConfig) -> dict:
@@ -20,22 +30,45 @@ def build_params_dict(cfg: DictConfig) -> dict:
     return params
 
 
-def build_search_space(cfg: DictConfig) -> dict:
+# Model-specific parameter mappings
+# Some models use different parameter names for similar concepts
+MODEL_PARAM_SUPPORT = {
+    # Models that support num_f_maps
+    "ms_tcn3": {"num_f_maps": "model/num_f_maps"},
+    "c2f_tcn": {"num_f_maps": "model/num_f_maps"},
+    "c2f_transformer": {"num_f_maps": "model/num_f_maps"},
+    # EDTCN uses mid_channels instead of num_f_maps
+    "edtcn": {"num_f_maps": "model/mid_channels"},
+}
+
+
+def build_search_space(cfg: DictConfig, model_name: str = None) -> dict:
     """Build search space dictionary for hyperparameter search.
     
     Converts the YAML config format to DLC2Action's expected format:
     {'param_name': ('type', arg1, arg2)}
+    
+    Args:
+        cfg: Configuration object
+        model_name: Model name to adapt search space for (handles model-specific params)
     """
     if cfg.hyperparameter_search_space is None:
         return None
     
     search_space = {}
     for param_name, param_cfg in cfg.hyperparameter_search_space.items():
+        # Handle model-specific parameter name mapping
+        actual_param_name = param_name
+        if model_name and param_name == "model/num_f_maps":
+            # Map num_f_maps to model-specific parameter name
+            if model_name in MODEL_PARAM_SUPPORT:
+                actual_param_name = MODEL_PARAM_SUPPORT[model_name].get("num_f_maps", param_name)
+        
         param_type = param_cfg.type
         if param_type == "categorical":
-            search_space[param_name] = ("categorical", list(param_cfg.choices))
+            search_space[actual_param_name] = ("categorical", list(param_cfg.choices))
         elif param_type in ["float", "float_log", "int", "int_log"]:
-            search_space[param_name] = (param_type, param_cfg.low, param_cfg.high)
+            search_space[actual_param_name] = (param_type, param_cfg.low, param_cfg.high)
         else:
             raise ValueError(f"Unknown parameter type: {param_type}")
     
@@ -62,12 +95,7 @@ def main(cfg: DictConfig):
         f"'{project_cfg.data_type}' and annotation type '{project_cfg.annotation_type}'"
     )
 
-    # Remove existing project if it exists
-    Project.remove_project(
-        project_cfg.project_name, projects_path=project_cfg.projects_path
-    )
-
-    # Initialize project
+    # Initialize project (will load existing project if it exists)
     project = Project(
         project_cfg.project_name,
         projects_path=project_cfg.projects_path,
@@ -77,13 +105,18 @@ def main(cfg: DictConfig):
         annotation_path=project_cfg.annotation_path,
     )
 
+    # Check for existing searches and episodes (DataFrames - names are in index)
+    searches_df = project.list_searches()
+    episodes_df = project.list_episodes()
+    existing_searches = set(searches_df.index.tolist()) if len(searches_df) > 0 else set()
+    existing_episodes = set(episodes_df.index.tolist()) if len(episodes_df) > 0 else set()
+    logger.info(f"Found {len(existing_searches)} existing searches: {existing_searches}")
+    logger.info(f"Found {len(existing_episodes)} existing episodes: {existing_episodes}")
+
     logger.info("Updating project parameters...")
     project.update_parameters(params)
 
     logger.info("Starting hyperparameter search, training, and evaluation...")
-
-    # Build custom search space if provided
-    search_space = build_search_space(cfg)
 
     # =========================================================================
     # PHASE 1: Hyperparameter Search
@@ -91,10 +124,6 @@ def main(cfg: DictConfig):
     # =========================================================================
     logger.info(f"Running hyperparameter search for {len(models)} models...")
     logger.info("  Using train portion split into train/val for hyperparameter tuning")
-    if search_space:
-        logger.info(f"  Custom search space with {len(search_space)} parameters:")
-        for param_name, param_spec in search_space.items():
-            logger.info(f"    - {param_name}: {param_spec}")
     
     # Parameters for hyperparameter search phase:
     # - Override partition_method to allow train/val split (file-based doesn't support val_frac)
@@ -110,28 +139,46 @@ def main(cfg: DictConfig):
     }
     
     for model in models:
+        search_name = f"{model}_search"
+        
+        # Skip if search already exists
+        if search_name in existing_searches:
+            logger.info(f"  Skipping {model} - search '{search_name}' already exists")
+            continue
+        
+        # Build model-specific search space
+        search_space = build_search_space(cfg, model_name=model)
+        if search_space:
+            logger.info(f"  Custom search space for {model} with {len(search_space)} parameters:")
+            for param_name, param_spec in search_space.items():
+                logger.info(f"    - {param_name}: {param_spec}")
+            
         logger.info(f"  Searching for {model}...")
         hp_search_params["general"]["model_name"] = model
         
         if search_space:
             # Use custom search space
             project.run_hyperparameter_search(
-                f"{model}_search",
+                search_name,
                 search_space=search_space,
                 metric=cfg.hyperparameter_search_metric,
                 n_trials=cfg.hyperparameter_search_trials,
                 parameters_update=hp_search_params,
-                force=True,
+                force=False,  # Don't overwrite existing searches
             )
         else:
             # Use default search space for model
             project.run_default_hyperparameter_search(
-                f"{model}_search",
+                search_name,
                 model_name=model,
                 num_epochs=cfg.hyperparameter_search_epochs,
                 n_trials=cfg.hyperparameter_search_trials,
                 metric=cfg.hyperparameter_search_metric,
             )
+        
+        # Clean up memory after each model's hyperparameter search
+        logger.info(f"  Cleaning up memory after {model} search...")
+        cleanup_memory()
 
     # =========================================================================
     # PHASE 2: Final Training
@@ -141,10 +188,25 @@ def main(cfg: DictConfig):
     logger.info("  Using full train portion for final training")
     
     for model in models:
+        episode_name = f"{model}_best"
+        search_name = f"{model}_search"
+        
+        # Skip if episode already exists
+        if episode_name in existing_episodes:
+            logger.info(f"  Skipping {model} training - episode '{episode_name}' already exists")
+            continue
+        
+        # Check if search exists (required for training)
+        # Re-query searches in case new ones were added during this run
+        current_searches = set(project.list_searches().index.tolist())
+        if search_name not in existing_searches and search_name not in current_searches:
+            logger.warning(f"  Skipping {model} training - search '{search_name}' not found")
+            continue
+            
         logger.info(f"  Training {model} with best hyperparameters...")
         project.run_episode(
-            f"{model}_best",
-            load_search=f"{model}_search",
+            episode_name,
+            load_search=search_name,
             parameters_update={
                 "general": {"model_name": model},
                 "training": {
@@ -156,8 +218,11 @@ def main(cfg: DictConfig):
                 },
             },
             n_seeds=cfg.num_seeds,
-            force=True,
+            force=False,  # Don't overwrite existing episodes
         )
+        
+        # Clean up memory after training
+        cleanup_memory()
 
     # Plot training curves
     logger.info("Plotting training curves...")
