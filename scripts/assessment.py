@@ -115,11 +115,13 @@ def evaluate_by_activity(
 
     all_target_scores = []
     all_other_scores = []
+    other_activity_means = []  # For balanced separation calculation
 
     for activity, scores in activity_scores.items():
         scores = np.array(scores)
+        activity_mean = float(np.mean(scores))
         results["per_activity"][activity] = {
-            "mean_log_prob": float(np.mean(scores)),
+            "mean_log_prob": activity_mean,
             "std_log_prob": float(np.std(scores)),
             "n_samples": len(scores),
         }
@@ -128,16 +130,18 @@ def evaluate_by_activity(
             all_target_scores.extend(scores)
         else:
             all_other_scores.extend(scores)
+            other_activity_means.append(activity_mean)
 
-    # Compute separation metrics
-    if all_target_scores and all_other_scores:
+    # Compute separation metrics (class-balanced: average of per-activity means)
+    if all_target_scores and other_activity_means:
         target_mean = np.mean(all_target_scores)
-        other_mean = np.mean(all_other_scores)
+        # Balanced: each activity contributes equally regardless of sample count
+        other_mean_balanced = np.mean(other_activity_means)
 
         # Higher target mean = better (model assigns higher prob to target)
         results["target_mean_log_prob"] = float(target_mean)
-        results["other_mean_log_prob"] = float(other_mean)
-        results["separation"] = float(target_mean - other_mean)
+        results["other_mean_log_prob"] = float(other_mean_balanced)
+        results["separation"] = float(target_mean - other_mean_balanced)
 
         # Compute AUC: can we distinguish target from others?
         all_scores = np.array(all_target_scores + all_other_scores)

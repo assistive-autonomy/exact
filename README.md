@@ -16,11 +16,37 @@ uv venv && uv sync
 Temporal action segmentation using DLC2Action framework with multiple models (MS-TCN3, C2F-TCN, ED-TCN, C2F-Transformer).
 
 ```bash
-# Run segmentation experiment
+# Run segmentation experiment (100% training data)
 uv run scripts/segmentation.py
+
+# Run with reduced training data (50%)
+uv run scripts/segmentation.py train_fraction=0.5
+
+# Run with 25% training data
+uv run scripts/segmentation.py train_fraction=0.25
 
 # Override config
 uv run scripts/segmentation.py project.annotation_path=esk/D2A_converted_label_activity
+```
+
+#### Training Data Fraction Experiments
+
+The segmentation pipeline supports experiments with different training data fractions to analyze data efficiency:
+
+- **`train_fraction`**: Fraction of training videos to use (1.0 = 100%, 0.5 = 50%, 0.25 = 25%)
+- Each fraction creates a separate project (e.g., `esk_verbs_100pct`, `esk_verbs_50pct`, `esk_verbs_25pct`)
+- HP search uses the same fraction for consistency
+- Each seed uses a **different random subset** of training videos (subsets may overlap)
+- Validation and test sets remain unchanged
+
+Example workflow:
+```bash
+# Run experiments with different fractions
+uv run scripts/segmentation.py train_fraction=1.0    # Creates esk_verbs_100pct
+uv run scripts/segmentation.py train_fraction=0.5    # Creates esk_verbs_50pct  
+uv run scripts/segmentation.py train_fraction=0.25   # Creates esk_verbs_25pct
+
+# Results saved to results/segmentation/results.csv for each run
 ```
 
 ### Activity Assessment

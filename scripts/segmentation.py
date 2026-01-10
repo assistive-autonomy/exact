@@ -1,7 +1,11 @@
 import gc
+import random
+import shutil
+import tempfile
 from pathlib import Path
 
 import hydra
+import pandas as pd
 import torch
 from dlc2action.project import Project
 from loguru import logger
@@ -14,6 +18,86 @@ def cleanup_memory():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     gc.collect()
+
+
+def parse_split_file(split_path: str) -> dict:
+    """Parse a train/val/test split file.
+    
+    Returns:
+        dict with keys 'train', 'validation', 'test' containing lists of video names
+    """
+    splits = {"train": [], "validation": [], "test": []}
+    current_section = None
+    
+    with open(split_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("Train videos:"):
+                current_section = "train"
+            elif line.startswith("Validation videos:"):
+                current_section = "validation"
+            elif line.startswith("Test videos:"):
+                current_section = "test"
+            elif current_section:
+                splits[current_section].append(line)
+    
+    return splits
+
+
+def write_split_file(splits: dict, output_path: str):
+    """Write a split file from a splits dictionary."""
+    with open(output_path, "w") as f:
+        f.write("Train videos:\n")
+        for video in splits["train"]:
+            f.write(f"{video}\n")
+        f.write("Validation videos:\n")
+        for video in splits["validation"]:
+            f.write(f"{video}\n")
+        f.write("Test videos:\n")
+        for video in splits["test"]:
+            f.write(f"{video}\n")
+
+
+def subsample_train_videos(splits: dict, fraction: float, seed: int) -> dict:
+    """Create a new splits dict with subsampled training videos.
+    
+    Args:
+        splits: Original splits dictionary
+        fraction: Fraction of training videos to keep (0.0-1.0)
+        seed: Random seed for reproducibility
+        
+    Returns:
+        New splits dict with subsampled training videos
+    """
+    if fraction >= 1.0:
+        return splits
+    
+    train_videos = splits["train"].copy()
+    n_total = len(train_videos)
+    n_keep = max(1, int(n_total * fraction))
+    
+    # Use seed for reproducibility
+    rng = random.Random(seed)
+    sampled_train = rng.sample(train_videos, n_keep)
+    
+    logger.info(f"    Subsampled {n_keep}/{n_total} training videos (seed={seed})")
+    
+    return {
+        "train": sampled_train,
+        "validation": splits["validation"],
+        "test": splits["test"],
+    }
+
+
+def get_project_name(base_name: str, train_fraction: float) -> str:
+    """Generate project name including train fraction."""
+    if train_fraction >= 1.0:
+        return f"{base_name}_100pct"
+    else:
+        pct = int(train_fraction * 100)
+        return f"{base_name}_{pct}pct"
 
 
 def build_params_dict(cfg: DictConfig) -> dict:
@@ -32,13 +116,17 @@ def build_params_dict(cfg: DictConfig) -> dict:
 
 # Model-specific parameter mappings
 # Some models use different parameter names for similar concepts
+# None means the parameter should be skipped for that model
 MODEL_PARAM_SUPPORT = {
     # Models that support num_f_maps
     "ms_tcn3": {"num_f_maps": "model/num_f_maps"},
     "c2f_tcn": {"num_f_maps": "model/num_f_maps"},
-    "c2f_transformer": {"num_f_maps": "model/num_f_maps"},
-    # EDTCN uses mid_channels instead of num_f_maps
-    "edtcn": {"num_f_maps": "model/mid_channels"},
+    # c2f_transformer requires num_f_maps to be divisible by heads (default 4)
+    # Skip to avoid divisibility issues during HP search
+    "c2f_transformer": {"num_f_maps": None},
+    # EDTCN uses mid_channels which is a list, not comparable to num_f_maps
+    # Skip num_f_maps search for EDTCN
+    "edtcn": {"num_f_maps": None},
 }
 
 
@@ -62,7 +150,12 @@ def build_search_space(cfg: DictConfig, model_name: str = None) -> dict:
         if model_name and param_name == "model/num_f_maps":
             # Map num_f_maps to model-specific parameter name
             if model_name in MODEL_PARAM_SUPPORT:
-                actual_param_name = MODEL_PARAM_SUPPORT[model_name].get("num_f_maps", param_name)
+                mapped_name = MODEL_PARAM_SUPPORT[model_name].get("num_f_maps", param_name)
+                if mapped_name is None:
+                    # Skip this parameter for this model
+                    logger.info(f"    Skipping {param_name} for {model_name} (not supported)")
+                    continue
+                actual_param_name = mapped_name
         
         param_type = param_cfg.type
         if param_type == "categorical":
@@ -84,20 +177,32 @@ def main(cfg: DictConfig):
     # Extract project configuration
     project_cfg = cfg.project
     models = cfg.models
+    train_fraction = cfg.get("train_fraction", 1.0)
+    num_seeds = cfg.num_seeds
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate project name with fraction
+    project_name = get_project_name(project_cfg.project_name, train_fraction)
+    logger.info(f"Project name: {project_name} (train_fraction={train_fraction})")
+
+    # Parse the base split file
+    base_split_path = cfg.training.split_path
+    base_splits = parse_split_file(base_split_path)
+    logger.info(f"Base split: {len(base_splits['train'])} train, "
+                f"{len(base_splits['validation'])} val, {len(base_splits['test'])} test videos")
 
     # Build parameters dict for dlc2action
     params = build_params_dict(cfg)
 
     logger.info(
-        f"Initializing project '{project_cfg.project_name}' with data type "
+        f"Initializing project '{project_name}' with data type "
         f"'{project_cfg.data_type}' and annotation type '{project_cfg.annotation_type}'"
     )
 
     # Initialize project (will load existing project if it exists)
     project = Project(
-        project_cfg.project_name,
+        project_name,
         projects_path=project_cfg.projects_path,
         data_type=project_cfg.data_type,
         annotation_type=project_cfg.annotation_type,
@@ -118,150 +223,204 @@ def main(cfg: DictConfig):
 
     logger.info("Starting hyperparameter search, training, and evaluation...")
 
-    # =========================================================================
-    # PHASE 1: Hyperparameter Search
-    # Use only training data from split file, further split into train/val
-    # =========================================================================
-    logger.info(f"Running hyperparameter search for {len(models)} models...")
-    logger.info("  Using train portion split into train/val for hyperparameter tuning")
-    
-    # Parameters for hyperparameter search phase:
-    # - Override partition_method to allow train/val split (file-based doesn't support val_frac)
-    # - Use time-based splitting within training data for validation
-    hp_search_params = {
-        "general": {"model_name": None},  # Will be set per model
-        "training": {
-            "num_epochs": cfg.hyperparameter_search_epochs,
-            "partition_method": "time",  # Override to allow val_frac to work
-            "val_frac": cfg.get("hyperparameter_val_frac", 0.2),  # Split train into train/val
-            "test_frac": 0,  # Don't use test data during HP search
-        },
-    }
-    
-    for model in models:
-        search_name = f"{model}_search"
+    # Create temp directory for dynamic split files
+    temp_dir = Path(tempfile.mkdtemp(prefix="dlc2a_splits_"))
+    logger.info(f"Using temp directory for split files: {temp_dir}")
+
+    try:
+        # =====================================================================
+        # PHASE 1: Hyperparameter Search
+        # Use subsampled train data (same fraction) for hyperparameter tuning
+        # =====================================================================
+        logger.info(f"Running hyperparameter search for {len(models)} models...")
+        logger.info(f"  Using {train_fraction*100:.0f}% of training data for HP search")
         
-        # Skip if search already exists
-        if search_name in existing_searches:
-            logger.info(f"  Skipping {model} - search '{search_name}' already exists")
-            continue
+        # Create a subsampled split file for HP search (seed=0 for consistency)
+        hp_splits = subsample_train_videos(base_splits, train_fraction, seed=0)
+        hp_split_path = temp_dir / "hp_search_split.txt"
+        write_split_file(hp_splits, str(hp_split_path))
         
-        # Build model-specific search space
-        search_space = build_search_space(cfg, model_name=model)
-        if search_space:
-            logger.info(f"  Custom search space for {model} with {len(search_space)} parameters:")
-            for param_name, param_spec in search_space.items():
-                logger.info(f"    - {param_name}: {param_spec}")
+        # Parameters for hyperparameter search phase
+        hp_search_params = {
+            "general": {"model_name": None},  # Will be set per model
+            "training": {
+                "num_epochs": cfg.hyperparameter_search_epochs,
+                "partition_method": "file",
+                "split_path": str(hp_split_path),
+            },
+        }
+        
+        for model in models:
+            search_name = f"{model}_search"
             
-        logger.info(f"  Searching for {model}...")
-        hp_search_params["general"]["model_name"] = model
+            # Skip if search already exists
+            if search_name in existing_searches:
+                logger.info(f"  Skipping {model} - search '{search_name}' already exists")
+                continue
+            
+            # Build model-specific search space
+            search_space = build_search_space(cfg, model_name=model)
+            if search_space:
+                logger.info(f"  Custom search space for {model} with {len(search_space)} parameters:")
+                for param_name, param_spec in search_space.items():
+                    logger.info(f"    - {param_name}: {param_spec}")
+                
+            logger.info(f"  Searching for {model}...")
+            hp_search_params["general"]["model_name"] = model
+            
+            if search_space:
+                # Use custom search space
+                project.run_hyperparameter_search(
+                    search_name,
+                    search_space=search_space,
+                    metric=cfg.hyperparameter_search_metric,
+                    n_trials=cfg.hyperparameter_search_trials,
+                    parameters_update=hp_search_params,
+                    force=False,
+                )
+            else:
+                # Use default search space for model
+                project.run_default_hyperparameter_search(
+                    search_name,
+                    model_name=model,
+                    num_epochs=cfg.hyperparameter_search_epochs,
+                    n_trials=cfg.hyperparameter_search_trials,
+                    metric=cfg.hyperparameter_search_metric,
+                )
+            
+            # Clean up memory after each model's hyperparameter search
+            logger.info(f"  Cleaning up memory after {model} search...")
+            cleanup_memory()
+
+        # =====================================================================
+        # PHASE 2: Final Training
+        # Train with best hyperparameters, each seed uses different random subset
+        # =====================================================================
+        logger.info(f"Training final models for {len(models)} architectures...")
+        logger.info(f"  Using {train_fraction*100:.0f}% of training data, {num_seeds} seeds each")
         
-        if search_space:
-            # Use custom search space
-            project.run_hyperparameter_search(
-                search_name,
-                search_space=search_space,
-                metric=cfg.hyperparameter_search_metric,
-                n_trials=cfg.hyperparameter_search_trials,
-                parameters_update=hp_search_params,
-                force=False,  # Don't overwrite existing searches
-            )
+        for model in models:
+            search_name = f"{model}_search"
+            
+            # Check if search exists (required for training)
+            current_searches = set(project.list_searches().index.tolist())
+            if search_name not in existing_searches and search_name not in current_searches:
+                logger.warning(f"  Skipping {model} training - search '{search_name}' not found")
+                continue
+            
+            # Train each seed with a different random subset
+            for seed_idx in range(num_seeds):
+                episode_name = f"{model}_best#{seed_idx}"
+                
+                # Skip if episode already exists
+                if episode_name in existing_episodes:
+                    logger.info(f"  Skipping {model} seed {seed_idx} - episode '{episode_name}' already exists")
+                    continue
+                
+                logger.info(f"  Training {model} seed {seed_idx}/{num_seeds-1}...")
+                
+                # Create subsampled split file for this seed
+                seed_splits = subsample_train_videos(base_splits, train_fraction, seed=seed_idx)
+                seed_split_path = temp_dir / f"train_split_seed{seed_idx}.txt"
+                write_split_file(seed_splits, str(seed_split_path))
+                
+                # Run single episode (n_seeds=1 since we handle seeds manually)
+                project.run_episode(
+                    episode_name,
+                    load_search=search_name,
+                    parameters_update={
+                        "general": {"model_name": model},
+                        "training": {
+                            "num_epochs": cfg.training.num_epochs,
+                            "partition_method": "file",
+                            "split_path": str(seed_split_path),
+                        },
+                    },
+                    n_seeds=1,  # We handle seeds manually for different subsets
+                    force=False,
+                )
+                
+                # Clean up memory after each seed
+                cleanup_memory()
+
+        # =====================================================================
+        # PHASE 3: Final Evaluation on Test Set
+        # Evaluate all trained models on held-out test data
+        # =====================================================================
+        logger.info("Evaluating models on held-out test set...")
+        logger.info("  Using test portion from split file for final evaluation")
+        
+        # Get current episodes for evaluation
+        current_episodes = set(project.list_episodes().index.tolist())
+        
+        # Collect evaluation results
+        all_results = []
+        for model in models:
+            for seed_idx in range(num_seeds):
+                episode_name = f"{model}_best#{seed_idx}"
+                
+                if episode_name not in current_episodes:
+                    logger.warning(f"  Skipping {episode_name} - not found")
+                    continue
+                
+                logger.info(f"  Evaluating {episode_name} on test set...")
+                metrics = project.evaluate(
+                    [episode_name],
+                    mode="test",
+                    skip_updating_meta=False,
+                    parameters_update={
+                        "general": {"metric_functions": ["segmental_f1", "pr-auc", "f1"]},
+                        "metrics": {"f1": {"average": "macro"}},
+                        "training": {
+                            "partition_method": "file",
+                            "split_path": base_split_path,  # Use base split for test eval
+                        },
+                    },
+                )
+                
+                result_row = {
+                    "model": model,
+                    "seed": seed_idx,
+                    "episode": episode_name,
+                    "train_fraction": train_fraction,
+                }
+                result_row.update(metrics)
+                all_results.append(result_row)
+                logger.info(f"    {episode_name} test metrics: {metrics}")
+
+        # Create results DataFrame
+        logger.info("Generating results table...")
+        if all_results:
+            results_df = pd.DataFrame(all_results)
+            
+            # Compute summary statistics per model
+            logger.info("\n=== Results Summary ===")
+            for model in models:
+                model_results = results_df[results_df["model"] == model]
+                if len(model_results) > 0:
+                    for metric in ["f1", "segmental_f1", "pr-auc"]:
+                        if metric in model_results.columns:
+                            mean_val = model_results[metric].mean()
+                            std_val = model_results[metric].std()
+                            logger.info(f"  {model} {metric}: {mean_val:.4f} ± {std_val:.4f}")
         else:
-            # Use default search space for model
-            project.run_default_hyperparameter_search(
-                search_name,
-                model_name=model,
-                num_epochs=cfg.hyperparameter_search_epochs,
-                n_trials=cfg.hyperparameter_search_trials,
-                metric=cfg.hyperparameter_search_metric,
-            )
-        
-        # Clean up memory after each model's hyperparameter search
-        logger.info(f"  Cleaning up memory after {model} search...")
-        cleanup_memory()
+            logger.warning("No results collected!")
+            results_df = pd.DataFrame()
 
-    # =========================================================================
-    # PHASE 2: Final Training
-    # Train on full training data (no validation split) with best hyperparameters
-    # =========================================================================
-    logger.info(f"Training final models for {len(models)} architectures...")
-    logger.info("  Using full train portion for final training")
-    
-    for model in models:
-        episode_name = f"{model}_best"
-        search_name = f"{model}_search"
-        
-        # Skip if episode already exists
-        if episode_name in existing_episodes:
-            logger.info(f"  Skipping {model} training - episode '{episode_name}' already exists")
-            continue
-        
-        # Check if search exists (required for training)
-        # Re-query searches in case new ones were added during this run
-        current_searches = set(project.list_searches().index.tolist())
-        if search_name not in existing_searches and search_name not in current_searches:
-            logger.warning(f"  Skipping {model} training - search '{search_name}' not found")
-            continue
-            
-        logger.info(f"  Training {model} with best hyperparameters...")
-        project.run_episode(
-            episode_name,
-            load_search=search_name,
-            parameters_update={
-                "general": {"model_name": model},
-                "training": {
-                    "num_epochs": cfg.training.num_epochs,  # Full training epochs
-                    "partition_method": "file",  # Use original file-based split
-                    "split_path": cfg.training.split_path,  # Restore split file path
-                    "val_frac": 0,  # No validation split - use full train data
-                    "test_frac": 0,  # Test is determined by split file
-                },
-            },
-            n_seeds=cfg.num_seeds,
-            force=False,  # Don't overwrite existing episodes
-        )
-        
-        # Clean up memory after training
-        cleanup_memory()
+        # Save results
+        results_table_path = output_dir / cfg.results_table_path
+        results_df.to_csv(str(results_table_path), index=False)
+        logger.info(f"Results table saved to {results_table_path}")
+        logger.info(f"\nFull results:\n{results_df.to_string()}")
 
-    # Plot training curves
-    logger.info("Plotting training curves...")
-    training_curves_path = output_dir / cfg.training_curves_path
-    project.plot_episodes(
-        [f"{model}_best" for model in models],
-        metrics=["f1"],
-        save_path=str(training_curves_path),
-        title="Best model training curves",
-    )
-    logger.info(f"Training curves saved to {training_curves_path}")
+        logger.success("Activity segmentation complete!")
+        logger.info(f"Results: {output_dir.resolve()}")
 
-    # =========================================================================
-    # PHASE 3: Final Evaluation on Test Set
-    # Evaluate trained models on held-out test data from split file
-    # =========================================================================
-    logger.info("Evaluating models on held-out test set...")
-    logger.info("  Using test portion from split file for final evaluation")
-    
-    for model in models:
-        logger.info(f"  Evaluating {model} on test set...")
-        project.evaluate(
-            [f"{model}_best"],
-            parameters_update={
-                "general": {"metric_functions": ["segmental_f1", "pr-auc", "f1"]},
-                "metrics": {"f1": {"average": "none"}},
-            },
-        )
-
-    # Get and save results table
-    logger.info("Generating results table...")
-    results_df = project.get_results_table([f"{model}_best" for model in models])
-
-    results_table_path = output_dir / cfg.results_table_path
-    results_df.to_csv(str(results_table_path), index=False)
-    logger.info(f"Results table saved to {results_table_path}")
-
-    logger.success("Activity segmentation complete!")
-    logger.info(f"Results: {output_dir.resolve()}")
+    finally:
+        # Clean up temp directory
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+            logger.info(f"Cleaned up temp directory: {temp_dir}")
 
 
 if __name__ == "__main__":

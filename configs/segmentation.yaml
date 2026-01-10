@@ -41,7 +41,7 @@ training:
   temporal_subsampling_size: 0.85
   parallel: false
   partition_method: file
-  split_path: esk/traintest_split.txt
+  split_path: esk/trainvaltest_split.txt
 
 losses:
   ms_tcn:
@@ -72,9 +72,13 @@ model:
 hyperparameter_search_epochs: 10
 hyperparameter_search_trials: 20
 hyperparameter_search_metric: f1
-hyperparameter_val_frac: 0.2  # Fraction of train data used for validation during HP search
-num_seeds: 3
+num_seeds: 5
 models: [ms_tcn3, c2f_tcn, edtcn, c2f_transformer]
+
+# Fraction of training data to use (1.0 = 100%, 0.5 = 50%, 0.25 = 25%)
+# Each seed will use a different random subset of training videos
+# Validation and test sets remain unchanged
+train_fraction: 1.0
 
 # Custom hyperparameter search space (only search these parameters)
 # Set to null to use default search space for each model
@@ -96,7 +100,7 @@ hyperparameter_search_space:
     high: 128
   general/len_segment:
     type: categorical
-    choices: [1024]  # Fixed to avoid memory-heavy feature recomputation
+    choices: [256, 528, 1024] 
 
 output_dir: results/segmentation
 training_curves_path: training_curves.png
