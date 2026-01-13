@@ -40,8 +40,9 @@ dataloader_prefetch_factor: 2
 gradient_checkpointing: false
 eval_strategy: epoch
 
-# DeepSpeed (comment out to disable distributed training)
-deepspeed: configs/ds_config.json
+# DeepSpeed (comment out to use native PyTorch DDP)
+# Requires python3-dev to be installed: apt-get install -y python3-dev
+# deepspeed: configs/ds_config.json
 save_strategy: epoch
 save_total_limit: 2
 load_best_model_at_end: true
