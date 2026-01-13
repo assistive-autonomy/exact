@@ -62,6 +62,18 @@ def get_device(device_str: str) -> torch.device:
     return torch.device(device_str)
 
 
+def get_model_hidden_size(model) -> int:
+    """Get hidden size from model config (handles Gemma and Llama)."""
+    config = model.config
+    # Gemma 3 uses text_config.hidden_size
+    if hasattr(config, "text_config") and hasattr(config.text_config, "hidden_size"):
+        return config.text_config.hidden_size
+    # Standard models (Llama, etc.) use hidden_size directly
+    if hasattr(config, "hidden_size"):
+        return config.hidden_size
+    raise AttributeError(f"Cannot find hidden_size in model config: {type(config)}")
+
+
 def get_collate_fn(tokenizer):
     """Create a collate function for the dataloader."""
 
@@ -284,7 +296,7 @@ def main():
         device_map="auto",
         low_cpu_mem_usage=True,
     )
-    model_hidden_size = base_model.config.hidden_size
+    model_hidden_size = get_model_hidden_size(base_model)
     logger.info(f"Model: {cfg.model_name}, hidden_size: {model_hidden_size} (bf16)")
 
     # Apply LoRA
@@ -471,7 +483,7 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
         quantization_config=quantization_config,
         device_map="auto",
     )
-    model_hidden_size = base_model.config.hidden_size
+    model_hidden_size = get_model_hidden_size(base_model)
 
     # Load LoRA adapter
     lora_path = os.path.join(checkpoint_dir, "lora_adapter")
