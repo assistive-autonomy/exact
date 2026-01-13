@@ -1,15 +1,15 @@
 seed: 42
 device: auto
 
-# Data
-train_data: /pvc/exact_data/train.h5
-eval_data: /pvc/exact_data/eval.h5
+# Data (relative to project root)
+train_data: ../exact_data/train.h5
+eval_data: ../exact_data/eval.h5
 
 # Output
 output_dir: results/parser
 
 # Model
-model_name: /public/hf/models/meta-llama/Meta-Llama-3.1-8B-Instruct/
+model_name: meta-llama/Llama-3.1-8B-Instruct
 max_seq_length: 1024
 
 # Motion encoder
@@ -40,9 +40,7 @@ dataloader_prefetch_factor: 2
 gradient_checkpointing: false
 eval_strategy: epoch
 
-# DeepSpeed (comment out to use native PyTorch DDP)
-# Requires python3-dev to be installed: apt-get install -y python3-dev
-# deepspeed: configs/ds_config.json
+# Training checkpointing
 save_strategy: epoch
 save_total_limit: 2
 load_best_model_at_end: true

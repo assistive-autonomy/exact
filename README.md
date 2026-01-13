@@ -173,22 +173,41 @@ Key features:
 
 ## Parser Training
 
-### Generate Synthetic Data
+Train a motion-conditioned parser on a single GPU (e.g., H200).
 
+### Prerequisites
+
+1. Generate synthetic data in `../exact_data/`:
 ```bash
-uv run scripts/generate_data.py --name train --num-samples 1000
-uv run scripts/generate_data.py --name eval --num-samples 200
+uv run scripts/generate_data.py --name train --num-samples 1000 --output-dir ../exact_data
+uv run scripts/generate_data.py --name eval --num-samples 200 --output-dir ../exact_data
+```
+
+2. Ensure you have access to the Llama model (via HuggingFace):
+```bash
+huggingface-cli login
 ```
 
 ### Train Parser
 
 ```bash
+# Default training (uses configs/parser.yaml)
 uv run scripts/parser.py
+
+# Custom hyperparameters
 uv run scripts/parser.py num_train_epochs=20 learning_rate=1e-5
 
 # Evaluate checkpoint
 uv run scripts/parser.py --eval-only results/parser/20251222_123456
 ```
+
+### Configuration
+
+Edit `configs/parser.yaml` to customize:
+- `train_data` / `eval_data`: Paths to HDF5 data files
+- `model_name`: Base LLM (default: `meta-llama/Llama-3.1-8B-Instruct`)
+- `per_device_train_batch_size`: Batch size (adjust based on GPU memory)
+- `bf16`: Enable bfloat16 for H200 (recommended)
 
 ---
 

@@ -4,13 +4,11 @@
 import json
 import os
 import sys
-import warnings
 from datetime import datetime
 from pathlib import Path
 
 import h5py
 import torch
-import torch.distributed as dist
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
@@ -21,9 +19,6 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
-
-# Suppress DataParallel scalar gather warning
-warnings.filterwarnings("ignore", message="Was asked to gather along dimension 0")
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -202,7 +197,6 @@ def main():
     parser.add_argument(
         "--eval-only", type=str, default=None, help="Checkpoint dir for eval only"
     )
-    parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
     parser.add_argument("overrides", nargs="*", help="Config overrides (key=value)")
 
     args = parser.parse_args()
@@ -210,32 +204,22 @@ def main():
     # Load config
     cfg = load_config(args.config, args.overrides)
 
-    # Setup distributed training
-    local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
-    is_main_process = local_rank in [-1, 0]
-    
-    # Set device based on local_rank for distributed training
-    if local_rank != -1:
-        torch.cuda.set_device(local_rank)
-        device = torch.device("cuda", local_rank)
-    else:
-        device = get_device(cfg.get("device", "auto"))
-    
+    # Setup device
+    device = get_device(cfg.get("device", "auto"))
     model_dtype = torch.float32
 
     # Setup
     set_seed(cfg.seed)
 
-    # Create output directory (only on main process)
+    # Create output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = Path(cfg.get("output_dir", "results/parser")) / timestamp
-    if is_main_process:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        # Save config
-        OmegaConf.save(cfg, output_dir / "config.yaml")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # Save config
+    OmegaConf.save(cfg, output_dir / "config.yaml")
 
-    # Initialize wandb (only on main process)
-    use_wandb = cfg.wandb_mode != "disabled" and WANDB_AVAILABLE and is_main_process
+    # Initialize wandb
+    use_wandb = cfg.wandb_mode != "disabled" and WANDB_AVAILABLE
     if use_wandb:
         wandb.init(
             project=cfg.wandb_project,
@@ -245,12 +229,11 @@ def main():
             mode=cfg.wandb_mode,
         )
 
-    if is_main_process:
-        logger.info("Motion-conditioned Parser")
-        logger.info(f"Device: {device} (local_rank={local_rank})")
-        logger.info(f"Output: {output_dir}")
-        if use_wandb:
-            logger.info(f"Wandb: {cfg.wandb_project}")
+    logger.info("Motion-conditioned Parser")
+    logger.info(f"Device: {device}")
+    logger.info(f"Output: {output_dir}")
+    if use_wandb:
+        logger.info(f"Wandb: {cfg.wandb_project}")
 
     # Eval-only mode
     if args.eval_only:
@@ -288,25 +271,22 @@ def main():
         return
 
     # Training mode
-    if is_main_process:
-        logger.info("[1/4] Loading model and tokenizer...")
+    logger.info("[1/4] Loading model and tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Load model on CPU first, let Trainer/DeepSpeed handle device placement
+    # Load model on CPU first, Trainer handles device placement
     base_model = AutoModelForCausalLM.from_pretrained(
         cfg.model_name,
         torch_dtype=model_dtype,
         low_cpu_mem_usage=True,
     )
     model_hidden_size = base_model.config.hidden_size
-    if is_main_process:
-        logger.info(f"Model: {cfg.model_name}, hidden_size: {model_hidden_size}")
+    logger.info(f"Model: {cfg.model_name}, hidden_size: {model_hidden_size}")
 
     # Apply LoRA
-    if is_main_process:
-        logger.info("[2/4] Applying LoRA...")
+    logger.info("[2/4] Applying LoRA...")
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=cfg.lora_r,
@@ -324,19 +304,17 @@ def main():
         bias="none",
     )
     base_model = get_peft_model(base_model, lora_config)
-    if is_main_process:
-        base_model.print_trainable_parameters()
+    base_model.print_trainable_parameters()
 
-    # Initialize trajectory encoder (on CPU, Trainer will move it)
-    if is_main_process:
-        logger.info("[3/4] Initializing trajectory encoder...")
+    # Initialize trajectory encoder
+    logger.info("[3/4] Initializing trajectory encoder...")
     trajectory_encoder = TrajectoryEncoder(
         trajectory_dim=cfg.motion_dim,
         hidden_dim=cfg.motion_hidden_dim,
         output_dim=model_hidden_size,
         num_layers=cfg.motion_num_layers,
         num_prefix_tokens=cfg.num_prefix_tokens,
-    )  # Don't move to device, let Trainer handle it
+    )
 
     # Create motion-conditioned parser
     model = MotionConditionedParser(
@@ -346,8 +324,7 @@ def main():
     )
 
     # Load datasets
-    if is_main_process:
-        logger.info("[4/4] Loading datasets...")
+    logger.info("[4/4] Loading datasets...")
     if not os.path.exists(cfg.train_data):
         raise FileNotFoundError(f"Training data not found: {cfg.train_data}")
 
@@ -356,8 +333,7 @@ def main():
         tokenizer=tokenizer,
         max_seq_length=cfg.max_seq_length,
     )
-    if is_main_process:
-        logger.info(f"Loaded {len(train_dataset)} training samples")
+    logger.info(f"Loaded {len(train_dataset)} training samples")
 
     eval_dataset = None
     if cfg.eval_data and os.path.exists(cfg.eval_data):
@@ -366,15 +342,9 @@ def main():
             tokenizer=tokenizer,
             max_seq_length=cfg.max_seq_length,
         )
-        if is_main_process:
-            logger.info(f"Loaded {len(eval_dataset)} evaluation samples")
+        logger.info(f"Loaded {len(eval_dataset)} evaluation samples")
 
     # Setup training arguments
-    # DeepSpeed configuration
-    deepspeed_config = cfg.get("deepspeed", None)
-    if deepspeed_config and is_main_process:
-        logger.info(f"DeepSpeed enabled with config: {deepspeed_config}")
-
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         num_train_epochs=cfg.num_train_epochs,
@@ -397,12 +367,7 @@ def main():
         seed=cfg.seed,
         remove_unused_columns=False,
         save_safetensors=False,
-        # DeepSpeed integration
-        deepspeed=deepspeed_config,
         bf16=cfg.get("bf16", True),
-        # For distributed training
-        ddp_find_unused_parameters=False,
-        local_rank=int(os.environ.get("LOCAL_RANK", -1)),
     )
 
     # Initialize trainer
@@ -415,61 +380,59 @@ def main():
     )
 
     # Train
-    if is_main_process:
-        logger.info("Starting training...")
+    logger.info("Starting training...")
     trainer.train()
 
-    # Save final model components (only on main process)
-    if is_main_process:
-        logger.info("Saving model...")
-        trainer.save_model()
+    # Save final model components
+    logger.info("Saving model...")
+    trainer.save_model()
 
-        # Save trajectory encoder
-        torch.save(
-            trajectory_encoder.state_dict(),
-            output_dir / "trajectory_encoder.pt",
-        )
+    # Save trajectory encoder
+    torch.save(
+        trajectory_encoder.state_dict(),
+        output_dir / "trajectory_encoder.pt",
+    )
 
-        # Save LoRA adapter
-        base_model.save_pretrained(output_dir / "lora_adapter")
-        tokenizer.save_pretrained(output_dir / "lora_adapter")
+    # Save LoRA adapter
+    base_model.save_pretrained(output_dir / "lora_adapter")
+    tokenizer.save_pretrained(output_dir / "lora_adapter")
 
-        # Post-training evaluation on samples
-        logger.info("Running sample evaluation...")
-        eval_samples = load_eval_samples(
-            cfg.eval_data, n_samples=cfg.get("eval_samples", 8)
-        )
+    # Post-training evaluation on samples
+    logger.info("Running sample evaluation...")
+    eval_samples = load_eval_samples(
+        cfg.eval_data, n_samples=cfg.get("eval_samples", 8)
+    )
 
-        try:
-            from exact.parser.utils import create_grammar_processor
+    try:
+        from exact.parser.utils import create_grammar_processor
 
-            grammar_processor = create_grammar_processor(tokenizer)
-        except Exception as e:
-            logger.warning(f"Could not create grammar processor: {e}")
-            grammar_processor = None
+        grammar_processor = create_grammar_processor(tokenizer)
+    except Exception as e:
+        logger.warning(f"Could not create grammar processor: {e}")
+        grammar_processor = None
 
-        # Move model to device for evaluation
-        model.to(device)
-        eval_results = evaluate_samples(
-            model,
-            tokenizer,
-            eval_samples,
-            device,
-            model_dtype,
-            grammar_processor=grammar_processor,
-        )
-        print_eval_results(eval_results)
+    # Move model to device for evaluation
+    model.to(device)
+    eval_results = evaluate_samples(
+        model,
+        tokenizer,
+        eval_samples,
+        device,
+        model_dtype,
+        grammar_processor=grammar_processor,
+    )
+    print_eval_results(eval_results)
 
-        # Save results
-        with open(output_dir / "eval_results.json", "w") as f:
-            json.dump(eval_results, f, indent=2)
+    # Save results
+    with open(output_dir / "eval_results.json", "w") as f:
+        json.dump(eval_results, f, indent=2)
 
-        if use_wandb:
-            log_samples_to_wandb(eval_results)
-            wandb.summary["final_accuracy"] = eval_results["accuracy"]
-            wandb.finish()
+    if use_wandb:
+        log_samples_to_wandb(eval_results)
+        wandb.summary["final_accuracy"] = eval_results["accuracy"]
+        wandb.finish()
 
-        logger.success(f"Training complete! Results saved to: {output_dir}")
+    logger.success(f"Training complete! Results saved to: {output_dir}")
 
 
 def load_checkpoint(checkpoint_dir: str, device: torch.device):
