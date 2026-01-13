@@ -2,14 +2,14 @@ seed: 42
 device: auto
 
 # Data
-train_data: data/train.h5
-eval_data: data/eval.h5
+train_data: /pvc/exact_data/train.h5
+eval_data: /pvc/exact_data/eval.h5
 
 # Output
 output_dir: results/parser
 
 # Model
-model_name: /public/hf/models/meta-llama/Llama-3.2-3B-Instruct
+model_name: /public/hf/models/meta-llama/Meta-Llama-3.1-8B-Instruct/
 max_seq_length: 1024
 
 # Motion encoder
@@ -22,18 +22,22 @@ num_prefix_tokens: 24
 lora_r: 8
 lora_alpha: 16
 lora_dropout: 0.05
+target_modules: ["q_proj", "v_proj"]
 
 # Training (HuggingFace TrainingArguments)
 num_train_epochs: 10
 per_device_train_batch_size: 2
 per_device_eval_batch_size: 2
-learning_rate: 5.0e-6
-weight_decay: 0.01
+learning_rate: 7.5e-6
+weight_decay: 0.001
 max_grad_norm: 1.0
-warmup_steps: 100
+warmup_steps: 500
 gradient_accumulation_steps: 4
 dataloader_num_workers: 4
 logging_steps: 10
+bf16: true
+dataloader_prefetch_factor: 2
+gradient_checkpointing: false
 eval_strategy: epoch
 save_strategy: epoch
 save_total_limit: 2

@@ -33,6 +33,16 @@ class MotionConditionedParser(nn.Module):
         self.tokenizer = tokenizer
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
 
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        """Enable gradient checkpointing on the underlying model."""
+        if hasattr(self.model, "gradient_checkpointing_enable"):
+            self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
+
+    def gradient_checkpointing_disable(self):
+        """Disable gradient checkpointing on the underlying model."""
+        if hasattr(self.model, "gradient_checkpointing_disable"):
+            self.model.gradient_checkpointing_disable()
+
     def _get_system_prompt_embeds(self, batch_size: int, device: torch.device):
         """Get system prompt embeddings.
 

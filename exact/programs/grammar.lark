@@ -2,7 +2,7 @@ start: motion (";" motion)*
 
 motion: "[" INT "," INT "]" sensor ("*" sensor)*
 
-sensor: JOINT "." AXIS "(" REAL ")"
+sensor: JOINT "." AXIS "(" NUMBER ")"
 
 JOINT: "pelvis" | "torso" | "spine" | "chest" | "neck" | "head"
     | "lhip" | "lknee" | "lankle" | "ltoe"
@@ -14,6 +14,6 @@ AXIS: "x" | "y" | "z"
 
 INT: /[0-9]+/
 
-REAL: /-?[0-9]+\.[0-9]+/
+NUMBER: /-?[0-9]+\.?[0-9]*/ | /-?\.[0-9]+/
 
 
