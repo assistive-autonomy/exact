@@ -35,7 +35,7 @@ warmup_steps: 500
 gradient_accumulation_steps: 4
 dataloader_num_workers: 4
 logging_steps: 10
-bf16: true
+bf16: false  # Disabled when using 8-bit quantization
 dataloader_prefetch_factor: 2
 gradient_checkpointing: false
 eval_strategy: epoch

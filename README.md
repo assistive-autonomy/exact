@@ -207,7 +207,8 @@ Edit `configs/parser.yaml` to customize:
 - `train_data` / `eval_data`: Paths to HDF5 data files
 - `model_name`: Base LLM (default: `meta-llama/Llama-3.1-8B-Instruct`)
 - `per_device_train_batch_size`: Batch size (adjust based on GPU memory)
-- `bf16`: Enable bfloat16 for H200 (recommended)
+
+The model uses **8-bit quantization** (bitsandbytes) by default to reduce memory usage while maintaining quality. LoRA adapters are trained on top of the quantized base model.
 
 ---
 

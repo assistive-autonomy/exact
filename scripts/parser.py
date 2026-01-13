@@ -16,6 +16,7 @@ from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    BitsAndBytesConfig,
     Trainer,
     TrainingArguments,
 )
@@ -276,14 +277,21 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Load model on CPU first, Trainer handles device placement
+    # Configure 8-bit quantization
+    quantization_config = BitsAndBytesConfig(
+        load_in_8bit=True,
+        llm_int8_threshold=6.0,
+    )
+
+    # Load model with 8-bit quantization
     base_model = AutoModelForCausalLM.from_pretrained(
         cfg.model_name,
-        torch_dtype=model_dtype,
+        quantization_config=quantization_config,
+        device_map="auto",
         low_cpu_mem_usage=True,
     )
     model_hidden_size = base_model.config.hidden_size
-    logger.info(f"Model: {cfg.model_name}, hidden_size: {model_hidden_size}")
+    logger.info(f"Model: {cfg.model_name}, hidden_size: {model_hidden_size} (8-bit quantized)")
 
     # Apply LoRA
     logger.info("[2/4] Applying LoRA...")
@@ -458,10 +466,17 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # Configure 8-bit quantization
+    quantization_config = BitsAndBytesConfig(
+        load_in_8bit=True,
+        llm_int8_threshold=6.0,
+    )
+
     base_model = AutoModelForCausalLM.from_pretrained(
         config["model_name"],
-        torch_dtype=model_dtype,
-    ).to(device)
+        quantization_config=quantization_config,
+        device_map="auto",
+    )
     model_hidden_size = base_model.config.hidden_size
 
     # Load LoRA adapter
