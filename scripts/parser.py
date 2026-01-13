@@ -277,21 +277,15 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Configure 8-bit quantization
-    quantization_config = BitsAndBytesConfig(
-        load_in_8bit=True,
-        llm_int8_threshold=6.0,
-    )
-
-    # Load model with 8-bit quantization
+    # Load model in bf16 (A100 has native bf16 support, no quantization needed)
     base_model = AutoModelForCausalLM.from_pretrained(
         cfg.model_name,
-        quantization_config=quantization_config,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
         low_cpu_mem_usage=True,
     )
     model_hidden_size = base_model.config.hidden_size
-    logger.info(f"Model: {cfg.model_name}, hidden_size: {model_hidden_size} (8-bit quantized)")
+    logger.info(f"Model: {cfg.model_name}, hidden_size: {model_hidden_size} (bf16)")
 
     # Apply LoRA
     logger.info("[2/4] Applying LoRA...")
@@ -314,7 +308,7 @@ def main():
     base_model = get_peft_model(base_model, lora_config)
     base_model.print_trainable_parameters()
 
-    # Initialize trajectory encoder
+    # Initialize trajectory encoder (use bf16 to match model dtype)
     logger.info("[3/4] Initializing trajectory encoder...")
     trajectory_encoder = TrajectoryEncoder(
         trajectory_dim=cfg.motion_dim,
@@ -322,7 +316,7 @@ def main():
         output_dim=model_hidden_size,
         num_layers=cfg.motion_num_layers,
         num_prefix_tokens=cfg.num_prefix_tokens,
-    )
+    ).to(dtype=torch.bfloat16, device="cuda")
 
     # Create motion-conditioned parser
     model = MotionConditionedParser(

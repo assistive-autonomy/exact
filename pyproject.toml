@@ -5,8 +5,8 @@ description = "Executable Activity Models"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "bitsandbytes>=0.49.1",
     "dlc2action",
-    "edist>=1.2.0",
     "h5py",
     "hydra-core>=1.3.0",
     "lark>=1.3.1",
