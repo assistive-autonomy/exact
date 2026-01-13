@@ -1,12 +1,12 @@
 # Activity Segmentation Configuration (DLC2Action)
 
 project:
-  project_name: esk_verbs
+  project_name: esk_activity
   projects_path: dlc2a_benchmark
   data_type: dlc_track
   annotation_type: dlc
   data_path: esk/D2A_converted_pose_smpl
-  annotation_path: esk/D2A_converted_label_verbs
+  annotation_path: esk/D2A_converted_label_activity
 
 general:
   model_name: c2f_tcn
@@ -72,7 +72,7 @@ model:
 hyperparameter_search_epochs: 10
 hyperparameter_search_trials: 20
 hyperparameter_search_metric: f1
-num_seeds: 5
+num_seeds: 3
 models: [ms_tcn3, c2f_tcn, edtcn, c2f_transformer]
 
 # Fraction of training data to use (1.0 = 100%, 0.5 = 50%, 0.25 = 25%)
@@ -100,8 +100,8 @@ hyperparameter_search_space:
     high: 128
   general/len_segment:
     type: categorical
-    choices: [256, 528, 1024] 
+    choices: [1024] 
 
 output_dir: results/segmentation
 training_curves_path: training_curves.png
-results_table_path: results.csv
+results_table_path: results_activities_100.csv

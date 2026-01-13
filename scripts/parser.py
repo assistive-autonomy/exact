@@ -10,6 +10,7 @@ from pathlib import Path
 
 import h5py
 import torch
+import torch.distributed as dist
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
@@ -346,6 +347,11 @@ def main():
         logger.info(f"Loaded {len(eval_dataset)} evaluation samples")
 
     # Setup training arguments
+    # DeepSpeed configuration
+    deepspeed_config = cfg.get("deepspeed", None)
+    if deepspeed_config:
+        logger.info(f"DeepSpeed enabled with config: {deepspeed_config}")
+
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         num_train_epochs=cfg.num_train_epochs,
@@ -368,6 +374,12 @@ def main():
         seed=cfg.seed,
         remove_unused_columns=False,
         save_safetensors=False,
+        # DeepSpeed integration
+        deepspeed=deepspeed_config,
+        bf16=cfg.get("bf16", True),
+        # For distributed training
+        ddp_find_unused_parameters=False,
+        local_rank=int(os.environ.get("LOCAL_RANK", -1)),
     )
 
     # Initialize trainer

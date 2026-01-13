@@ -129,6 +129,10 @@ MODEL_PARAM_SUPPORT = {
     "edtcn": {"num_f_maps": None},
 }
 
+# C2F models require segment length > 512
+C2F_MODELS = {"c2f_tcn", "c2f_transformer"}
+MIN_SEGMENT_LENGTH_C2F = 512
+
 
 def build_search_space(cfg: DictConfig, model_name: str = None) -> dict:
     """Build search space dictionary for hyperparameter search.
@@ -159,7 +163,19 @@ def build_search_space(cfg: DictConfig, model_name: str = None) -> dict:
         
         param_type = param_cfg.type
         if param_type == "categorical":
-            search_space[actual_param_name] = ("categorical", list(param_cfg.choices))
+            choices = list(param_cfg.choices)
+            
+            # Filter len_segment choices for C2F models (require > 512)
+            if model_name in C2F_MODELS and param_name == "general/len_segment":
+                original_choices = choices.copy()
+                choices = [c for c in choices if c > MIN_SEGMENT_LENGTH_C2F]
+                if len(choices) < len(original_choices):
+                    logger.info(f"    Filtered len_segment for {model_name}: {original_choices} -> {choices} (require > {MIN_SEGMENT_LENGTH_C2F})")
+                if not choices:
+                    logger.warning(f"    No valid len_segment choices for {model_name}, skipping parameter")
+                    continue
+            
+            search_space[actual_param_name] = ("categorical", choices)
         elif param_type in ["float", "float_log", "int", "int_log"]:
             search_space[actual_param_name] = (param_type, param_cfg.low, param_cfg.high)
         else:
@@ -310,7 +326,7 @@ def main(cfg: DictConfig):
             
             # Train each seed with a different random subset
             for seed_idx in range(num_seeds):
-                episode_name = f"{model}_best#{seed_idx}"
+                episode_name = f"{model}_best_seed{seed_idx}"
                 
                 # Skip if episode already exists
                 if episode_name in existing_episodes:
@@ -357,7 +373,7 @@ def main(cfg: DictConfig):
         all_results = []
         for model in models:
             for seed_idx in range(num_seeds):
-                episode_name = f"{model}_best#{seed_idx}"
+                episode_name = f"{model}_best_seed{seed_idx}"
                 
                 if episode_name not in current_episodes:
                     logger.warning(f"  Skipping {episode_name} - not found")
