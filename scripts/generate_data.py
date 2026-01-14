@@ -132,9 +132,9 @@ def main():
         max_value=2.0,
         value_step=0.1,
         allowed_parts=BODY_PARTS,
-        max_timesteps=600,
-        num_intervals=30,
-        min_interval_time=10,
+        max_timesteps=1024,
+        num_intervals=10,
+        min_interval_time=1,
     )
 
     logger.info("Generating programs...")
