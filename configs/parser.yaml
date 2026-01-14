@@ -2,8 +2,8 @@ seed: 42
 device: auto
 
 # Data (relative to project root)
-train_data: ../exact_data/train_small.h5
-eval_data: ../exact_data/eval_small.h5
+train_data: ../exact_data/train.h5
+eval_data: ../exact_data/eval.h5
 
 # Output
 output_dir: results/parser
