@@ -113,7 +113,7 @@ class ProgramTransformer(Transformer):
     """Transform parsed tree into reward objects."""
 
     def sensor(self, children):
-        # children: [JOINT token, AXIS token, REAL token]
+        # children: [JOINT token, AXIS token, VALUE token]
         joint, axis, value = children
         return (str(joint), str(axis), float(value))
 

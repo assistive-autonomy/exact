@@ -80,7 +80,7 @@ def _tree_to_nodes_adj(tree: Union[Tree, Token], nodes: list, adj: list, parent_
     
     if isinstance(tree, Token):
         # Terminal node - use token type and normalized value
-        if tree.type == "REAL":
+        if tree.type == "VALUE":
             label = _normalize_value(float(tree.value))
         elif tree.type == "INT":
             # Skip interval values - we don't want to penalize different timings
