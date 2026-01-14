@@ -7,6 +7,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+# Disable tokenizers parallelism to avoid forking warnings
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import h5py
 import torch
 from loguru import logger
@@ -16,7 +19,6 @@ from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     Trainer,
     TrainingArguments,
 )
@@ -219,7 +221,7 @@ def main():
 
     # Setup device
     device = get_device(cfg.get("device", "auto"))
-    model_dtype = torch.float32
+    model_dtype = torch.bfloat16  # Match model dtype
 
     # Setup
     set_seed(cfg.seed)
@@ -464,7 +466,7 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
-    model_dtype = torch.float32
+    model_dtype = torch.bfloat16  # Match training dtype
 
     # Load tokenizer and base model
     logger.info(f"Loading base model: {config['model_name']}")
@@ -472,15 +474,10 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Configure 8-bit quantization
-    quantization_config = BitsAndBytesConfig(
-        load_in_8bit=True,
-        llm_int8_threshold=6.0,
-    )
-
+    # Load model in bfloat16 (same as training)
     base_model = AutoModelForCausalLM.from_pretrained(
         config["model_name"],
-        quantization_config=quantization_config,
+        torch_dtype=model_dtype,
         device_map="auto",
     )
     model_hidden_size = get_model_hidden_size(base_model)
