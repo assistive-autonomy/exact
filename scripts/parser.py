@@ -128,13 +128,18 @@ def evaluate_samples(
     for sample in tqdm(samples, desc="Evaluating samples"):
         motion = sample["motion"].unsqueeze(0).to(device=device, dtype=dtype)
 
+        # Generate with greedy decoding (do_sample=False)
+        # Set temperature=None and top_p=None to suppress warnings about unused params
         generated_ids = model.generate(
             motion=motion,
             max_new_tokens=max_new_tokens,
             do_sample=False,
+            temperature=None,
+            top_p=None,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
             grammar_processor=grammar_processor,
+            use_cache=True,
         )
 
         raw_predicted = tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
@@ -392,6 +397,7 @@ def main():
 
     training_args = TrainingArguments(
         output_dir=str(output_dir),
+        run_name=f"parser_{timestamp}",
         num_train_epochs=cfg.num_train_epochs,
         per_device_train_batch_size=cfg.per_device_train_batch_size,
         per_device_eval_batch_size=cfg.per_device_eval_batch_size,

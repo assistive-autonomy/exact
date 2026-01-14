@@ -22,16 +22,15 @@ num_prefix_tokens: 24
 lora_r: 8
 lora_alpha: 16
 lora_dropout: 0.05
-target_modules: ["q_proj", "v_proj"]
 
 # Training (HuggingFace TrainingArguments)
 num_train_epochs: 10
-per_device_train_batch_size: 2
-per_device_eval_batch_size: 2
-learning_rate: 7.5e-6
-weight_decay: 0.001
+per_device_train_batch_size: 4
+per_device_eval_batch_size: 4
+learning_rate: 2e-4
+weight_decay: 0.01
 max_grad_norm: 1.0
-warmup_steps: 500
+warmup_ratio: 0.1
 gradient_accumulation_steps: 4
 dataloader_num_workers: 4
 logging_steps: 10
