@@ -384,6 +384,12 @@ def main():
         logger.info(f"Loaded {len(eval_dataset)} evaluation samples")
 
     # Setup training arguments
+    warmup_args = {}
+    if cfg.get("warmup_ratio", 0) > 0:
+        warmup_args["warmup_ratio"] = cfg.warmup_ratio
+    elif cfg.get("warmup_steps", 0) > 0:
+        warmup_args["warmup_steps"] = cfg.warmup_steps
+
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         num_train_epochs=cfg.num_train_epochs,
@@ -393,7 +399,7 @@ def main():
         learning_rate=cfg.learning_rate,
         weight_decay=cfg.weight_decay,
         max_grad_norm=cfg.max_grad_norm,
-        warmup_steps=cfg.warmup_steps,
+        **warmup_args,
         logging_steps=cfg.logging_steps,
         eval_strategy=cfg.eval_strategy if eval_dataset else "no",
         save_strategy=cfg.save_strategy,

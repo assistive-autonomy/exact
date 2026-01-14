@@ -7,14 +7,10 @@ from syncode import SyncodeLogitsProcessor
 from .encoder import TrajectoryEncoder
 
 # Default system prompt describing the motion-to-program task
-DEFAULT_SYSTEM_PROMPT = """You are a motion analysis assistant. Given a human motion sequence represented as a context vector, generate a program that describes the motion using sensor observations.
-
-The program format uses temporal segments [start, end] with joint sensor readings:
-- Joints: pelvis, torso, spine, chest, neck, head, lhip, lknee, lankle, ltoe, rhip, rknee, rankle, rtoe, lthorax, lshoulder, lelbow, lwrist, lhand, rthorax, rshoulder, relbow, rwrist, rhand
-- Axes: x, y, z
-- Example: [0,30] head.y(1.65) * rwrist.z(0.45); [30,60] pelvis.y(0.80)
-
-Generate a program that accurately captures the key motion patterns:"""
+# Keep it minimal to avoid confusing the model with Python-like language
+DEFAULT_SYSTEM_PROMPT = """Output a motion program. Format: [start,end]joint.axis(value)*joint.axis(value);[start,end]...
+Example: [0,30]head.y(1.65)*rwrist.z(0.45);[30,60]pelvis.y(0.80)
+Program:"""
 
 
 class MotionConditionedParser(nn.Module):
