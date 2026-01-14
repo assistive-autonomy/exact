@@ -117,10 +117,13 @@ def evaluate_samples(
     grammar_processor=None,
 ) -> dict:
     """Evaluate model on sample batch and return metrics."""
+    from exact.parser.utils import post_process_program, validate_program
+
     model.eval()
 
     results = []
     exact_matches = 0
+    valid_programs = 0
 
     for sample in tqdm(samples, desc="Evaluating samples"):
         motion = sample["motion"].unsqueeze(0).to(device=device, dtype=dtype)
@@ -134,27 +137,38 @@ def evaluate_samples(
             grammar_processor=grammar_processor,
         )
 
-        predicted = tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
+        raw_predicted = tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
+
+        # Post-process the generated program to ensure validity
+        predicted, is_valid = post_process_program(raw_predicted, repair=True)
+
         target = sample["target"]
         is_match = predicted == target
 
         if is_match:
             exact_matches += 1
+        if is_valid:
+            valid_programs += 1
 
         results.append(
             {
                 "key": sample["key"],
                 "target": target,
                 "predicted": predicted,
+                "raw_predicted": raw_predicted if raw_predicted != predicted else None,
                 "exact_match": is_match,
+                "is_valid": is_valid,
             }
         )
 
     accuracy = exact_matches / len(samples) if samples else 0
+    validity_rate = valid_programs / len(samples) if samples else 0
 
     return {
         "accuracy": accuracy,
+        "validity_rate": validity_rate,
         "exact_matches": exact_matches,
+        "valid_programs": valid_programs,
         "total": len(samples),
         "samples": results,
     }
@@ -165,8 +179,8 @@ def log_samples_to_wandb(eval_results: dict, step: int = None):
     if not WANDB_AVAILABLE:
         return
 
-    # Create wandb table
-    table = wandb.Table(columns=["key", "target", "predicted", "exact_match"])
+    # Create wandb table with validity column
+    table = wandb.Table(columns=["key", "target", "predicted", "exact_match", "valid"])
 
     for sample in eval_results["samples"]:
         table.add_data(
@@ -174,12 +188,15 @@ def log_samples_to_wandb(eval_results: dict, step: int = None):
             sample["target"],
             sample["predicted"],
             "✓" if sample["exact_match"] else "✗",
+            "✓" if sample.get("is_valid", True) else "✗",
         )
 
     log_data = {
         "eval/sample_predictions": table,
         "eval/accuracy": eval_results["accuracy"],
         "eval/exact_matches": eval_results["exact_matches"],
+        "eval/validity_rate": eval_results.get("validity_rate", 1.0),
+        "eval/valid_programs": eval_results.get("valid_programs", eval_results["total"]),
     }
 
     if step is not None:
@@ -194,12 +211,18 @@ def print_eval_results(eval_results: dict):
     logger.info(
         f"Accuracy: {eval_results['exact_matches']}/{eval_results['total']} ({eval_results['accuracy']:.1%})"
     )
+    logger.info(
+        f"Validity: {eval_results.get('valid_programs', eval_results['total'])}/{eval_results['total']} ({eval_results.get('validity_rate', 1.0):.1%})"
+    )
 
     for sample in eval_results["samples"]:
-        status = "✓" if sample["exact_match"] else "✗"
-        logger.info(f"[{status}] {sample['key']}")
+        match_status = "✓" if sample["exact_match"] else "✗"
+        valid_status = "V" if sample.get("is_valid", True) else "X"
+        logger.info(f"[{match_status}|{valid_status}] {sample['key']}")
         logger.info(f"  Target:    {sample['target']}")
         logger.info(f"  Predicted: {sample['predicted']}")
+        if sample.get("raw_predicted"):
+            logger.info(f"  Raw:       {sample['raw_predicted']}")
 
 
 def main():
