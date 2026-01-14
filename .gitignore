@@ -3,6 +3,7 @@
 outputs
 notebooks
 cache
+results
 multirun  # Hydra multi-run outputs
 out
 logs
