@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PreTrainedTokenizer
-from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.modeling_outputs import ModelOutput
 from dataclasses import dataclass
 from typing import Optional
 
@@ -18,8 +18,11 @@ Program:"""
 
 
 @dataclass
-class MotionParserOutput:
-    """Output from MotionConditionedParser with auxiliary losses."""
+class MotionParserOutput(ModelOutput):
+    """Output from MotionConditionedParser with auxiliary losses.
+
+    Inherits from ModelOutput to be compatible with HuggingFace Trainer.
+    """
 
     loss: Optional[torch.Tensor] = None
     lm_loss: Optional[torch.Tensor] = None
