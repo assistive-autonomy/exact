@@ -39,25 +39,46 @@ def generate_motion(
     value_step: float = 0.1,
     allowed_parts: Optional[list[str]] = None,
     allowed_axes: Optional[list[str]] = None,
+    unique_joints: bool = True,
 ) -> str:
     """Generate a random motion string.
 
     Format: body.axis(value)*body.axis(value)*...
     Example: head.z(1.4)*lhand.x(0.5)
+    
+    Args:
+        unique_joints: If True, each body.axis combination is used at most once
+                      per motion (no duplicate predicates like lhand.y*lhand.y).
     """
     parts = allowed_parts or BODY_PARTS
     axes = allowed_axes or AXES
 
-    num_preds = random.randint(min_preds, max_preds)
+    # Generate all possible body.axis combinations for unique sampling
+    all_joint_axes = [(body, axis) for body in parts for axis in axes]
+    
+    # Clamp num_preds to available combinations if unique
+    max_possible = len(all_joint_axes) if unique_joints else max_preds
+    num_preds = random.randint(min_preds, min(max_preds, max_possible))
+    
     predicates = []
-
-    for _ in range(num_preds):
-        body = random.choice(parts)
-        axis = random.choice(axes)
-        value = round(
-            random.uniform(min_value, max_value) // value_step * value_step, 1
-        )
-        predicates.append(f"{body}.{axis}({value:.1f})")
+    
+    if unique_joints:
+        # Sample without replacement to ensure no duplicate joint.axis pairs
+        selected_joints = random.sample(all_joint_axes, num_preds)
+        for body, axis in selected_joints:
+            value = round(
+                random.uniform(min_value, max_value) // value_step * value_step, 1
+            )
+            predicates.append(f"{body}.{axis}({value:.1f})")
+    else:
+        # Original behavior: allow duplicates
+        for _ in range(num_preds):
+            body = random.choice(parts)
+            axis = random.choice(axes)
+            value = round(
+                random.uniform(min_value, max_value) // value_step * value_step, 1
+            )
+            predicates.append(f"{body}.{axis}({value:.1f})")
 
     return "*".join(predicates)
 
@@ -73,6 +94,7 @@ def generate_program(
     max_timesteps: int = 1000,
     num_intervals: int = 2,
     min_interval_time: int = 100,
+    unique_joints: bool = True,
 ) -> str:
     """Generate a random program string with N timestep intervals.
 
@@ -81,6 +103,10 @@ def generate_program(
 
     The intervals are non-overlapping and cover the full time from 0 to max_timesteps.
     Interval sizes vary randomly but are at least min_interval_time.
+    
+    Args:
+        unique_joints: If True, each body.axis combination is used at most once
+                      per motion segment (no duplicate predicates).
     """
     num_intervals = random.randint(1, num_intervals)
     if num_intervals * min_interval_time > max_timesteps:
@@ -108,6 +134,7 @@ def generate_program(
             value_step=value_step,
             allowed_parts=allowed_parts,
             allowed_axes=allowed_axes,
+            unique_joints=unique_joints,
         )
         start = current_time
         end = current_time + sizes[i]
