@@ -1,12 +1,12 @@
 # Activity Segmentation Configuration (DLC2Action)
 
 project:
-  project_name: esk_activity
+  project_name: esk_verbs
   projects_path: dlc2a_benchmark
   data_type: dlc_track
   annotation_type: dlc
-  data_path: esk/D2A_converted_pose_smpl
-  annotation_path: esk/D2A_converted_label_activity
+  data_path: ../esk/D2A_converted_pose_smpl
+  annotation_path: ../esk/D2A_converted_label_verbs
 
 general:
   model_name: c2f_tcn
@@ -41,7 +41,7 @@ training:
   temporal_subsampling_size: 0.85
   parallel: false
   partition_method: file
-  split_path: esk/trainvaltest_split.txt
+  split_path: ../esk/trainvaltest_split.txt
 
 losses:
   ms_tcn:
@@ -104,4 +104,4 @@ hyperparameter_search_space:
 
 output_dir: results/segmentation
 training_curves_path: training_curves.png
-results_table_path: results_activities_100.csv
+results_table_path: results_verbs_50.csv

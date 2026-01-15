@@ -310,7 +310,7 @@ def main(cfg: DictConfig):
             
             # Train each seed with a different random subset
             for seed_idx in range(num_seeds):
-                episode_name = f"{model}_best#{seed_idx}"
+                episode_name = f"{model}_best_seed{seed_idx}"
                 
                 # Skip if episode already exists
                 if episode_name in existing_episodes:
@@ -357,7 +357,7 @@ def main(cfg: DictConfig):
         all_results = []
         for model in models:
             for seed_idx in range(num_seeds):
-                episode_name = f"{model}_best#{seed_idx}"
+                episode_name = f"{model}_best_seed{seed_idx}"
                 
                 if episode_name not in current_episodes:
                     logger.warning(f"  Skipping {episode_name} - not found")

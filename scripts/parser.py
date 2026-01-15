@@ -21,13 +21,14 @@ from transformers import (
     AutoTokenizer,
     Trainer,
     TrainingArguments,
+    EarlyStoppingCallback,
 )
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from exact.data import TrajectoryGenerationDataset
-from exact.parser import MotionConditionedParser, TrajectoryEncoder
+from exact.parser import MotionConditionedParser, TrajectoryEncoder, TemporalTrajectoryEncoder
 
 try:
     import wandb
@@ -352,20 +353,52 @@ def main():
 
     # Initialize trajectory encoder (use bf16 to match model dtype)
     logger.info("[3/4] Initializing trajectory encoder...")
-    trajectory_encoder = TrajectoryEncoder(
-        trajectory_dim=cfg.motion_dim,
-        hidden_dim=cfg.motion_hidden_dim,
-        output_dim=model_hidden_size,
-        num_layers=cfg.motion_num_layers,
-        num_prefix_tokens=cfg.num_prefix_tokens,
-    ).to(dtype=torch.bfloat16, device="cuda")
+    encoder_type = cfg.get("encoder_type", "legacy")
 
-    # Create motion-conditioned parser
+    if encoder_type == "temporal":
+        # New temporal-aware encoder with cross-attention
+        trajectory_encoder = TemporalTrajectoryEncoder(
+            trajectory_dim=cfg.motion_dim,
+            hidden_dim=cfg.motion_hidden_dim,
+            output_dim=model_hidden_size,
+            num_encoder_layers=cfg.get("motion_num_encoder_layers", 4),
+            num_decoder_layers=cfg.get("motion_num_decoder_layers", 2),
+            num_queries=cfg.get("num_queries", 32),
+            nhead=cfg.get("encoder_nhead", 8),
+            dropout=cfg.get("encoder_dropout", 0.1),
+        ).to(dtype=torch.bfloat16, device="cuda")
+        logger.info(f"Using TemporalTrajectoryEncoder with {cfg.get('num_queries', 32)} queries")
+    else:
+        # Legacy pooling-based encoder
+        trajectory_encoder = TrajectoryEncoder(
+            trajectory_dim=cfg.motion_dim,
+            hidden_dim=cfg.motion_hidden_dim,
+            output_dim=model_hidden_size,
+            num_layers=cfg.get("motion_num_layers", 5),
+            num_prefix_tokens=cfg.get("num_prefix_tokens", 24),
+        ).to(dtype=torch.bfloat16, device="cuda")
+        logger.info("Using legacy TrajectoryEncoder with global pooling")
+
+    # Count encoder parameters
+    encoder_params = sum(p.numel() for p in trajectory_encoder.parameters())
+    trainable_encoder_params = sum(p.numel() for p in trajectory_encoder.parameters() if p.requires_grad)
+    logger.info(f"Encoder params: {trainable_encoder_params:,} trainable / {encoder_params:,} total")
+
+    # Create motion-conditioned parser with optional auxiliary loss
+    use_reconstruction = cfg.get("use_reconstruction_loss", False)
+    reconstruction_weight = cfg.get("reconstruction_loss_weight", 0.1)
+
     model = MotionConditionedParser(
         model=base_model,
         trajectory_encoder=trajectory_encoder,
         tokenizer=tokenizer,
+        use_reconstruction_loss=use_reconstruction,
+        reconstruction_loss_weight=reconstruction_weight,
+        motion_dim=cfg.motion_dim,
     )
+
+    if use_reconstruction:
+        logger.info(f"Reconstruction loss enabled (weight={reconstruction_weight})")
 
     # Load datasets
     logger.info("[4/4] Loading datasets...")
@@ -405,6 +438,7 @@ def main():
         learning_rate=cfg.learning_rate,
         weight_decay=cfg.weight_decay,
         max_grad_norm=cfg.max_grad_norm,
+        lr_scheduler_type=cfg.get("lr_scheduler_type", "linear"),
         **warmup_args,
         logging_steps=cfg.logging_steps,
         eval_strategy=cfg.eval_strategy if eval_dataset else "no",
@@ -412,6 +446,7 @@ def main():
         save_total_limit=cfg.save_total_limit,
         load_best_model_at_end=cfg.load_best_model_at_end if eval_dataset else False,
         metric_for_best_model=cfg.metric_for_best_model,
+        greater_is_better=False,  # Lower eval_loss is better
         dataloader_num_workers=cfg.dataloader_num_workers,
         dataloader_pin_memory=device.type == "cuda",
         report_to="wandb" if use_wandb else "none",
@@ -421,6 +456,15 @@ def main():
         bf16=cfg.get("bf16", True),
     )
 
+    # Setup callbacks
+    callbacks = []
+    early_stopping_patience = cfg.get("early_stopping_patience", 0)
+    if early_stopping_patience > 0 and eval_dataset:
+        callbacks.append(
+            EarlyStoppingCallback(early_stopping_patience=early_stopping_patience)
+        )
+        logger.info(f"Early stopping enabled (patience={early_stopping_patience})")
+
     # Initialize trainer
     trainer = Trainer(
         model=model,
@@ -428,6 +472,7 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=get_collate_fn(tokenizer),
+        callbacks=callbacks if callbacks else None,
     )
 
     # Train
@@ -531,13 +576,32 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
         raise FileNotFoundError(f"Trajectory encoder not found: {encoder_path}")
 
     logger.info(f"Loading trajectory encoder from: {encoder_path}")
-    trajectory_encoder = TrajectoryEncoder(
-        trajectory_dim=config["motion_dim"],
-        hidden_dim=config["motion_hidden_dim"],
-        output_dim=model_hidden_size,
-        num_layers=config["motion_num_layers"],
-        num_prefix_tokens=config["num_prefix_tokens"],
-    ).to(device, dtype=model_dtype)
+
+    # Determine encoder type from config
+    encoder_type = config.get("encoder_type", "legacy")
+
+    if encoder_type == "temporal":
+        trajectory_encoder = TemporalTrajectoryEncoder(
+            trajectory_dim=config["motion_dim"],
+            hidden_dim=config["motion_hidden_dim"],
+            output_dim=model_hidden_size,
+            num_encoder_layers=config.get("motion_num_encoder_layers", 4),
+            num_decoder_layers=config.get("motion_num_decoder_layers", 2),
+            num_queries=config.get("num_queries", 32),
+            nhead=config.get("encoder_nhead", 8),
+            dropout=config.get("encoder_dropout", 0.1),
+        ).to(device, dtype=model_dtype)
+        logger.info("Using TemporalTrajectoryEncoder")
+    else:
+        trajectory_encoder = TrajectoryEncoder(
+            trajectory_dim=config["motion_dim"],
+            hidden_dim=config["motion_hidden_dim"],
+            output_dim=model_hidden_size,
+            num_layers=config.get("motion_num_layers", 5),
+            num_prefix_tokens=config.get("num_prefix_tokens", 24),
+        ).to(device, dtype=model_dtype)
+        logger.info("Using legacy TrajectoryEncoder")
+
     trajectory_encoder.load_state_dict(torch.load(encoder_path, map_location=device))
 
     # Create motion-conditioned parser

@@ -2,35 +2,48 @@ seed: 42
 device: auto
 
 # Data (relative to project root)
-train_data: ../exact_data/train_small.h5
-eval_data: ../exact_data/eval_small.h5
+train_data: ../exact_data/train.h5
+eval_data: ../exact_data/eval.h5
 
 # Output
 output_dir: results/parser
 
-# Model
-model_name: /public/hf/models/meta-llama/Llama-3.2-3B-Instruct
+# Model - Use BASE model (not Instruct) for better fine-tuning
+model_name: /public/hf/models/meta-llama/Llama-3.2-3B
 max_seq_length: 1024
 
-# Motion encoder
+# ========== NEW TEMPORAL ENCODER CONFIG ==========
+# Motion encoder architecture
+encoder_type: temporal  # 'temporal' (new) or 'legacy' (old pooling-based)
 motion_dim: 72  # 24 joints * 3 (x, y, z)
-motion_hidden_dim: 72
-motion_num_layers: 5
-num_prefix_tokens: 24
 
-# LoRA
-lora_r: 8
-lora_alpha: 16
+# Temporal encoder specific settings
+motion_hidden_dim: 256  # Increased from 72 for richer representations
+motion_num_encoder_layers: 4  # Self-attention layers for motion
+motion_num_decoder_layers: 2  # Cross-attention layers for queries
+num_queries: 32  # Number of learned query tokens (prefix length)
+encoder_nhead: 8  # Attention heads
+encoder_dropout: 0.1
+
+# Auxiliary losses
+use_reconstruction_loss: true  # Helps encoder learn meaningful representations
+reconstruction_loss_weight: 0.1  # Weight for reconstruction vs LM loss
+
+# ========== UPDATED LORA CONFIG ==========
+# Increased capacity for complex motion-to-program mapping
+lora_r: 32  # Increased from 8
+lora_alpha: 64  # Increased from 16 (typically 2x r)
 lora_dropout: 0.05
 
-# Training (HuggingFace TrainingArguments)
-num_train_epochs: 10
+# ========== UPDATED TRAINING HYPERPARAMETERS ==========
+num_train_epochs: 15  # Increased from 10
 per_device_train_batch_size: 4
 per_device_eval_batch_size: 4
-learning_rate: 2e-4
+learning_rate: 5e-5  # Reduced from 2e-4 for more stable training
 weight_decay: 0.01
 max_grad_norm: 1.0
-warmup_ratio: 0.1
+warmup_ratio: 0.03  # Reduced from 0.1 for faster warmup
+lr_scheduler_type: cosine  # Added cosine annealing
 gradient_accumulation_steps: 4
 dataloader_num_workers: 4
 logging_steps: 10
@@ -41,12 +54,15 @@ eval_strategy: epoch
 
 # Training checkpointing
 save_strategy: epoch
-save_total_limit: 2
+save_total_limit: 3  # Increased from 2
 load_best_model_at_end: true
 metric_for_best_model: eval_loss
 
+# Early stopping
+early_stopping_patience: 5  # Stop if no improvement for 5 epochs
+
 # Evaluation
-eval_samples: 8  # Number of samples for post-training evaluation
+eval_samples: 16  # Increased from 8 for better evaluation signal
 
 # Wandb
 report_to: wandb
