@@ -52,9 +52,10 @@ dataloader_prefetch_factor: 2
 gradient_checkpointing: false
 eval_strategy: epoch
 
-# Training checkpointing
-save_strategy: epoch
-save_total_limit: 3  # Increased from 2
+# Training checkpointing - save frequently to allow resume after crashes
+save_strategy: steps
+save_steps: 500  # Save every 500 steps (~30 min on A100)
+save_total_limit: 3  # Keep last 3 checkpoints
 load_best_model_at_end: true
 metric_for_best_model: eval_loss
 

@@ -241,6 +241,10 @@ def main():
     parser.add_argument(
         "--eval-only", type=str, default=None, help="Checkpoint dir for eval only"
     )
+    parser.add_argument(
+        "--resume", type=str, default=None, 
+        help="Resume training from checkpoint dir (e.g., results/parser/20260115_120430)"
+    )
     parser.add_argument("overrides", nargs="*", help="Config overrides (key=value)")
 
     args = parser.parse_args()
@@ -255,27 +259,74 @@ def main():
     # Setup
     set_seed(cfg.seed)
 
-    # Create output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(cfg.get("output_dir", "results/parser")) / timestamp
-    output_dir.mkdir(parents=True, exist_ok=True)
-    # Save config
-    OmegaConf.save(cfg, output_dir / "config.yaml")
+    # Handle resume vs new run
+    resume_from_checkpoint = None
+    if args.resume:
+        # Resume from existing run directory
+        output_dir = Path(args.resume)
+        if not output_dir.exists():
+            raise FileNotFoundError(f"Resume directory not found: {args.resume}")
+        
+        # Find the latest checkpoint in the directory
+        checkpoints = sorted(output_dir.glob("checkpoint-*"), key=lambda x: int(x.name.split("-")[1]))
+        if checkpoints:
+            resume_from_checkpoint = str(checkpoints[-1])
+            logger.info(f"Resuming from checkpoint: {resume_from_checkpoint}")
+        else:
+            logger.warning(f"No checkpoints found in {output_dir}, starting fresh")
+        
+        # Load config from resumed run if it exists
+        saved_config = output_dir / "config.yaml"
+        if saved_config.exists():
+            logger.info(f"Loading config from resumed run: {saved_config}")
+            cfg = OmegaConf.load(saved_config)
+            # Apply any CLI overrides on top
+            if args.overrides:
+                override_cfg = OmegaConf.from_dotlist(args.overrides)
+                cfg = OmegaConf.merge(cfg, override_cfg)
+    else:
+        # Create new output directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = Path(cfg.get("output_dir", "results/parser")) / timestamp
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Save config
+        OmegaConf.save(cfg, output_dir / "config.yaml")
+
+    # Get run name from output directory
+    run_name = output_dir.name
 
     # Initialize wandb
     use_wandb = cfg.wandb_mode != "disabled" and WANDB_AVAILABLE
     if use_wandb:
+        # Check if we're resuming and have a wandb run ID saved
+        wandb_id_file = output_dir / "wandb_run_id.txt"
+        wandb_resume = None
+        wandb_id = None
+        
+        if args.resume and wandb_id_file.exists():
+            wandb_id = wandb_id_file.read_text().strip()
+            wandb_resume = "must"
+            logger.info(f"Resuming wandb run: {wandb_id}")
+        
         wandb.init(
             project=cfg.wandb_project,
             entity=cfg.wandb_entity,
-            name=f"parser_{timestamp}",
+            name=f"parser_{run_name}",
             config=OmegaConf.to_container(cfg, resolve=True),
             mode=cfg.wandb_mode,
+            id=wandb_id,
+            resume=wandb_resume,
         )
+        
+        # Save wandb run ID for future resume
+        if not wandb_id_file.exists():
+            wandb_id_file.write_text(wandb.run.id)
 
     logger.info("Motion-conditioned Parser")
     logger.info(f"Device: {device}")
     logger.info(f"Output: {output_dir}")
+    if args.resume:
+        logger.info(f"Resuming from: {resume_from_checkpoint}")
     if use_wandb:
         logger.info(f"Wandb: {cfg.wandb_project}")
 
@@ -428,9 +479,14 @@ def main():
     elif cfg.get("warmup_steps", 0) > 0:
         warmup_args["warmup_steps"] = cfg.warmup_steps
 
+    # Build save args
+    save_args = {"save_strategy": cfg.save_strategy, "save_total_limit": cfg.save_total_limit}
+    if cfg.save_strategy == "steps":
+        save_args["save_steps"] = cfg.get("save_steps", 500)
+
     training_args = TrainingArguments(
         output_dir=str(output_dir),
-        run_name=f"parser_{timestamp}",
+        run_name=f"parser_{run_name}",
         num_train_epochs=cfg.num_train_epochs,
         per_device_train_batch_size=cfg.per_device_train_batch_size,
         per_device_eval_batch_size=cfg.per_device_eval_batch_size,
@@ -440,10 +496,9 @@ def main():
         max_grad_norm=cfg.max_grad_norm,
         lr_scheduler_type=cfg.get("lr_scheduler_type", "linear"),
         **warmup_args,
+        **save_args,
         logging_steps=cfg.logging_steps,
         eval_strategy=cfg.eval_strategy if eval_dataset else "no",
-        save_strategy=cfg.save_strategy,
-        save_total_limit=cfg.save_total_limit,
         load_best_model_at_end=cfg.load_best_model_at_end if eval_dataset else False,
         metric_for_best_model=cfg.metric_for_best_model,
         greater_is_better=False,  # Lower eval_loss is better
@@ -476,8 +531,11 @@ def main():
     )
 
     # Train
-    logger.info("Starting training...")
-    trainer.train()
+    if resume_from_checkpoint:
+        logger.info(f"Resuming training from: {resume_from_checkpoint}")
+    else:
+        logger.info("Starting training...")
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # Save final model components
     logger.info("Saving model...")
