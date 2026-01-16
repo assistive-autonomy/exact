@@ -364,19 +364,24 @@ def main(cfg: DictConfig):
                     continue
                 
                 logger.info(f"  Evaluating {episode_name} on test set...")
-                metrics = project.evaluate(
-                    [episode_name],
-                    mode="test",
-                    skip_updating_meta=False,
-                    parameters_update={
-                        "general": {"metric_functions": ["segmental_f1", "pr-auc", "f1"]},
-                        "metrics": {"f1": {"average": "macro"}},
-                        "training": {
-                            "partition_method": "file",
-                            "split_path": base_split_path,  # Use base split for test eval
+                try:
+                    metrics = project.evaluate(
+                        [episode_name],
+                        mode="test",
+                        skip_updating_meta=False,
+                        parameters_update={
+                            "general": {"metric_functions": ["segmental_f1", "pr-auc", "f1"]},
+                            "metrics": {"f1": {"average": "macro"}},
+                            "training": {
+                                "partition_method": "file",
+                                "split_path": base_split_path,  # Use base split for test eval
+                            },
                         },
-                    },
-                )
+                    )
+                except IndexError as e:
+                    # This can happen if model checkpoint files are missing
+                    logger.warning(f"  Skipping {episode_name} - model checkpoint not found: {e}")
+                    continue
                 
                 result_row = {
                     "model": model,

@@ -19,6 +19,7 @@ from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    BitsAndBytesConfig,
     Trainer,
     TrainingArguments,
     EarlyStoppingCallback,
@@ -115,10 +116,14 @@ def evaluate_samples(
     device: torch.device,
     dtype: torch.dtype,
     max_new_tokens: int = 256,
+    num_retries: int = 2,
+    retry_temperature: float = 0.8,
+    retry_top_p: float = 0.9,
     grammar_processor=None,
+    log_attempts: bool = False,
 ) -> dict:
     """Evaluate model on sample batch and return metrics."""
-    from exact.parser.utils import post_process_program, validate_program
+    from exact.parser.utils import post_process_program
 
     model.eval()
 
@@ -126,27 +131,59 @@ def evaluate_samples(
     exact_matches = 0
     valid_programs = 0
 
+    def _generate_with_retries(motion_batch: torch.Tensor):
+        attempts = []
+
+        for attempt in range(num_retries + 1):
+            use_sampling = attempt > 0
+            temperature = retry_temperature if use_sampling else None
+            top_p = retry_top_p if use_sampling else None
+
+            generated_ids = model.generate(
+                motion=motion_batch,
+                max_new_tokens=max_new_tokens,
+                do_sample=use_sampling,
+                temperature=temperature,
+                top_p=top_p,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                grammar_processor=None,  # Prefer plain decoding; rely on repair/post-processing
+                use_cache=True,
+            )
+
+            raw_predicted = tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
+            predicted, is_valid = post_process_program(raw_predicted, repair=True)
+
+            attempts.append(
+                {
+                    "attempt": attempt + 1,
+                    "sampling": use_sampling,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "raw": raw_predicted,
+                    "predicted": predicted,
+                    "is_valid": is_valid,
+                }
+            )
+
+            logger.debug(
+                f"Attempt {attempt + 1} ({'sample' if use_sampling else 'greedy'}): "
+                f"valid={is_valid}, predicted='{predicted}'"
+            )
+
+            if is_valid:
+                break
+
+        return attempts[-1], attempts
+
     for sample in tqdm(samples, desc="Evaluating samples"):
         motion = sample["motion"].unsqueeze(0).to(device=device, dtype=dtype)
 
-        # Generate with greedy decoding (do_sample=False)
-        # Set temperature=None and top_p=None to suppress warnings about unused params
-        generated_ids = model.generate(
-            motion=motion,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=None,
-            top_p=None,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            grammar_processor=grammar_processor,
-            use_cache=True,
-        )
+        best_attempt, attempts = _generate_with_retries(motion)
 
-        raw_predicted = tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
-
-        # Post-process the generated program to ensure validity
-        predicted, is_valid = post_process_program(raw_predicted, repair=True)
+        raw_predicted = best_attempt["raw"]
+        predicted = best_attempt["predicted"]
+        is_valid = best_attempt["is_valid"]
 
         target = sample["target"]
         is_match = predicted == target
@@ -164,6 +201,7 @@ def evaluate_samples(
                 "raw_predicted": raw_predicted if raw_predicted != predicted else None,
                 "exact_match": is_match,
                 "is_valid": is_valid,
+                "attempts": attempts if log_attempts else None,
             }
         )
 
@@ -340,14 +378,13 @@ def main():
             cfg.eval_data, n_samples=cfg.get("eval_samples", 8)
         )
 
-        # Create grammar processor
-        try:
-            from exact.parser.utils import create_grammar_processor
-
-            grammar_processor = create_grammar_processor(tokenizer)
-        except Exception as e:
-            logger.warning(f"Could not create grammar processor: {e}")
-            grammar_processor = None
+        eval_kwargs = {
+            "max_new_tokens": cfg.get("generation_max_new_tokens", 256),
+            "num_retries": cfg.get("generation_retries", 2),
+            "retry_temperature": cfg.get("generation_retry_temperature", 0.8),
+            "retry_top_p": cfg.get("generation_retry_top_p", 0.9),
+            "log_attempts": cfg.get("log_generation_attempts", False),
+        }
 
         # Evaluate
         eval_results = evaluate_samples(
@@ -356,7 +393,7 @@ def main():
             eval_samples,
             device,
             model_dtype,
-            grammar_processor=grammar_processor,
+            **eval_kwargs,
         )
         print_eval_results(eval_results)
 
@@ -371,12 +408,24 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Load model in bf16 (A100 has native bf16 support, no quantization needed)
+    load_in_4bit = cfg.get("load_in_4bit", False)
+    quant_config = None
+    if load_in_4bit:
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+        logger.info("Loading base model with 4-bit quantization")
+
+    # Load model
     base_model = AutoModelForCausalLM.from_pretrained(
         cfg.model_name,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=None if load_in_4bit else torch.bfloat16,
         device_map="auto",
-        low_cpu_mem_usage=True,
+        low_cpu_mem_usage=not load_in_4bit,
+        quantization_config=quant_config,
     )
     model_hidden_size = get_model_hidden_size(base_model)
     logger.info(f"Model: {cfg.model_name}, hidden_size: {model_hidden_size} (bf16)")
@@ -388,15 +437,18 @@ def main():
         r=cfg.lora_r,
         lora_alpha=cfg.lora_alpha,
         lora_dropout=cfg.lora_dropout,
-        target_modules=[
-            "q_proj",
-            "v_proj",
-            "k_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ],
+        target_modules=cfg.get(
+            "target_modules",
+            [
+                "q_proj",
+                "v_proj",
+                "k_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            ],
+        ),
         bias="none",
     )
     base_model = get_peft_model(base_model, lora_config)
@@ -557,13 +609,13 @@ def main():
         cfg.eval_data, n_samples=cfg.get("eval_samples", 8)
     )
 
-    try:
-        from exact.parser.utils import create_grammar_processor
-
-        grammar_processor = create_grammar_processor(tokenizer)
-    except Exception as e:
-        logger.warning(f"Could not create grammar processor: {e}")
-        grammar_processor = None
+    eval_kwargs = {
+        "max_new_tokens": cfg.get("generation_max_new_tokens", 256),
+        "num_retries": cfg.get("generation_retries", 2),
+        "retry_temperature": cfg.get("generation_retry_temperature", 0.8),
+        "retry_top_p": cfg.get("generation_retry_top_p", 0.9),
+        "log_attempts": cfg.get("log_generation_attempts", False),
+    }
 
     # Move model to device for evaluation
     model.to(device)
@@ -573,7 +625,7 @@ def main():
         eval_samples,
         device,
         model_dtype,
-        grammar_processor=grammar_processor,
+        **eval_kwargs,
     )
     print_eval_results(eval_results)
 
@@ -606,6 +658,17 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
 
     model_dtype = torch.bfloat16  # Match training dtype
 
+    load_in_4bit = config.get("load_in_4bit", False)
+    quant_config = None
+    if load_in_4bit:
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+        logger.info("Loading base model with 4-bit quantization")
+
     # Load tokenizer and base model
     logger.info(f"Loading base model: {config['model_name']}")
     tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
@@ -615,8 +678,10 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
     # Load model in bfloat16 (same as training)
     base_model = AutoModelForCausalLM.from_pretrained(
         config["model_name"],
-        torch_dtype=model_dtype,
+        torch_dtype=None if load_in_4bit else model_dtype,
         device_map="auto",
+        low_cpu_mem_usage=not load_in_4bit,
+        quantization_config=quant_config,
     )
     model_hidden_size = get_model_hidden_size(base_model)
 

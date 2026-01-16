@@ -179,15 +179,18 @@ def load_training_segments(
     return segments_by_activity
 
 
-def create_parser():
-    """Create parser instance (mock or real).
+def create_parser(checkpoint_path: str | None = None):
+    """Create parser instance (mock or trained).
     
-    TODO: Replace with real parser when trained:
-        from exact.parser import Parser
-        return Parser.from_checkpoint("results/parser/<checkpoint>")
+    Args:
+        checkpoint_path: Path to trained parser checkpoint.
+                        If None, uses mock parser for testing.
+    
+    Returns:
+        Parser instance with parse() method
     """
-    from exact.models.mock_parser import MockParser
-    return MockParser()
+    from exact.parser import load_parser
+    return load_parser(checkpoint_path=checkpoint_path)
 
 
 def parse_segments_to_programs(
@@ -334,6 +337,10 @@ def main():
                        help="Load pre-computed models from JSON instead of parsing")
     parser.add_argument("--save-models", type=str, default=None,
                        help="Save computed models to JSON")
+    parser.add_argument("--parser-checkpoint", type=str, default=None,
+                       help="Path to trained parser checkpoint (uses mock if not provided)")
+    parser.add_argument("--program-budget", type=int, default=None,
+                       help="Select diverse subset of programs per activity (None = use all)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("overrides", nargs="*", help="Config overrides")
     
@@ -394,8 +401,12 @@ def main():
         # Load training segments
         train_segments = load_training_segments(train_videos, label_dir, pose_dir)
         
-        # Create parser
-        parser_model = create_parser()
+        # Create parser (trained or mock)
+        parser_model = create_parser(checkpoint_path=args.parser_checkpoint)
+        if args.parser_checkpoint:
+            logger.info(f"Using trained parser from {args.parser_checkpoint}")
+        else:
+            logger.info("Using mock parser (no checkpoint provided)")
         
         # Parse training segments
         for activity in activity_names:
@@ -408,30 +419,45 @@ def main():
                 segments, parser_model, args.max_train_programs
             )
             
+            # Apply program budget selection if specified
+            if programs and args.program_budget and len(programs) > args.program_budget:
+                from exact.programs import select_diverse_programs
+                logger.info(f"  Selecting {args.program_budget} diverse programs from {len(programs)}...")
+                result = select_diverse_programs(
+                    programs,
+                    budget=args.program_budget,
+                    method="hierarchical",
+                    show_progress=False,
+                )
+                programs = result.selected_programs
+                logger.info(f"  {activity}: {len(programs)} programs (selected from {len(result.cluster_labels)})")
+            
             if programs:
                 dist_matrix.set_model_programs(activity, programs)
-                logger.info(f"  {activity}: {len(programs)} programs")
+                if not args.program_budget:
+                    logger.info(f"  {activity}: {len(programs)} programs")
     
     # Save models if requested
     if args.save_models:
         logger.info(f"Saving models to {args.save_models}")
         # Convert to ActivityModelCollection format
         from exact.models import ExecutableActivityModel, ActivityModelCollection
-        models = {}
+        collection = ActivityModelCollection(eval_timesteps=100)
         for activity, programs in dist_matrix.model_programs.items():
+            # Extract original program strings from ProgramTree objects
+            program_strings = [p.program for p in programs]
             model = ExecutableActivityModel.from_programs(
-                programs=[p.program for p in programs],
+                programs=program_strings,
                 activity_name=activity,
                 eval_timesteps=100,
             )
-            models[activity] = model
-        collection = ActivityModelCollection(models)
+            collection.add_model(model)
         collection.save(args.save_models)
     
     # Parse test programs
     logger.info("Creating test programs from test data...")
     test_segments = load_training_segments(test_videos, label_dir, pose_dir)
-    parser_model = create_parser()
+    parser_model = create_parser(checkpoint_path=args.parser_checkpoint)
     
     for activity in activity_names:
         if activity not in test_segments:

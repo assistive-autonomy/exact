@@ -1,0 +1,85 @@
+seed: 42
+device: auto
+
+# Data (relative to project root)
+train_data: ../exact_data/train.h5
+eval_data: ../exact_data/eval.h5
+
+# Output
+output_dir: results/parser_phi3_mini
+
+# Model
+model_name: microsoft/Phi-3-mini-128k-instruct
+max_seq_length: 1024
+load_in_4bit: false  # Small enough for bf16 on A100
+
+# Generation / evaluation settings
+generation_max_new_tokens: 256
+generation_retries: 2
+generation_retry_temperature: 0.8
+generation_retry_top_p: 0.9
+log_generation_attempts: false
+
+# Motion encoder (temporal)
+encoder_type: temporal
+motion_dim: 72
+motion_hidden_dim: 256
+motion_num_encoder_layers: 4
+motion_num_decoder_layers: 2
+num_queries: 32
+encoder_nhead: 8
+encoder_dropout: 0.1
+
+# Auxiliary losses
+use_reconstruction_loss: true
+reconstruction_loss_weight: 0.1
+
+# LoRA
+target_modules:
+  - q_proj
+  - v_proj
+  - k_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+
+# Training
+num_train_epochs: 12
+per_device_train_batch_size: 6
+per_device_eval_batch_size: 6
+learning_rate: 3e-5
+weight_decay: 0.01
+max_grad_norm: 1.0
+warmup_ratio: 0.03
+lr_scheduler_type: cosine
+gradient_accumulation_steps: 4
+dataloader_num_workers: 4
+logging_steps: 10
+bf16: true
+dataloader_prefetch_factor: 2
+gradient_checkpointing: false
+
+eval_strategy: epoch
+
+# Checkpointing
+save_strategy: steps
+save_steps: 500
+save_total_limit: 3
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+
+# Early stopping
+early_stopping_patience: 4
+
+# Evaluation
+eval_samples: 16
+
+# Wandb
+report_to: wandb
+wandb_project: exact
+wandb_entity: assistive-autonomy
+wandb_mode: online

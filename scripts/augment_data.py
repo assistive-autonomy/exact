@@ -135,18 +135,20 @@ def load_training_segments(
 
 def create_executable_models(
     segments_by_activity: dict,
-    mock_parser: "MockParser",
+    parser,
     eval_timesteps: int = 100,
     max_programs_per_activity: int = 50,
+    program_budget: int | None = None,
     seed: int = 42,
 ) -> dict:
     """Create ExecutableActivityModels from parsed segments.
     
     Args:
         segments_by_activity: Dict mapping activity -> list of segment info
-        mock_parser: Parser to convert segments to programs
+        parser: Parser to convert segments to programs (trained or mock)
         eval_timesteps: Common evaluation timesteps for all models
-        max_programs_per_activity: Maximum programs to use per activity
+        max_programs_per_activity: Maximum programs to parse per activity
+        program_budget: If set, select diverse subset using hierarchical clustering
         seed: Random seed for sampling
         
     Returns:
@@ -169,10 +171,29 @@ def create_executable_models(
         # Parse segments into programs
         programs = []
         for seg in segments:
+            poses = seg.get("poses")
             duration = seg["duration"]
-            # Use mock parser (will be replaced with real parser)
-            program = mock_parser.parse(duration=duration)
+            
+            # Use parser (trained or mock)
+            if poses is not None and hasattr(parser, 'parse') and not hasattr(parser, 'duration'):
+                # Trained parser uses motion data
+                program = parser.parse(poses)
+            else:
+                # Mock parser uses duration
+                program = parser.parse(duration=duration)
             programs.append(program)
+        
+        # Apply program budget selection if specified
+        if program_budget and len(programs) > program_budget:
+            from exact.programs import select_diverse_programs
+            logger.info(f"  Selecting {program_budget} diverse programs from {len(programs)} for {activity_name}...")
+            result = select_diverse_programs(
+                programs,
+                budget=program_budget,
+                method="hierarchical",
+                show_progress=False,
+            )
+            programs = result.selected_programs
         
         # Create executable model
         model = create_executable_model(
@@ -414,6 +435,18 @@ def main():
         default=None,
         help="Path to save executable models JSON (optional)",
     )
+    parser.add_argument(
+        "--parser-checkpoint",
+        type=str,
+        default=None,
+        help="Path to trained parser checkpoint (uses mock if not provided)",
+    )
+    parser.add_argument(
+        "--program-budget",
+        type=int,
+        default=None,
+        help="Select diverse subset of programs per activity using hierarchical clustering",
+    )
     
     args = parser.parse_args()
     
@@ -455,18 +488,24 @@ def main():
         if segs:
             logger.info(f"  {name}: {len(segs)} segments")
     
-    # Create mock parser
-    logger.info("Creating mock parser...")
-    from exact.models.mock_parser import MockParser
-    mock_parser = MockParser(seed=args.seed)
+    # Create parser (trained or mock)
+    logger.info("Creating parser...")
+    from exact.parser import load_parser
+    parser_model = load_parser(checkpoint_path=args.parser_checkpoint)
+    if args.parser_checkpoint:
+        logger.info(f"Using trained parser from {args.parser_checkpoint}")
+    else:
+        logger.info("Using mock parser (no checkpoint provided)")
+    
+    logger.info("Creating executable activity models...")
     
     # Create executable models
-    logger.info("Creating executable activity models...")
     executable_models = create_executable_models(
         segments_by_activity=segments,
-        mock_parser=mock_parser,
+        parser=parser_model,
         eval_timesteps=args.eval_timesteps,
         max_programs_per_activity=args.max_programs_per_activity,
+        program_budget=args.program_budget,
         seed=args.seed,
     )
     
