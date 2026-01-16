@@ -9,7 +9,7 @@ eval_data: ../exact_data/eval.h5
 output_dir: results/parser_phi3_mini
 
 # Model
-model_name: microsoft/Phi-3-mini-128k-instruct
+model_name: /public/hf/models/microsoft/Phi-3-mini-128k-instruct
 max_seq_length: 1024
 load_in_4bit: false  # Small enough for bf16 on A100
 
