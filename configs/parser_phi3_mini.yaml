@@ -63,7 +63,8 @@ bf16: true
 dataloader_prefetch_factor: 2
 gradient_checkpointing: false
 
-eval_strategy: epoch
+eval_strategy: steps
+eval_steps: 500
 
 # Checkpointing
 save_strategy: steps
@@ -73,7 +74,7 @@ load_best_model_at_end: true
 metric_for_best_model: eval_loss
 
 # Early stopping
-early_stopping_patience: 4
+early_stopping_patience: 5
 
 # Evaluation
 eval_samples: 16
