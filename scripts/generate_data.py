@@ -2,8 +2,10 @@
 
 import argparse
 import os
-from functools import partial
-from multiprocessing import Pool, cpu_count
+import sys
+import traceback
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import cpu_count
 from pathlib import Path
 
 import h5py
@@ -54,11 +56,15 @@ def generate_single_sample(program: str) -> tuple[str, np.ndarray]:
     Returns:
         Tuple of (program, motion_array)
     """
-    # Create model per-process to avoid sharing state
-    model = BehaviourModel(device="cpu")
-    reward = parse_program(program)
-    obs, _ = generate_trajectory(model, reward, device="cpu")
-    return program, obs.cpu().numpy().astype(np.float32)
+    try:
+        # Create model per-process to avoid sharing state
+        model = BehaviourModel(device="cpu")
+        reward = parse_program(program)
+        obs, _ = generate_trajectory(model, reward, device="cpu")
+        return program, obs.cpu().numpy().astype(np.float32), None
+    except Exception as e:
+        # Return error as string to avoid pickling issues
+        return program, None, traceback.format_exc()
 
 
 def generate_batch(programs: list[str], worker_id: int = 0) -> list[tuple[str, np.ndarray]]:
@@ -146,16 +152,16 @@ def main():
 
     logger.info(f"Generating trajectories in parallel and saving to {hdf5_path}")
 
-    # Process in parallel using multiprocessing Pool
-    with Pool(processes=num_workers, initializer=init_worker) as pool:
-        # Use imap for memory efficiency with large datasets
-        results = list(
-            tqdm(
-                pool.imap(generate_single_sample, programs, chunksize=args.chunk_size),
-                total=len(programs),
-                desc="Generating",
-            )
-        )
+    # Process in parallel using ProcessPoolExecutor (more robust with pickling)
+    results = []
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = [executor.submit(generate_single_sample, prog) for prog in programs]
+        for future in tqdm(futures, desc="Generating"):
+            program, motion, error = future.result()
+            if error:
+                logger.error(f"Error processing program: {error}")
+                continue
+            results.append((program, motion))
 
     # Write results to HDF5 (sequential write is fast)
     logger.info("Writing to HDF5...")
