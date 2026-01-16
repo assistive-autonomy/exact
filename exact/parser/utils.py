@@ -9,9 +9,15 @@ from syncode import SyncodeLogitsProcessor, Grammar
 DEFAULT_GRAMMAR_PATH = Path(__file__).parent.parent / "programs" / "grammar.lark"
 
 # Precompile regex patterns for program validation/repair
-_PROGRAM_PATTERN = re.compile(
-    r'\[(\d+),(\d+)\]'  # [start,end]
-    r'((?:[a-z]+\.[xyz]\(-?[\d.]+\))(?:\*[a-z]+\.[xyz]\(-?[\d.]+\))*)'  # sensors
+_ALLOWED_CHARS_PATTERN = re.compile(r"^[\w\[\];,\*\.\(\)\-]+$", re.IGNORECASE)
+_SEGMENT_PATTERN = re.compile(
+    r"\[(\d+),(\d+)\]"  # [start,end]
+    r"(?:[a-z]+\.[xyz]\(-?\d+(?:\.\d+)?\))"  # first sensor
+    r"(?:\*[a-z]+\.[xyz]\(-?\d+(?:\.\d+)?\))*",  # optional additional sensors
+    re.IGNORECASE,
+)
+_MULTISEGMENT_PATTERN = re.compile(
+    rf"^{_SEGMENT_PATTERN.pattern}(?:;{_SEGMENT_PATTERN.pattern})*$", re.IGNORECASE
 )
 
 
@@ -41,6 +47,21 @@ def validate_program(program: str, grammar_path: str | Path | None = None) -> bo
     Returns:
         True if valid, False otherwise
     """
+    program = program.strip()
+
+    # Lightweight screen to avoid expensive parsing on obviously malformed strings
+    if not program:
+        return False
+    if not _ALLOWED_CHARS_PATTERN.match(program):
+        logger.debug("Program failed char whitelist check")
+        return False
+    if program.count("[") != program.count("]") or program.count("(") != program.count(")"):
+        logger.debug("Program failed bracket/paren balance check")
+        return False
+    if not _MULTISEGMENT_PATTERN.match(program):
+        logger.debug("Program failed coarse segment pattern check")
+        return False
+
     try:
         parser = get_grammar_parser(grammar_path)
         parser.parse(program)
@@ -158,27 +179,31 @@ def post_process_program(
     Returns:
         Tuple of (processed_program, is_valid)
     """
-    # First, try the program as-is
-    if validate_program(program, grammar_path):
-        return program, True
+    program = program.strip()
 
-    if not repair:
+    # Quick screen before heavier parsing
+    if not validate_program(program, grammar_path):
+        if not repair:
+            return program, False
+
+        # Try to repair and screen again
+        repaired = repair_program(program)
+
+        if validate_program(repaired, grammar_path):
+            logger.debug(f"Repaired program: '{program}' -> '{repaired}'")
+            return repaired, True
+
+        # Try to extract valid prefix
+        valid_prefix = extract_valid_prefix(repaired, grammar_path)
+        if valid_prefix:
+            logger.warning(
+                f"Extracted valid prefix from malformed program: '{program}' -> '{valid_prefix}'"
+            )
+            return valid_prefix, True
+
+        # Return original with invalid flag
+        logger.warning(f"Could not repair program: '{program}'")
         return program, False
 
-    # Try to repair
-    repaired = repair_program(program)
-    if validate_program(repaired, grammar_path):
-        logger.debug(f"Repaired program: '{program}' -> '{repaired}'")
-        return repaired, True
-
-    # Try to extract valid prefix
-    valid_prefix = extract_valid_prefix(program, grammar_path)
-    if valid_prefix:
-        logger.warning(
-            f"Extracted valid prefix from malformed program: '{program}' -> '{valid_prefix}'"
-        )
-        return valid_prefix, True
-
-    # Return original with invalid flag
-    logger.warning(f"Could not repair program: '{program}'")
-    return program, False
+    # First, try the program as-is
+    return program, True

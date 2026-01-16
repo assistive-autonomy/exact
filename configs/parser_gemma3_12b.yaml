@@ -9,7 +9,7 @@ eval_data: ../exact_data/eval.h5
 output_dir: results/parser_gemma3_12b
 
 # Model
-model_name: google/gemma-3-12b-pt
+model_name: /public/hf/models/google/gemma-3-12b-pt
 max_seq_length: 1024
 load_in_4bit: true  # 4-bit base + LoRA on A100
 

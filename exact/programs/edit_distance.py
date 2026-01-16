@@ -133,21 +133,29 @@ def _lark_tree_to_program_tree(tree: Tree, program: str) -> ProgramTree:
     return ProgramTree(nodes=nodes, adj=adj, program=program)
 
 
-def _build_simplified_tree(tree: Union[Tree, Token], nodes: list, adj: list, parent_idx: Optional[int]) -> Optional[int]:
+def _build_simplified_tree(tree: Union[Tree, Token], nodes: list, adj: list, parent_idx: Optional[int], in_sensor: bool = False) -> Optional[int]:
     """Build simplified tree structure, skipping interval values.
+    
+    Args:
+        tree: Lark Tree or Token
+        nodes: List to append node labels to
+        adj: List to append adjacency lists to
+        parent_idx: Index of parent node
+        in_sensor: Whether we're inside a sensor node (NUMBER should be kept)
     
     Returns:
         Index of created node, or None if skipped
     """
     if isinstance(tree, Token):
-        if tree.type == "INT":
-            # Skip interval values
+        if tree.type == "NUMBER" and not in_sensor:
+            # Skip interval values (NUMBER tokens outside of sensor)
             return None
         
         # Create node for token
         node_idx = len(nodes)
         
-        if tree.type == "REAL":
+        if tree.type == "NUMBER":
+            # This is a sensor value - normalize it
             label = _normalize_value(float(tree.value))
         else:
             label = tree.value
@@ -168,9 +176,10 @@ def _build_simplified_tree(tree: Union[Tree, Token], nodes: list, adj: list, par
     if parent_idx is not None:
         adj[parent_idx].append(node_idx)
     
-    # Process children
+    # Process children - set in_sensor=True when entering a sensor node
+    child_in_sensor = in_sensor or tree.data == "sensor"
     for child in tree.children:
-        _build_simplified_tree(child, nodes, adj, node_idx)
+        _build_simplified_tree(child, nodes, adj, node_idx, child_in_sensor)
     
     return node_idx
 

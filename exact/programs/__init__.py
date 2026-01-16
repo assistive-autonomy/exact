@@ -9,6 +9,14 @@ from .edit_distance import (
     ProgramDistanceMatrix,
     VALUE_TOLERANCE,
 )
+from .selection import (
+    SelectionResult,
+    compute_distance_matrix,
+    select_programs_hierarchical,
+    select_programs_greedy,
+    select_diverse_programs,
+    deduplicate_programs,
+)
 
 
 __all__ = [
@@ -25,4 +33,11 @@ __all__ = [
     "batch_min_distances",
     "ProgramDistanceMatrix",
     "VALUE_TOLERANCE",
+    # Program selection
+    "SelectionResult",
+    "compute_distance_matrix",
+    "select_programs_hierarchical",
+    "select_programs_greedy",
+    "select_diverse_programs",
+    "deduplicate_programs",
 ]

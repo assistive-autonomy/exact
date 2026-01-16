@@ -366,6 +366,42 @@ class ExecutableActivityModel:
             f"num_programs={self.num_programs}, "
             f"eval_timesteps={self.eval_timesteps})"
         )
+    
+    @classmethod
+    def from_programs(
+        cls,
+        programs: list[str],
+        activity_name: str,
+        eval_timesteps: int = 100,
+        metadata: Optional[dict] = None,
+    ) -> "ExecutableActivityModel":
+        """Create an ExecutableActivityModel from a list of programs.
+        
+        This is a convenience class method that creates a model and adds
+        all programs in one call.
+        
+        Args:
+            programs: List of program strings for this activity
+            activity_name: Name of the activity
+            eval_timesteps: Common evaluation window duration
+            metadata: Optional metadata dictionary
+            
+        Returns:
+            ExecutableActivityModel with all programs added
+            
+        Example:
+            >>> model = ExecutableActivityModel.from_programs(
+            ...     programs=["[0,50]head.y(1.6)", "[0,30]lhand.x(0.3)"],
+            ...     activity_name="Grab",
+            ... )
+        """
+        model = cls(
+            activity_name=activity_name,
+            eval_timesteps=eval_timesteps,
+            metadata=metadata or {},
+        )
+        model.add_programs(programs)
+        return model
 
 
 def create_executable_model(

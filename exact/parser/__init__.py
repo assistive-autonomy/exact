@@ -8,6 +8,7 @@ from .utils import (
     extract_valid_prefix,
     get_grammar_parser,
 )
+from .loader import load_parser, TrainedParser
 
 __all__ = [
     "MotionConditionedParser",
@@ -20,4 +21,7 @@ __all__ = [
     "post_process_program",
     "extract_valid_prefix",
     "get_grammar_parser",
+    # Loader
+    "load_parser",
+    "TrainedParser",
 ]
