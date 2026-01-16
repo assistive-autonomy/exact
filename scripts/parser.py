@@ -437,7 +437,7 @@ def main():
         r=cfg.lora_r,
         lora_alpha=cfg.lora_alpha,
         lora_dropout=cfg.lora_dropout,
-        target_modules=cfg.get(
+        target_modules=list(cfg.get(
             "target_modules",
             [
                 "q_proj",
@@ -448,7 +448,7 @@ def main():
                 "up_proj",
                 "down_proj",
             ],
-        ),
+        )),
         bias="none",
     )
     base_model = get_peft_model(base_model, lora_config)
