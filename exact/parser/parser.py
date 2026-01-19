@@ -8,7 +8,7 @@ from typing import Optional
 
 from syncode import SyncodeLogitsProcessor
 
-from .encoder import TrajectoryEncoder, TemporalTrajectoryEncoder
+from exact.encoder import STGCNEncoder
 
 # Default system prompt describing the motion-to-program task
 # Keep it minimal to avoid confusing the model with Python-like language
@@ -31,18 +31,13 @@ class MotionParserOutput(ModelOutput):
 
 
 class MotionConditionedParser(nn.Module):
-    """LLM with motion prefix conditioning for program generation.
-
-    Supports auxiliary reconstruction loss for better motion encoding.
-    """
+    """LLM with ST-GCN motion prefix conditioning for program generation."""
 
     def __init__(
         self,
         model,
-        trajectory_encoder: TrajectoryEncoder | TemporalTrajectoryEncoder,
+        trajectory_encoder: STGCNEncoder,
         tokenizer: PreTrainedTokenizer = None,
-        use_reconstruction_loss: bool = False,
-        reconstruction_loss_weight: float = 0.1,
         motion_dim: int = 72,
     ):
         super().__init__()
@@ -51,14 +46,6 @@ class MotionConditionedParser(nn.Module):
         self.trajectory_encoder = trajectory_encoder
         self.tokenizer = tokenizer
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
-
-        # Auxiliary loss settings
-        self.use_reconstruction_loss = use_reconstruction_loss
-        self.reconstruction_loss_weight = reconstruction_loss_weight
-
-        # Enable reconstruction head if using reconstruction loss
-        if use_reconstruction_loss and hasattr(trajectory_encoder, "enable_reconstruction"):
-            trajectory_encoder.enable_reconstruction(motion_dim)
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         """Enable gradient checkpointing on the underlying model."""
@@ -103,7 +90,7 @@ class MotionConditionedParser(nn.Module):
         motion: torch.Tensor,
         labels: torch.Tensor = None,
     ) -> MotionParserOutput:
-        """Forward pass with motion conditioning and optional auxiliary losses.
+        """Forward pass with motion conditioning.
 
         Args:
             input_ids: [batch_size, seq_len] token ids
@@ -112,22 +99,13 @@ class MotionConditionedParser(nn.Module):
             labels: [batch_size, seq_len] target labels (optional)
 
         Returns:
-            MotionParserOutput with loss, lm_loss, reconstruction_loss, and logits
+            MotionParserOutput with loss and logits
         """
         batch_size = motion.shape[0]
         device = motion.device
 
-        # Get embeddings - with optional encoded motion for reconstruction
-        reconstruction_loss = None
-        if self.use_reconstruction_loss and hasattr(self.trajectory_encoder, "reconstruct_motion"):
-            motion_embeddings, encoded_motion = self.trajectory_encoder(
-                motion, return_encoded_motion=True
-            )
-            # Compute reconstruction loss
-            reconstructed = self.trajectory_encoder.reconstruct_motion(encoded_motion)
-            reconstruction_loss = F.mse_loss(reconstructed, motion)
-        else:
-            motion_embeddings = self.trajectory_encoder(motion)
+        # Get embeddings
+        motion_embeddings = self.trajectory_encoder(motion)
 
         token_embeds = self.model.get_input_embeddings()(input_ids)
         system_embeds, system_mask = self._get_system_prompt_embeds(batch_size, device)
@@ -174,17 +152,8 @@ class MotionConditionedParser(nn.Module):
             labels=full_labels,
         )
 
-        # Compute combined loss
-        lm_loss = outputs.loss
-        total_loss = lm_loss
-
-        if reconstruction_loss is not None:
-            total_loss = lm_loss + self.reconstruction_loss_weight * reconstruction_loss
-
         return MotionParserOutput(
-            loss=total_loss,
-            lm_loss=lm_loss,
-            reconstruction_loss=reconstruction_loss,
+            loss=outputs.loss,
             logits=outputs.logits,
         )
 

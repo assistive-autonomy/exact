@@ -20,58 +20,54 @@ generation_retry_temperature: 0.8
 generation_retry_top_p: 0.9
 log_generation_attempts: false
 
-# ========== NEW TEMPORAL ENCODER CONFIG ==========
-# Motion encoder architecture
-encoder_type: temporal  # 'temporal' (new) or 'legacy' (old pooling-based)
+# ========== ST-GCN ENCODER CONFIG ==========
+# Motion encoder architecture using Spatial-Temporal Graph Convolutional Networks
+# Leverages SMPL 24-joint skeletal structure for superior motion representation
 motion_dim: 72  # 24 joints * 3 (x, y, z)
+graph_strategy: spatial  # Adjacency partitioning: uniform, distance, or spatial
 
-# Temporal encoder specific settings
-motion_hidden_dim: 256  # Increased from 72 for richer representations
-motion_num_encoder_layers: 4  # Self-attention layers for motion
-motion_num_decoder_layers: 2  # Cross-attention layers for queries
-num_queries: 32  # Number of learned query tokens (prefix length)
-encoder_nhead: 8  # Attention heads
-encoder_dropout: 0.1
+# ST-GCN architecture
+stgcn_hidden_channels: 64  # Hidden channels for ST-GCN blocks
+stgcn_num_blocks: 4  # Number of ST-GCN blocks
+stgcn_temporal_kernel: 9  # Temporal convolution kernel size
+stgcn_spatial_kernel: 3  # Spatial graph convolution partitions
+stgcn_dropout: 0.1  # Dropout for regularization
 
-# Auxiliary losses
-use_reconstruction_loss: true  # Helps encoder learn meaningful representations
-reconstruction_loss_weight: 0.1  # Weight for reconstruction vs LM loss
-
-# ========== UPDATED LORA CONFIG ==========
-# Increased capacity for complex motion-to-program mapping
-lora_r: 32  # Increased from 8
-lora_alpha: 64  # Increased from 16 (typically 2x r)
+# ========== LORA CONFIG ==========
+lora_r: 32
+lora_alpha: 64
 lora_dropout: 0.05
 
-# ========== UPDATED TRAINING HYPERPARAMETERS ==========
-num_train_epochs: 15  # Increased from 10
+# ========== TRAINING HYPERPARAMETERS ==========
+num_train_epochs: 15
 per_device_train_batch_size: 4
 per_device_eval_batch_size: 4
-learning_rate: 5e-5  # Reduced from 2e-4 for more stable training
+learning_rate: 5e-5
 weight_decay: 0.01
 max_grad_norm: 1.0
-warmup_ratio: 0.03  # Reduced from 0.1 for faster warmup
-lr_scheduler_type: cosine  # Added cosine annealing
+warmup_ratio: 0.03
+lr_scheduler_type: cosine
 gradient_accumulation_steps: 4
 dataloader_num_workers: 4
 logging_steps: 10
-bf16: true  # A100 has native bf16 support
+bf16: true
 dataloader_prefetch_factor: 2
 gradient_checkpointing: false
-eval_strategy: epoch
+eval_strategy: steps
+eval_steps: 500
 
-# Training checkpointing - save frequently to allow resume after crashes
+# Checkpointing
 save_strategy: steps
-save_steps: 500  # Save every 500 steps (~30 min on A100)
-save_total_limit: 3  # Keep last 3 checkpoints
+save_steps: 500
+save_total_limit: 3
 load_best_model_at_end: true
 metric_for_best_model: eval_loss
 
 # Early stopping
-early_stopping_patience: 5  # Stop if no improvement for 5 epochs
+early_stopping_patience: 5
 
 # Evaluation
-eval_samples: 16  # Increased from 8 for better evaluation signal
+eval_samples: 16
 
 # Wandb
 report_to: wandb

@@ -220,11 +220,23 @@ uv run scripts/parser.py --eval-only results/parser/20251222_123456
 ### Configuration
 
 Edit `configs/parser.yaml` to customize:
+
+**Data and Training:**
 - `train_data` / `eval_data`: Paths to HDF5 data files
 - `model_name`: Base LLM (default: `meta-llama/Llama-3.1-8B-Instruct`)
 - `per_device_train_batch_size`: Batch size (adjust based on GPU memory)
+- `load_in_4bit`: Use 4-bit quantization (default: false, uses bf16)
+- `load_in_8bit`: Use 8-bit quantization (alternative to 4-bit)
 
-The model uses **8-bit quantization** (bitsandbytes) by default to reduce memory usage while maintaining quality. LoRA adapters are trained on top of the quantized base model.
+**Motion Encoder (ST-GCN):**
+- `motion_dim`: Input motion dimensions (default: 72 for 24 SMPL joints × 3)
+- `graph_strategy`: Adjacency strategy (`uniform`, `distance`, or `spatial`)
+- `stgcn_hidden_channels`: ST-GCN hidden dimension (default: 64)
+- `stgcn_num_blocks`: Number of ST-GCN blocks (default: 4)
+- `stgcn_temporal_kernel`: Temporal convolution kernel size (default: 9)
+- `stgcn_spatial_kernel`: Spatial convolution kernel size (default: 3)
+
+The motion encoder uses **Spatial-Temporal Graph Convolutional Networks** (ST-GCN) from the shared encoders module, which preserve skeletal structure through graph convolutions on the 24-joint SMPL skeleton adjacency. The base LLM can use 4-bit or 8-bit quantization to reduce memory usage, with LoRA adapters (r=32, alpha=64) trained on top.
 
 ---
 

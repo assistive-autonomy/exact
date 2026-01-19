@@ -30,7 +30,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from exact.anomaly import STG_NF, Graph, Trainer
-from exact.anomaly.esk_dataset import get_esk_dataloaders, get_unique_activities
+from exact.data.esk import get_esk_dataloaders, get_unique_activities
 
 import wandb
 import matplotlib.pyplot as plt

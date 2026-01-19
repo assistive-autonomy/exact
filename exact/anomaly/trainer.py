@@ -36,7 +36,7 @@ def compute_loss(nll: torch.Tensor, reduction: str = "mean") -> dict:
     return {"nll": loss, "total_loss": loss}
 
 
-class Trainer:
+class AnomalyTrainer:
     """
     Trainer for STG-NF model with optional wandb logging.
 

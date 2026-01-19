@@ -93,7 +93,7 @@ def load_training_segments(
     Returns:
         Dictionary mapping activity_name -> list of segment info dicts
     """
-    from exact.data.esk_format import load_labels, load_pose_data, extract_segment_poses
+    from exact.data.utils import load_labels, load_pose_data, extract_segment_poses
     
     all_segments = {}
     activity_names = None
@@ -277,7 +277,7 @@ def generate_augmented_data(
     Returns:
         Path to output directory with generated files
     """
-    from exact.data.esk_format import ESKDatasetWriter
+    from exact.data import ESKDatasetWriter
     
     rng = random.Random(seed)
     

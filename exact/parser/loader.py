@@ -83,12 +83,9 @@ class TrainedParser:
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from peft import PeftModel
         
-        from exact.parser import (
-            MotionConditionedParser,
-            TrajectoryEncoder,
-            TemporalTrajectoryEncoder,
-            create_grammar_processor,
-        )
+        from exact.parser import MotionConditionedParser
+        from exact.encoder import STGCNEncoder
+        from .utils import create_grammar_processor
         
         # Load config
         config_path = self.checkpoint_path / "config.yaml"
@@ -123,27 +120,21 @@ class TrainedParser:
         
         model = PeftModel.from_pretrained(base_model, adapter_path)
         
-        # Create trajectory encoder
-        encoder_type = self.config.get("encoder_type", "temporal")
+        # Create ST-GCN encoder from config
         motion_dim = self.config.get("motion_dim", 72)
         hidden_size = self._get_model_hidden_size(model)
         
-        if encoder_type == "temporal":
-            encoder = TemporalTrajectoryEncoder(
-                motion_dim=motion_dim,
-                hidden_dim=self.config.get("motion_hidden_dim", 256),
-                output_dim=hidden_size,
-                num_encoder_layers=self.config.get("motion_num_encoder_layers", 4),
-                num_decoder_layers=self.config.get("motion_num_decoder_layers", 2),
-                num_queries=self.config.get("num_queries", 32),
-                nhead=self.config.get("encoder_nhead", 8),
-                dropout=self.config.get("encoder_dropout", 0.1),
-            )
-        else:
-            encoder = TrajectoryEncoder(
-                input_dim=motion_dim,
-                output_dim=hidden_size,
-            )
+        encoder = STGCNEncoder(
+            num_nodes=self.config.get("stgcn_num_nodes", 24),
+            input_channels=self.config.get("stgcn_input_channels", 3),
+            hidden_channels=self.config.get("stgcn_hidden_channels", 64),
+            output_dim=hidden_size,
+            num_blocks=self.config.get("stgcn_num_blocks", 4),
+            temporal_kernel_size=self.config.get("stgcn_temporal_kernel", 9),
+            spatial_kernel_size=self.config.get("stgcn_spatial_kernel", 3),
+            dropout=self.config.get("stgcn_dropout", 0.1),
+            graph_strategy=self.config.get("graph_strategy", "spatial"),
+        )
         
         # Load encoder weights
         encoder_path = self.checkpoint_path / "encoder.pt"

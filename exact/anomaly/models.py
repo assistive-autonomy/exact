@@ -1,18 +1,11 @@
-"""
-STG-NF: Spatio-Temporal Graph Normalizing Flows model.
-
-Lightweight implementation using standard PyTorch components.
-"""
-
 import math
 from typing import Optional, Literal
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
-from exact.anomaly.graph import Graph
+from exact.encoder import Graph, STGCNBlock
 
 
 def split_feature(
@@ -176,101 +169,6 @@ class InvertibleConv1x1(nn.Module):
                     logdet = logdet + torch.slogdet(W)[1] * h * w
 
         return x, logdet
-
-
-class GraphConv(nn.Module):
-    """
-    Graph convolution layer for skeleton data.
-
-    Applies spatial graph convolution followed by temporal convolution.
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int,  # spatial kernel size (number of adjacency matrices)
-        t_kernel_size: int = 1,
-        stride: int = 1,
-        bias: bool = True,
-    ):
-        super().__init__()
-        self.kernel_size = kernel_size
-        self.conv = nn.Conv2d(
-            in_channels,
-            out_channels * kernel_size,
-            kernel_size=(t_kernel_size, 1),
-            padding=(t_kernel_size // 2, 0),
-            stride=(stride, 1),
-            bias=bias,
-        )
-
-    def forward(self, x: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Input tensor (B, C, T, V)
-            A: Adjacency matrix (K, V, V)
-        """
-        assert A.size(0) == self.kernel_size
-
-        x = self.conv(x)
-        n, kc, t, v = x.size()
-        x = x.view(n, self.kernel_size, kc // self.kernel_size, t, v)
-        x = torch.einsum("nkctv,kvw->nctw", x, A)
-
-        return x.contiguous()
-
-
-class STGCNBlock(nn.Module):
-    """
-    Spatio-Temporal Graph Convolution block.
-
-    Graph convolution followed by temporal convolution with residual connection.
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: tuple[int, int],  # (temporal, spatial)
-        stride: int = 1,
-        residual: bool = True,
-    ):
-        super().__init__()
-        t_kernel, s_kernel = kernel_size
-
-        self.gcn = GraphConv(in_channels, out_channels, s_kernel, t_kernel_size=1)
-
-        self.tcn = nn.Sequential(
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(
-                out_channels,
-                out_channels,
-                (t_kernel, 1),
-                (stride, 1),
-                (t_kernel // 2, 0),
-            ),
-            nn.BatchNorm2d(out_channels),
-        )
-
-        if not residual:
-            self.residual = lambda x: 0
-        elif in_channels == out_channels and stride == 1:
-            self.residual = lambda x: x
-        else:
-            self.residual = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=(stride, 1)),
-                nn.BatchNorm2d(out_channels),
-            )
-
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, x: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
-        res = self.residual(x)
-        x = self.gcn(x, A)
-        x = self.tcn(x) + res
-        return self.relu(x)
 
 
 class AffineCoupling(nn.Module):
@@ -484,9 +382,9 @@ class FlowNet(nn.Module):
 
         C, T, V = pose_shape
 
-        # Build graph if not provided
+        # Build SMPL graph if not provided
         if graph is None:
-            graph = Graph(layout="smpl", strategy="uniform", max_hop=1)
+            graph = Graph(strategy="uniform", max_hop=1)
 
         A = torch.from_numpy(graph.A).float()
 

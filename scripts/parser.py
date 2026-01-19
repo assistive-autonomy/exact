@@ -29,7 +29,8 @@ from transformers import (
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from exact.data import TrajectoryGenerationDataset
-from exact.parser import MotionConditionedParser, TrajectoryEncoder, TemporalTrajectoryEncoder
+from exact.parser import MotionConditionedParser
+from exact.encoder import STGCNEncoder
 
 try:
     import wandb
@@ -454,54 +455,36 @@ def main():
     base_model = get_peft_model(base_model, lora_config)
     base_model.print_trainable_parameters()
 
-    # Initialize trajectory encoder (use bf16 to match model dtype)
-    logger.info("[3/4] Initializing trajectory encoder...")
-    encoder_type = cfg.get("encoder_type", "legacy")
-
-    if encoder_type == "temporal":
-        # New temporal-aware encoder with cross-attention
-        trajectory_encoder = TemporalTrajectoryEncoder(
-            trajectory_dim=cfg.motion_dim,
-            hidden_dim=cfg.motion_hidden_dim,
-            output_dim=model_hidden_size,
-            num_encoder_layers=cfg.get("motion_num_encoder_layers", 4),
-            num_decoder_layers=cfg.get("motion_num_decoder_layers", 2),
-            num_queries=cfg.get("num_queries", 32),
-            nhead=cfg.get("encoder_nhead", 8),
-            dropout=cfg.get("encoder_dropout", 0.1),
-        ).to(dtype=torch.bfloat16, device="cuda")
-        logger.info(f"Using TemporalTrajectoryEncoder with {cfg.get('num_queries', 32)} queries")
-    else:
-        # Legacy pooling-based encoder
-        trajectory_encoder = TrajectoryEncoder(
-            trajectory_dim=cfg.motion_dim,
-            hidden_dim=cfg.motion_hidden_dim,
-            output_dim=model_hidden_size,
-            num_layers=cfg.get("motion_num_layers", 5),
-            num_prefix_tokens=cfg.get("num_prefix_tokens", 24),
-        ).to(dtype=torch.bfloat16, device="cuda")
-        logger.info("Using legacy TrajectoryEncoder with global pooling")
+    # Initialize ST-GCN trajectory encoder (use bf16 to match model dtype)
+    logger.info("[3/4] Initializing ST-GCN trajectory encoder...")
+    
+    num_nodes = cfg.motion_dim // 3  # Assumes 3D coordinates (x,y,z)
+    trajectory_encoder = STGCNEncoder(
+        num_nodes=num_nodes,
+        input_channels=3,
+        hidden_channels=cfg.get("stgcn_hidden_channels", 64),
+        output_dim=model_hidden_size,
+        num_blocks=cfg.get("stgcn_num_blocks", 4),
+        temporal_kernel_size=cfg.get("stgcn_temporal_kernel", 9),
+        spatial_kernel_size=cfg.get("stgcn_spatial_kernel", 3),
+        dropout=cfg.get("stgcn_dropout", 0.1),
+        graph_strategy=cfg.get("graph_strategy", "spatial"),
+    ).to(dtype=torch.bfloat16, device="cuda")
+    
+    logger.info(f"Using STGCNEncoder with {num_nodes} joints, {cfg.get('stgcn_num_blocks', 4)} blocks")
 
     # Count encoder parameters
     encoder_params = sum(p.numel() for p in trajectory_encoder.parameters())
     trainable_encoder_params = sum(p.numel() for p in trajectory_encoder.parameters() if p.requires_grad)
     logger.info(f"Encoder params: {trainable_encoder_params:,} trainable / {encoder_params:,} total")
 
-    # Create motion-conditioned parser with optional auxiliary loss
-    use_reconstruction = cfg.get("use_reconstruction_loss", False)
-    reconstruction_weight = cfg.get("reconstruction_loss_weight", 0.1)
-
+    # Create motion-conditioned parser
     model = MotionConditionedParser(
         model=base_model,
         trajectory_encoder=trajectory_encoder,
         tokenizer=tokenizer,
-        use_reconstruction_loss=use_reconstruction,
-        reconstruction_loss_weight=reconstruction_weight,
         motion_dim=cfg.motion_dim,
     )
-
-    if use_reconstruction:
-        logger.info(f"Reconstruction loss enabled (weight={reconstruction_weight})")
 
     # Load datasets
     logger.info("[4/4] Loading datasets...")
@@ -698,32 +681,22 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
     if not os.path.exists(encoder_path):
         raise FileNotFoundError(f"Trajectory encoder not found: {encoder_path}")
 
-    logger.info(f"Loading trajectory encoder from: {encoder_path}")
+    logger.info(f"Loading ST-GCN trajectory encoder from: {encoder_path}")
 
-    # Determine encoder type from config
-    encoder_type = config.get("encoder_type", "legacy")
-
-    if encoder_type == "temporal":
-        trajectory_encoder = TemporalTrajectoryEncoder(
-            trajectory_dim=config["motion_dim"],
-            hidden_dim=config["motion_hidden_dim"],
-            output_dim=model_hidden_size,
-            num_encoder_layers=config.get("motion_num_encoder_layers", 4),
-            num_decoder_layers=config.get("motion_num_decoder_layers", 2),
-            num_queries=config.get("num_queries", 32),
-            nhead=config.get("encoder_nhead", 8),
-            dropout=config.get("encoder_dropout", 0.1),
-        ).to(device, dtype=model_dtype)
-        logger.info("Using TemporalTrajectoryEncoder")
-    else:
-        trajectory_encoder = TrajectoryEncoder(
-            trajectory_dim=config["motion_dim"],
-            hidden_dim=config["motion_hidden_dim"],
-            output_dim=model_hidden_size,
-            num_layers=config.get("motion_num_layers", 5),
-            num_prefix_tokens=config.get("num_prefix_tokens", 24),
-        ).to(device, dtype=model_dtype)
-        logger.info("Using legacy TrajectoryEncoder")
+    # Build ST-GCN encoder
+    num_nodes = config["motion_dim"] // 3
+    trajectory_encoder = STGCNEncoder(
+        num_nodes=num_nodes,
+        input_channels=3,
+        hidden_channels=config.get("stgcn_hidden_channels", 64),
+        output_dim=model_hidden_size,
+        num_blocks=config.get("stgcn_num_blocks", 4),
+        temporal_kernel_size=config.get("stgcn_temporal_kernel", 9),
+        spatial_kernel_size=config.get("stgcn_spatial_kernel", 3),
+        dropout=config.get("stgcn_dropout", 0.1),
+        graph_strategy=config.get("graph_strategy", "spatial"),
+    ).to(device, dtype=model_dtype)
+    logger.info("Using STGCNEncoder")
 
     trajectory_encoder.load_state_dict(torch.load(encoder_path, map_location=device))
 

@@ -1,5 +1,5 @@
 from .parser import MotionConditionedParser, DEFAULT_SYSTEM_PROMPT
-from .encoder import TrajectoryEncoder, TemporalTrajectoryEncoder
+from exact.encoder import STGCNEncoder
 from .utils import (
     create_grammar_processor,
     validate_program,
@@ -12,8 +12,7 @@ from .loader import load_parser, TrainedParser
 
 __all__ = [
     "MotionConditionedParser",
-    "TrajectoryEncoder",
-    "TemporalTrajectoryEncoder",
+    "STGCNEncoder",
     "create_grammar_processor",
     "DEFAULT_SYSTEM_PROMPT",
     "validate_program",

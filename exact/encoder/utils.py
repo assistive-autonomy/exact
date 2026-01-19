@@ -1,12 +1,8 @@
-"""
-Graph definitions for skeleton-based pose data.
-
-Supports various skeleton layouts including SMPL body model (24 joints).
-"""
-
 import numpy as np
-from typing import Optional, Literal
+from typing import Literal
 
+import torch
+import torch.nn as nn
 
 # SMPL skeleton layout (24 joints)
 SMPL_KEYPOINTS = [
@@ -38,143 +34,50 @@ SMPL_KEYPOINTS = [
 
 # SMPL skeleton edges (parent-child relationships)
 SMPL_EDGES = [
-    # Spine chain
-    (0, 9),
-    (9, 10),
-    (10, 11),
-    (11, 12),
-    (12, 13),  # Pelvis -> Torso -> Spine -> Chest -> Neck -> Head
-    # Left arm
-    (11, 14),
-    (14, 15),
-    (15, 16),
-    (16, 17),
-    (17, 18),  # Chest -> L_Thorax -> L_Shoulder -> L_Elbow -> L_Wrist -> L_Hand
-    # Right arm
-    (11, 19),
-    (19, 20),
-    (20, 21),
-    (21, 22),
-    (22, 23),  # Chest -> R_Thorax -> R_Shoulder -> R_Elbow -> R_Wrist -> R_Hand
-    # Left leg
-    (0, 1),
-    (1, 2),
-    (2, 3),
-    (3, 4),  # Pelvis -> L_Hip -> L_Knee -> L_Ankle -> L_Toe
-    # Right leg
-    (0, 5),
-    (5, 6),
-    (6, 7),
-    (7, 8),  # Pelvis -> R_Hip -> R_Knee -> R_Ankle -> R_Toe
+    # Spine chain:  Pelvis -> Torso -> Spine -> Chest -> Neck -> Head
+    (0, 9), (9, 10), (10, 11), (11, 12), (12, 13),  
+    # Left arm: Chest -> L_Thorax -> L_Shoulder -> L_Elbow -> L_Wrist -> L_Hand
+    (11, 14), (14, 15), (15, 16), (16, 17), (17, 18),
+    # Right arm: Chest -> R_Thorax -> R_Shoulder -> R_Elbow -> R_Wrist -> R_Hand
+    (11, 19), (19, 20), (20, 21), (21, 22), (22, 23), 
+    # Left leg: Pelvis -> L_Hip -> L_Knee -> L_Ankle -> L_Toe
+    (0, 1), (1, 2), (2, 3), (3, 4), 
+    # Right leg: Pelvis -> R_Hip -> R_Knee -> R_Ankle -> R_Toe
+    (0, 5), (5, 6), (6, 7), (7, 8),
 ]
 
-# OpenPose 18-joint skeleton
-OPENPOSE_KEYPOINTS = [
-    "Nose",
-    "Neck",
-    "RShoulder",
-    "RElbow",
-    "RWrist",
-    "LShoulder",
-    "LElbow",
-    "LWrist",
-    "RHip",
-    "RKnee",
-    "RAnkle",
-    "LHip",
-    "LKnee",
-    "LAnkle",
-    "REye",
-    "LEye",
-    "REar",
-    "LEar",
-]
-
-OPENPOSE_EDGES = [
-    (4, 3),
-    (3, 2),
-    (7, 6),
-    (6, 5),
-    (13, 12),
-    (12, 11),
-    (10, 9),
-    (9, 8),
-    (11, 5),
-    (8, 2),
-    (5, 1),
-    (2, 1),
-    (0, 1),
-    (15, 0),
-    (14, 0),
-    (17, 15),
-    (16, 14),
-]
-
-
-SkeletonLayout = Literal["smpl", "openpose", "custom"]
+# Adjacency partitioning strategies
 AdjacencyStrategy = Literal["uniform", "distance", "spatial"]
 
-
-def get_skeleton_layout(
-    layout: SkeletonLayout = "smpl",
-    custom_edges: Optional[list] = None,
-    custom_num_nodes: Optional[int] = None,
-) -> tuple[int, list, int]:
-    """
-    Get skeleton layout configuration.
-
-    Args:
-        layout: Skeleton type ("smpl", "openpose", or "custom")
-        custom_edges: Custom edge list for "custom" layout
-        custom_num_nodes: Number of nodes for "custom" layout
-
-    Returns:
-        Tuple of (num_nodes, edge_list, center_node)
-    """
-    if layout == "smpl":
-        return len(SMPL_KEYPOINTS), SMPL_EDGES, 0  # Pelvis as center
-    elif layout == "openpose":
-        return len(OPENPOSE_KEYPOINTS), OPENPOSE_EDGES, 1  # Neck as center
-    elif layout == "custom":
-        if custom_edges is None or custom_num_nodes is None:
-            raise ValueError(
-                "custom_edges and custom_num_nodes required for custom layout"
-            )
-        return custom_num_nodes, custom_edges, 0
-    else:
-        raise ValueError(f"Unknown layout: {layout}")
+# SMPL skeleton constants
+NUM_JOINTS = len(SMPL_KEYPOINTS)
+CENTER_JOINT = 0  # Pelvis
 
 
 class Graph:
     """
-    Graph representation of skeleton structure for ST-GCN operations.
+    Graph representation of SMPL skeleton structure for ST-GCN operations.
 
-    Creates adjacency matrices with various partitioning strategies.
+    Creates adjacency matrices with various partitioning strategies for the
+    24-joint SMPL body model.
 
     Args:
-        layout: Skeleton layout type
-        strategy: Adjacency partitioning strategy
+        strategy: Adjacency partitioning strategy ('uniform', 'distance', or 'spatial')
         max_hop: Maximum hop distance for neighbors
-        custom_edges: Custom edges for "custom" layout
-        custom_num_nodes: Number of nodes for "custom" layout
     """
 
     def __init__(
         self,
-        layout: SkeletonLayout = "smpl",
         strategy: AdjacencyStrategy = "uniform",
         max_hop: int = 1,
-        custom_edges: Optional[list] = None,
-        custom_num_nodes: Optional[int] = None,
     ):
-        self.layout = layout
         self.strategy = strategy
         self.max_hop = max_hop
 
-        # Get skeleton configuration
-        self.num_node, edges, self.center = get_skeleton_layout(
-            layout, custom_edges, custom_num_nodes
-        )
+        # SMPL skeleton configuration
+        self.num_node = NUM_JOINTS
+        self.center = CENTER_JOINT
+        edges = SMPL_EDGES
 
         # Build edge list with self-loops
         self.self_link = [(i, i) for i in range(self.num_node)]
@@ -270,3 +173,99 @@ class Graph:
             raise ValueError(f"Unknown strategy: {strategy}")
 
         return A
+
+
+class GraphConv(nn.Module):
+    """
+    Graph convolution layer for skeleton data.
+
+    Applies spatial graph convolution followed by temporal convolution.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,  # spatial kernel size (number of adjacency matrices)
+        t_kernel_size: int = 1,
+        stride: int = 1,
+        bias: bool = True,
+    ):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels * kernel_size,
+            kernel_size=(t_kernel_size, 1),
+            padding=(t_kernel_size // 2, 0),
+            stride=(stride, 1),
+            bias=bias,
+        )
+
+    def forward(self, x: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor (B, C, T, V)
+            A: Adjacency matrix (K, V, V)
+        """
+        assert A.size(0) == self.kernel_size
+
+        x = self.conv(x)
+        n, kc, t, v = x.size()
+        x = x.view(n, self.kernel_size, kc // self.kernel_size, t, v)
+        x = torch.einsum("nkctv,kvw->nctw", x, A)
+
+        return x.contiguous()
+
+
+
+class STGCNBlock(nn.Module):
+    """
+    Spatio-Temporal Graph Convolution block.
+
+    Graph convolution followed by temporal convolution with residual connection.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: tuple[int, int],  # (temporal, spatial)
+        stride: int = 1,
+        residual: bool = True,
+    ):
+        super().__init__()
+        t_kernel, s_kernel = kernel_size
+
+        self.gcn = GraphConv(in_channels, out_channels, s_kernel, t_kernel_size=1)
+
+        self.tcn = nn.Sequential(
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(
+                out_channels,
+                out_channels,
+                (t_kernel, 1),
+                (stride, 1),
+                (t_kernel // 2, 0),
+            ),
+            nn.BatchNorm2d(out_channels),
+        )
+
+        if not residual:
+            self.residual = lambda x: 0
+        elif in_channels == out_channels and stride == 1:
+            self.residual = lambda x: x
+        else:
+            self.residual = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=(stride, 1)),
+                nn.BatchNorm2d(out_channels),
+            )
+
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
+        res = self.residual(x)
+        x = self.gcn(x, A)
+        x = self.tcn(x) + res
+        return self.relu(x)
