@@ -20,8 +20,8 @@ class STGCNEncoder(nn.Module):
     Architecture:
         1. Input reshaping: [B, T, 72] -> [B, 3, T, 24]
         2. ST-GCN blocks: Learn spatio-temporal motion patterns on SMPL skeleton
-        3. Temporal pooling: Aggregate temporal information
-        4. Output projection: Map to target output dimension
+        3. Temporal pooling: Aggregate into num_temporal_tokens time windows
+        4. Output projection: Map each window to target output dimension
 
     Args:
         num_nodes: Number of skeleton joints (24 for SMPL)
@@ -29,6 +29,7 @@ class STGCNEncoder(nn.Module):
         hidden_channels: Hidden dimension for ST-GCN blocks
         output_dim: Output dimension (must match downstream task requirement)
         num_blocks: Number of ST-GCN blocks
+        num_temporal_tokens: Number of temporal tokens to output (preserves time structure)
         temporal_kernel_size: Temporal convolution kernel size
         spatial_kernel_size: Number of adjacency matrix partitions
         dropout: Dropout probability
@@ -42,6 +43,7 @@ class STGCNEncoder(nn.Module):
         hidden_channels: int = 64,
         output_dim: int = 2048,
         num_blocks: int = 4,
+        num_temporal_tokens: int = 8,
         temporal_kernel_size: int = 9,
         spatial_kernel_size: int = 3,
         dropout: float = 0.1,
@@ -52,6 +54,7 @@ class STGCNEncoder(nn.Module):
         self.num_nodes = num_nodes
         self.input_channels = input_channels
         self.output_dim = output_dim
+        self.num_temporal_tokens = num_temporal_tokens
 
         # Build SMPL skeleton graph
         graph = Graph(strategy=graph_strategy, max_hop=1)
@@ -76,12 +79,11 @@ class STGCNEncoder(nn.Module):
                 )
             )
 
-        # Temporal pooling
-        self.temporal_pool = nn.AdaptiveAvgPool2d((1, num_nodes))
+        # Temporal pooling to num_temporal_tokens windows (preserves temporal structure)
+        self.temporal_pool = nn.AdaptiveAvgPool2d((num_temporal_tokens, num_nodes))
 
-        # Output projection to target embedding space
+        # Output projection to target embedding space (per temporal token)
         self.output_projection = nn.Sequential(
-            nn.Flatten(),
             nn.Linear(hidden_channels * num_nodes, hidden_channels * 4),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -91,16 +93,19 @@ class STGCNEncoder(nn.Module):
 
     def forward(self, motion: torch.Tensor) -> torch.Tensor:
         """
-        Encode motion sequence into embeddings.
+        Encode motion sequence into temporal embeddings.
 
         Args:
             motion: [batch_size, seq_len, num_nodes * input_channels]
                    Motion sequence with flattened joint features
 
         Returns:
-            embeddings: [batch_size, 1, output_dim]
-                       Single embedding vector per sequence
+            embeddings: [batch_size, num_temporal_tokens, output_dim]
+                       Multiple embeddings preserving temporal structure
         """
+        # Compute in float32 for BatchNorm numerical stability
+        motion = motion.float()
+        
         batch_size, seq_len, features = motion.shape
         assert features == self.num_nodes * self.input_channels, (
             f"Expected {self.num_nodes * self.input_channels} features, "
@@ -118,11 +123,14 @@ class STGCNEncoder(nn.Module):
         for block in self.blocks:
             x = block(x, self.A)
 
-        # Temporal pooling: [B, C, T, V] -> [B, C, 1, V]
+        # Temporal pooling: [B, C, T, V] -> [B, C, num_temporal_tokens, V]
         x = self.temporal_pool(x)
 
-        # Project to output embedding space: [B, C, 1, V] -> [B, 1, output_dim]
+        # Reshape for projection: [B, C, T', V] -> [B, T', C*V]
+        x = x.permute(0, 2, 1, 3).contiguous()  # [B, T', C, V]
+        x = x.view(batch_size, self.num_temporal_tokens, -1)  # [B, T', C*V]
+
+        # Project each temporal token: [B, T', C*V] -> [B, T', output_dim]
         embeddings = self.output_projection(x)
-        embeddings = embeddings.unsqueeze(1)  # Add sequence dimension
 
         return embeddings

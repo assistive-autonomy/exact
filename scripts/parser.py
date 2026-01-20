@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from exact.data import TrajectoryGenerationDataset
 from exact.parser import MotionConditionedParser
+from exact.parser.utils import create_grammar_processor
 from exact.encoder import STGCNEncoder
 
 try:
@@ -120,17 +121,23 @@ def evaluate_samples(
     num_retries: int = 2,
     retry_temperature: float = 0.8,
     retry_top_p: float = 0.9,
-    grammar_processor=None,
+    use_constrained_decoding: bool = True,
     log_attempts: bool = False,
 ) -> dict:
     """Evaluate model on sample batch and return metrics."""
     from exact.parser.utils import post_process_program
+    from exact.programs.edit_distance import program_edit_distance, parse_to_tree
+    from lark.exceptions import LarkError
 
     model.eval()
+    
+    # Create grammar processor for constrained decoding
+    grammar_processor = create_grammar_processor(tokenizer) if use_constrained_decoding else None
 
     results = []
     exact_matches = 0
     valid_programs = 0
+    edit_distances = []
 
     def _generate_with_retries(motion_batch: torch.Tensor):
         attempts = []
@@ -139,6 +146,9 @@ def evaluate_samples(
             use_sampling = attempt > 0
             temperature = retry_temperature if use_sampling else None
             top_p = retry_top_p if use_sampling else None
+            
+            # Use constrained decoding for first attempts, fallback to unconstrained + repair
+            use_grammar = grammar_processor is not None and attempt < num_retries
 
             generated_ids = model.generate(
                 motion=motion_batch,
@@ -148,7 +158,7 @@ def evaluate_samples(
                 top_p=top_p,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
-                grammar_processor=None,  # Prefer plain decoding; rely on repair/post-processing
+                grammar_processor=grammar_processor if use_grammar else None,
                 use_cache=True,
             )
 
@@ -161,6 +171,7 @@ def evaluate_samples(
                     "sampling": use_sampling,
                     "temperature": temperature,
                     "top_p": top_p,
+                    "constrained": use_grammar,
                     "raw": raw_predicted,
                     "predicted": predicted,
                     "is_valid": is_valid,
@@ -168,7 +179,8 @@ def evaluate_samples(
             )
 
             logger.debug(
-                f"Attempt {attempt + 1} ({'sample' if use_sampling else 'greedy'}): "
+                f"Attempt {attempt + 1} ({'sample' if use_sampling else 'greedy'}, "
+                f"{'constrained' if use_grammar else 'unconstrained'}): "
                 f"valid={is_valid}, predicted='{predicted}'"
             )
 
@@ -194,6 +206,22 @@ def evaluate_samples(
         if is_valid:
             valid_programs += 1
 
+        # Compute edit distance if both programs are valid
+        edit_dist = None
+        normalized_edit_dist = None
+        if is_valid and predicted:
+            try:
+                target_tree = parse_to_tree(target)
+                pred_tree = parse_to_tree(predicted)
+                edit_dist = program_edit_distance(target_tree, pred_tree)
+                # Normalize by max tree size for comparability
+                max_size = max(len(target_tree), len(pred_tree))
+                normalized_edit_dist = edit_dist / max_size if max_size > 0 else 0.0
+                edit_distances.append(normalized_edit_dist)
+            except LarkError:
+                # If parsing fails, skip edit distance
+                pass
+
         results.append(
             {
                 "key": sample["key"],
@@ -202,16 +230,20 @@ def evaluate_samples(
                 "raw_predicted": raw_predicted if raw_predicted != predicted else None,
                 "exact_match": is_match,
                 "is_valid": is_valid,
+                "edit_distance": edit_dist,
+                "normalized_edit_distance": normalized_edit_dist,
                 "attempts": attempts if log_attempts else None,
             }
         )
 
     accuracy = exact_matches / len(samples) if samples else 0
     validity_rate = valid_programs / len(samples) if samples else 0
+    mean_edit_distance = sum(edit_distances) / len(edit_distances) if edit_distances else None
 
     return {
         "accuracy": accuracy,
         "validity_rate": validity_rate,
+        "mean_normalized_edit_distance": mean_edit_distance,
         "exact_matches": exact_matches,
         "valid_programs": valid_programs,
         "total": len(samples),
@@ -224,16 +256,18 @@ def log_samples_to_wandb(eval_results: dict, step: int = None):
     if not WANDB_AVAILABLE:
         return
 
-    # Create wandb table with validity column
-    table = wandb.Table(columns=["key", "target", "predicted", "exact_match", "valid"])
+    # Create wandb table with validity and edit distance columns
+    table = wandb.Table(columns=["key", "target", "predicted", "exact_match", "valid", "edit_dist"])
 
     for sample in eval_results["samples"]:
+        edit_dist_str = f"{sample.get('normalized_edit_distance', 'N/A'):.3f}" if sample.get('normalized_edit_distance') is not None else "N/A"
         table.add_data(
             sample["key"],
             sample["target"],
             sample["predicted"],
             "✓" if sample["exact_match"] else "✗",
             "✓" if sample.get("is_valid", True) else "✗",
+            edit_dist_str,
         )
 
     log_data = {
@@ -243,6 +277,9 @@ def log_samples_to_wandb(eval_results: dict, step: int = None):
         "eval/validity_rate": eval_results.get("validity_rate", 1.0),
         "eval/valid_programs": eval_results.get("valid_programs", eval_results["total"]),
     }
+    
+    if eval_results.get("mean_normalized_edit_distance") is not None:
+        log_data["eval/mean_normalized_edit_distance"] = eval_results["mean_normalized_edit_distance"]
 
     if step is not None:
         wandb.log(log_data, step=step)
@@ -259,11 +296,17 @@ def print_eval_results(eval_results: dict):
     logger.info(
         f"Validity: {eval_results.get('valid_programs', eval_results['total'])}/{eval_results['total']} ({eval_results.get('validity_rate', 1.0):.1%})"
     )
+    if eval_results.get("mean_normalized_edit_distance") is not None:
+        logger.info(
+            f"Mean Normalized Edit Distance: {eval_results['mean_normalized_edit_distance']:.3f} (lower is better)"
+        )
 
     for sample in eval_results["samples"]:
         match_status = "✓" if sample["exact_match"] else "✗"
         valid_status = "V" if sample.get("is_valid", True) else "X"
-        logger.info(f"[{match_status}|{valid_status}] {sample['key']}")
+        edit_dist = sample.get("normalized_edit_distance")
+        edit_str = f" ED={edit_dist:.2f}" if edit_dist is not None else ""
+        logger.info(f"[{match_status}|{valid_status}]{edit_str} {sample['key']}")
         logger.info(f"  Target:    {sample['target']}")
         logger.info(f"  Predicted: {sample['predicted']}")
         if sample.get("raw_predicted"):
@@ -384,6 +427,7 @@ def main():
             "num_retries": cfg.get("generation_retries", 2),
             "retry_temperature": cfg.get("generation_retry_temperature", 0.8),
             "retry_top_p": cfg.get("generation_retry_top_p", 0.9),
+            "use_constrained_decoding": cfg.get("use_constrained_decoding", True),
             "log_attempts": cfg.get("log_generation_attempts", False),
         }
 
@@ -455,36 +499,60 @@ def main():
     base_model = get_peft_model(base_model, lora_config)
     base_model.print_trainable_parameters()
 
-    # Initialize ST-GCN trajectory encoder (use bf16 to match model dtype)
+    # Initialize ST-GCN trajectory encoder (keep in float32 for BatchNorm stability)
     logger.info("[3/4] Initializing ST-GCN trajectory encoder...")
     
     num_nodes = cfg.motion_dim // 3  # Assumes 3D coordinates (x,y,z)
+    num_temporal_tokens = cfg.get("stgcn_num_temporal_tokens", 8)
     trajectory_encoder = STGCNEncoder(
         num_nodes=num_nodes,
         input_channels=3,
         hidden_channels=cfg.get("stgcn_hidden_channels", 64),
         output_dim=model_hidden_size,
         num_blocks=cfg.get("stgcn_num_blocks", 4),
+        num_temporal_tokens=num_temporal_tokens,
         temporal_kernel_size=cfg.get("stgcn_temporal_kernel", 9),
         spatial_kernel_size=cfg.get("stgcn_spatial_kernel", 3),
         dropout=cfg.get("stgcn_dropout", 0.1),
         graph_strategy=cfg.get("graph_strategy", "spatial"),
-    ).to(dtype=torch.bfloat16, device="cuda")
+    ).to(device="cuda")  # Keep float32 for BatchNorm, output will be cast to bf16
     
-    logger.info(f"Using STGCNEncoder with {num_nodes} joints, {cfg.get('stgcn_num_blocks', 4)} blocks")
+    logger.info(f"Using STGCNEncoder with {num_nodes} joints, {cfg.get('stgcn_num_blocks', 4)} blocks, {num_temporal_tokens} temporal tokens")
 
     # Count encoder parameters
     encoder_params = sum(p.numel() for p in trajectory_encoder.parameters())
     trainable_encoder_params = sum(p.numel() for p in trajectory_encoder.parameters() if p.requires_grad)
     logger.info(f"Encoder params: {trainable_encoder_params:,} trainable / {encoder_params:,} total")
 
-    # Create motion-conditioned parser
+    # Create motion-conditioned parser with cross-modal attention and alignment
+    use_cross_attention = cfg.get("use_cross_attention", True)
+    use_alignment_loss = cfg.get("use_alignment_loss", True)
+    alignment_weight = cfg.get("alignment_weight", 0.1)
+    alignment_latent_dim = cfg.get("alignment_latent_dim", 256)
+    cross_attention_heads = cfg.get("cross_attention_heads", 8)
+    
     model = MotionConditionedParser(
         model=base_model,
         trajectory_encoder=trajectory_encoder,
         tokenizer=tokenizer,
         motion_dim=cfg.motion_dim,
+        use_cross_attention=use_cross_attention,
+        use_alignment_loss=use_alignment_loss,
+        alignment_weight=alignment_weight,
+        alignment_latent_dim=alignment_latent_dim,
+        cross_attention_heads=cross_attention_heads,
     )
+    
+    if use_cross_attention or use_alignment_loss:
+        logger.info(f"Cross-modal attention: {use_cross_attention}, Alignment loss: {use_alignment_loss} (weight={alignment_weight})")
+        # Count new module parameters
+        if use_cross_attention:
+            cross_attn_params = sum(p.numel() for p in model.cross_attention.parameters())
+            logger.info(f"  Cross-attention params: {cross_attn_params:,}")
+        if use_alignment_loss:
+            proj_params = sum(p.numel() for p in model.motion_projection.parameters()) + \
+                         sum(p.numel() for p in model.text_projection.parameters())
+            logger.info(f"  Projection head params: {proj_params:,}")
 
     # Load datasets
     logger.info("[4/4] Loading datasets...")
@@ -505,7 +573,15 @@ def main():
             tokenizer=tokenizer,
             max_seq_length=cfg.max_seq_length,
         )
-        logger.info(f"Loaded {len(eval_dataset)} evaluation samples")
+        # Optionally limit eval dataset size during training for speed
+        max_eval_samples = cfg.get("max_eval_samples_training", None)
+        if max_eval_samples and len(eval_dataset) > max_eval_samples:
+            import random
+            indices = random.sample(range(len(eval_dataset)), max_eval_samples)
+            eval_dataset = torch.utils.data.Subset(eval_dataset, indices)
+            logger.info(f"Using {max_eval_samples} evaluation samples (subsampled for training speed)")
+        else:
+            logger.info(f"Loaded {len(eval_dataset)} evaluation samples")
 
     # Setup training arguments
     warmup_args = {}
@@ -534,16 +610,19 @@ def main():
         **save_args,
         logging_steps=cfg.logging_steps,
         eval_strategy=cfg.eval_strategy if eval_dataset else "no",
+        eval_steps=cfg.get("eval_steps", 500) if eval_dataset else None,
         load_best_model_at_end=cfg.load_best_model_at_end if eval_dataset else False,
         metric_for_best_model=cfg.metric_for_best_model,
         greater_is_better=False,  # Lower eval_loss is better
         dataloader_num_workers=cfg.dataloader_num_workers,
         dataloader_pin_memory=device.type == "cuda",
+        dataloader_prefetch_factor=cfg.get("dataloader_prefetch_factor", 2),
         report_to="wandb" if use_wandb else "none",
         seed=cfg.seed,
         remove_unused_columns=False,
         save_safetensors=False,
         bf16=cfg.get("bf16", True),
+        gradient_checkpointing=cfg.get("gradient_checkpointing", False),
     )
 
     # Setup callbacks
@@ -581,6 +660,25 @@ def main():
         trajectory_encoder.state_dict(),
         output_dir / "trajectory_encoder.pt",
     )
+    
+    # Save cross-attention module if used
+    if use_cross_attention:
+        torch.save(
+            model.cross_attention.state_dict(),
+            output_dir / "cross_attention.pt",
+        )
+        logger.info("Saved cross-attention module")
+    
+    # Save projection heads if used
+    if use_alignment_loss:
+        torch.save(
+            {
+                "motion": model.motion_projection.state_dict(),
+                "text": model.text_projection.state_dict(),
+            },
+            output_dir / "projections.pt",
+        )
+        logger.info("Saved projection heads")
 
     # Save LoRA adapter
     base_model.save_pretrained(output_dir / "lora_adapter")
@@ -597,6 +695,7 @@ def main():
         "num_retries": cfg.get("generation_retries", 2),
         "retry_temperature": cfg.get("generation_retry_temperature", 0.8),
         "retry_top_p": cfg.get("generation_retry_top_p", 0.9),
+        "use_constrained_decoding": cfg.get("use_constrained_decoding", True),
         "log_attempts": cfg.get("log_generation_attempts", False),
     }
 
@@ -619,6 +718,9 @@ def main():
     if use_wandb:
         log_samples_to_wandb(eval_results)
         wandb.summary["final_accuracy"] = eval_results["accuracy"]
+        wandb.summary["final_validity_rate"] = eval_results["validity_rate"]
+        if eval_results.get("mean_normalized_edit_distance") is not None:
+            wandb.summary["final_mean_edit_distance"] = eval_results["mean_normalized_edit_distance"]
         wandb.finish()
 
     logger.success(f"Training complete! Results saved to: {output_dir}")
@@ -683,7 +785,7 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
 
     logger.info(f"Loading ST-GCN trajectory encoder from: {encoder_path}")
 
-    # Build ST-GCN encoder
+    # Build ST-GCN encoder (keep float32 for BatchNorm stability)
     num_nodes = config["motion_dim"] // 3
     trajectory_encoder = STGCNEncoder(
         num_nodes=num_nodes,
@@ -691,21 +793,47 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
         hidden_channels=config.get("stgcn_hidden_channels", 64),
         output_dim=model_hidden_size,
         num_blocks=config.get("stgcn_num_blocks", 4),
+        num_temporal_tokens=config.get("stgcn_num_temporal_tokens", 8),
         temporal_kernel_size=config.get("stgcn_temporal_kernel", 9),
         spatial_kernel_size=config.get("stgcn_spatial_kernel", 3),
         dropout=config.get("stgcn_dropout", 0.1),
         graph_strategy=config.get("graph_strategy", "spatial"),
-    ).to(device, dtype=model_dtype)
+    ).to(device)  # Keep float32, output will be cast to model_dtype
     logger.info("Using STGCNEncoder")
 
     trajectory_encoder.load_state_dict(torch.load(encoder_path, map_location=device))
 
-    # Create motion-conditioned parser
+    # Create motion-conditioned parser with optional cross-modal attention and alignment
+    # Load cross-attention module if it was saved
+    cross_attention_path = os.path.join(checkpoint_dir, "cross_attention.pt")
+    projections_path = os.path.join(checkpoint_dir, "projections.pt")
+    
+    use_cross_attention = config.get("use_cross_attention", os.path.exists(cross_attention_path))
+    use_alignment_loss = config.get("use_alignment_loss", os.path.exists(projections_path))
+    
     model = MotionConditionedParser(
         model=base_model,
         trajectory_encoder=trajectory_encoder,
         tokenizer=tokenizer,
+        use_cross_attention=use_cross_attention,
+        use_alignment_loss=use_alignment_loss,
+        alignment_weight=config.get("alignment_weight", 0.1),
+        alignment_latent_dim=config.get("alignment_latent_dim", 256),
+        cross_attention_heads=config.get("cross_attention_heads", 8),
     )
+    
+    # Load cross-attention weights if available
+    if use_cross_attention and os.path.exists(cross_attention_path):
+        logger.info(f"Loading cross-attention from: {cross_attention_path}")
+        model.cross_attention.load_state_dict(torch.load(cross_attention_path, map_location=device))
+    
+    # Load projection heads if available
+    if use_alignment_loss and os.path.exists(projections_path):
+        logger.info(f"Loading projection heads from: {projections_path}")
+        projections = torch.load(projections_path, map_location=device)
+        model.motion_projection.load_state_dict(projections["motion"])
+        model.text_projection.load_state_dict(projections["text"])
+    
     model.eval()
 
     return model, tokenizer, config, model_dtype
