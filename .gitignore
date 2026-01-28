@@ -1,7 +1,6 @@
 .DS_Store
 .vscode
 outputs
-notebooks
 cache
 results
 multirun  # Hydra multi-run outputs
