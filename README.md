@@ -4,9 +4,19 @@
 ![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04-orange?logo=ubuntu&logoColor=white)
 
 ExAct learns executable activity models from motion data. The pipeline:
-1. **Parser**: Encodes motion sequences into symbolic programs
+1. **Parser**: Encodes motion sequences into symbolic programs using a motion-conditioned LLM
 2. **Executable Models**: Combines programs per activity using disjunctive logic
 3. **Applications**: Data augmentation for segmentation, program-based activity assessment
+
+## Architecture
+
+```
+Motion (T, 72) → ST-GCN Encoder → 8 temporal tokens → [prepend to LLM input]
+                                   ↓
+                            Projection Head → Latent space
+                                   ↓                ↓
+                              InfoNCE Loss ←  Program embeddings
+```
 
 ## Installation
 
@@ -22,168 +32,170 @@ uv run scripts/generate_data.py --name train --num-samples 10000
 uv run scripts/generate_data.py --name eval --num-samples 1000
 uv run scripts/parser.py
 
-# Once parser is trained, run assessment with program edit distance
-uv run scripts/assessment_edit_dist.py --parser-checkpoint results/parser/<checkpoint>
-
-# Generate augmented data for segmentation (with trained parser)
-uv run scripts/augment_data.py \
-    --parser-checkpoint results/parser/<checkpoint> \
-    --train-fraction 0.25 \
-    --num-samples 1000
-
-# Run segmentation with augmented data
-uv run scripts/segmentation.py project.data_path=data/augmented
+# Once parser is trained, run the full ESK pipeline (see below)
 ```
 
 ---
 
-## Data Augmentation
+## ESK Dataset Pipeline
 
-Generate synthetic training data using executable activity models. The pipeline:
-1. Parses training segments into programs (using trained parser or mock)
-2. Creates one `ExecutableActivityModel` per activity (disjunctive combination)
-3. Optionally selects diverse programs using hierarchical clustering
-4. Generates trajectories using BehaviourModel (MetaMotivo)
+After training the parser, use these scripts to process the ESK dataset:
+
+### Full Pipeline (Recommended)
+
+Run all steps with a single command:
 
 ```bash
-# Generate augmented data with trained parser
-uv run scripts/augment_data.py \
-    --parser-checkpoint results/parser/<checkpoint> \
-    --train-fraction 0.25 \
-    --num-samples 1000 \
-    --output-dir data/augmented \
-    --save-models data/augmented/models.json
+# Full pipeline with trained parser
+uv run scripts/run_pipeline.py \
+    --parser-checkpoint results/parser/20260122_225017 \
+    --esk-path /pvc/esk
 
-# With program budget (select 100 diverse programs per activity)
-uv run scripts/augment_data.py \
-    --parser-checkpoint results/parser/<checkpoint> \
-    --max-programs-per-activity 500 \
-    --program-budget 100 \
-    --num-samples 1000
+# Skip parsing if programs already exist
+uv run scripts/run_pipeline.py \
+    --skip-parsing \
+    --programs /pvc/esk/programs_train.json
 
-# Dry run with mock parser (for testing pipeline)
-uv run scripts/augment_data.py --dry-run --num-samples 100 --output-dir data/test
+# Quick test with fewer programs
+uv run scripts/run_pipeline.py \
+    --parser-checkpoint results/parser/20260122_225017 \
+    --max-programs 20 \
+    --max-test-programs 10
 ```
 
-### Options
+### Step-by-Step Pipeline
+
+#### Step 1: Parse ESK → Programs
+
+Convert motion segments from the ESK dataset into symbolic programs:
+
+```bash
+# Parse training data with trained parser
+uv run scripts/parse_esk.py \
+    --parser-checkpoint results/parser/20260122_225017 \
+    --esk-path /pvc/esk \
+    --split train
+
+# Output: /pvc/esk/programs_train.json
+```
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--train-fraction` | 0.25 | Fraction of training videos to parse |
-| `--num-samples` | 1000 | Total augmented trajectories to generate |
-| `--output-dir` | `data/augmented` | Output directory for ESK-format files |
-| `--parser-checkpoint` | None | Path to trained parser (uses mock if not provided) |
+| `--parser-checkpoint` | None | Path to trained parser checkpoint |
+| `--mock` | False | Use mock parser for testing |
+| `--esk-path` | `../esk` | Path to ESK dataset |
+| `--split` | `train` | Which split to parse (`train`, `test`, `all`) |
+| `--train-fraction` | 1.0 | Fraction of training videos to use |
+| `--label-type` | `verbs` | Label type (`verbs`, `nouns`, `activity`) |
+
+Output format:
+```json
+{
+  "metadata": {
+    "parser_checkpoint": "results/parser/...",
+    "num_videos": 35,
+    "num_programs_valid": 37876
+  },
+  "activity_names": ["Add", "Adjust", "Carry", ...],
+  "programs_by_activity": {
+    "Cut": [
+      {"program": "[0,50]rhand.x(0.3);...", "video": "YH2002...", "start": 100, "end": 250}
+    ]
+  }
+}
+```
+
+#### Step 2: Build Executable Models
+
+Compile parsed programs into ActivityModelCollection:
+
+```bash
+# Build models from parsed programs
+uv run scripts/build_models.py \
+    --programs /pvc/esk/programs_train.json
+
+# With program budget (select 50 diverse programs per activity)
+uv run scripts/build_models.py \
+    --programs /pvc/esk/programs_train.json \
+    --program-budget 50 \
+    --output /pvc/esk/models.json
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--programs` | Required | Path to programs JSON (from parse_esk.py) |
+| `--output` | Auto | Output path for models JSON |
 | `--program-budget` | None | Select N diverse programs per activity |
-| `--save-models` | None | Save executable models to JSON |
-| `--dry-run` | False | Generate random poses (no BehaviourModel) |
+| `--max-programs` | None | Random sample limit (faster than budget) |
 
-### Output Format
+#### Step 3: Run Assessment
 
-Generates ESK-compatible files:
-- `augmented_data_pose3d_smpl.h5` - Pose trajectories (96-dim)
-- `augmented_data_labels.pickle` - Activity labels
+Evaluate activity separability using program edit distance:
 
----
-
-## Activity Segmentation
-
-Temporal action segmentation using DLC2Action framework (MS-TCN3, C2F-TCN, ED-TCN, C2F-Transformer).
+**Quick Assessment** (uses pre-parsed programs, no LLM inference needed):
 
 ```bash
-# Run with 100% training data
-uv run scripts/segmentation.py
-
-# Run with reduced training data
-uv run scripts/segmentation.py train_fraction=0.5
-uv run scripts/segmentation.py train_fraction=0.25
-
-# Use augmented data
-uv run scripts/segmentation.py project.data_path=data/augmented project.annotation_path=data/augmented
+uv run scripts/assessment_quick.py \
+    --programs /pvc/esk/programs_train.json \
+    --output-dir results/assessment_quick \
+    --train-programs 15 \
+    --test-programs 10
 ```
 
-### Training Fraction Experiments
-
-Compare baseline (X% real data) vs augmented data:
-
-- **`train_fraction`**: Fraction of training videos (1.0, 0.5, 0.25)
-- Creates separate projects: `esk_verbs_100pct`, `esk_verbs_50pct`, `esk_verbs_25pct`
-- Each seed uses a different random subset of training videos
-- Validation/test sets unchanged
+**Full Assessment** (parses test data with LLM):
 
 ```bash
-# Baseline experiments
-uv run scripts/segmentation.py train_fraction=0.25   # 25% real data baseline
-
-# Augmented experiments (with trained parser)
-uv run scripts/augment_data.py \
-    --parser-checkpoint results/parser/<checkpoint> \
-    --train-fraction 0.25 \
-    --num-samples 1000 \
-    --output-dir data/aug25
-uv run scripts/segmentation.py project.data_path=data/aug25  # 25% parsed → augmented
-```
-
----
-
-## Activity Assessment
-
-Two approaches for evaluating activity separability:
-
-### 1. Flow-Based Assessment (Baseline)
-
-Pose-based activity quality assessment using STG-NF normalizing flows. Trains density estimators on raw pose data.
-
-```bash
-# Run full assessment
-uv run scripts/assessment.py
-
-# Custom activities
-uv run scripts/assessment.py data.target_activities='[Cut,Pour,Stir]'
-
-# Hyperparameter tuning
-wandb sweep configs/sweeps/assessment.yaml
-wandb agent <sweep-id>
+uv run scripts/assessment_edit_dist.py \
+    --load-models /pvc/esk/models.json \
+    --parser-checkpoint results/parser/20260122_225017 \
+    --max-train-programs 50 \
+    --max-test-programs 50
 ```
 
 Output:
-- `separability_matrix.png` - How each model scores each activity
-- `separation_summary.png` - Separation and AUC scores per model
+- `separability_matrix.png` - Distance heatmap
+- `results.json` - Full metrics
 
-### 2. Program Edit Distance Assessment (ExAct)
-
-Uses unordered tree edit distance (UTED) between program structures. This is the **core ExAct evaluation**.
+#### Step 4: Generate Augmented Data (Optional)
 
 ```bash
-# Run with trained parser
-uv run scripts/assessment_edit_dist.py \
-    --parser-checkpoint results/parser/<checkpoint> \
-    --max-train-programs 100 \
-    --max-test-programs 50
-
-# With program budget (select diverse subset)
-uv run scripts/assessment_edit_dist.py \
-    --parser-checkpoint results/parser/<checkpoint> \
-    --max-train-programs 500 \
-    --program-budget 100
-
-# With pre-computed models (faster iteration)
-uv run scripts/assessment_edit_dist.py --load-models data/models.json
-
-# Save models for reuse
-uv run scripts/assessment_edit_dist.py --save-models results/models.json
+uv run scripts/augment_data.py \
+    --load-models /pvc/esk/models.json \
+    --num-samples 1000 \
+    --output-dir /pvc/esk/augmented
 ```
 
-**Workflow**:
-1. Parse training data → N programs per activity
-2. (Optional) Select diverse subset using hierarchical clustering
-3. Parse test data → query programs  
-4. Compute separability matrix: $M_{i,j}$ = mean min-edit-distance from activity $i$ tests to activity $j$ model
-5. Good separability: low diagonal (same-activity), high off-diagonal (cross-activity)
+#### Step 5: Run Segmentation (Optional)
 
-Key features:
-- **Interval-agnostic**: Ignores temporal intervals, focuses on structure
-- **Value tolerance**: Values within 0.3 are considered equal
-- Uses `edist` library for constrained UTED
+```bash
+# Baseline segmentation
+uv run scripts/segmentation.py
+
+# With augmented data
+uv run scripts/segmentation.py project.data_path=/pvc/esk/augmented
+```
+
+---
+
+## Latest Results
+
+### Program Edit Distance Assessment (ESK Verbs)
+
+**Overall Metrics:**
+| Metric | Value |
+|--------|-------|
+| Same-activity distance (diagonal) | 14.19 |
+| Cross-activity distance (off-diagonal) | 14.38 |
+| **Separation (higher = better)** | **0.19** |
+
+**Best Separating Activities:**
+| Activity | Same | Cross | Separation |
+|----------|------|-------|------------|
+| Move | 14.1 | 16.1 | +2.01 |
+| Press | 16.0 | 17.8 | +1.79 |
+| Peel | 11.3 | 12.7 | +1.37 |
+| Shake | 8.9 | 9.9 | +1.05 |
+| Touch | 11.9 | 12.9 | +1.02 |
 
 ---
 
@@ -193,13 +205,13 @@ Train a motion-conditioned parser on a single GPU (e.g., H200).
 
 ### Prerequisites
 
-1. Generate synthetic data in `../exact_data/`:
+1. Generate synthetic data:
 ```bash
-uv run scripts/generate_data.py --name train --num-samples 1000 --output-dir ../exact_data
-uv run scripts/generate_data.py --name eval --num-samples 200 --output-dir ../exact_data
+uv run scripts/generate_data.py --name train --num-samples 15000 --output-dir ../exact_data
+uv run scripts/generate_data.py --name eval --num-samples 1000 --output-dir ../exact_data
 ```
 
-2. Ensure you have access to the Llama model (via HuggingFace):
+2. Login to HuggingFace for model access:
 ```bash
 huggingface-cli login
 ```
@@ -214,29 +226,22 @@ uv run scripts/parser.py
 uv run scripts/parser.py num_train_epochs=20 learning_rate=1e-5
 
 # Evaluate checkpoint
-uv run scripts/parser.py --eval-only results/parser/20251222_123456
+uv run scripts/parser.py --eval-only results/parser/20260122_225017
 ```
 
 ### Configuration
 
 Edit `configs/parser.yaml` to customize:
 
-**Data and Training:**
-- `train_data` / `eval_data`: Paths to HDF5 data files
-- `model_name`: Base LLM (default: `meta-llama/Llama-3.1-8B-Instruct`)
-- `per_device_train_batch_size`: Batch size (adjust based on GPU memory)
-- `load_in_4bit`: Use 4-bit quantization (default: false, uses bf16)
-- `load_in_8bit`: Use 8-bit quantization (alternative to 4-bit)
+**Model:**
+- `model_name`: Base LLM (default: `deepseek-ai/deepseek-coder-6.7b-base`)
+- `load_in_4bit` / `load_in_8bit`: Quantization options
 
 **Motion Encoder (ST-GCN):**
-- `motion_dim`: Input motion dimensions (default: 72 for 24 SMPL joints × 3)
-- `graph_strategy`: Adjacency strategy (`uniform`, `distance`, or `spatial`)
-- `stgcn_hidden_channels`: ST-GCN hidden dimension (default: 64)
+- `motion_dim`: Input dimensions (default: 72 for 24 SMPL joints × 3)
+- `stgcn_hidden_channels`: Hidden dimension (default: 64)
 - `stgcn_num_blocks`: Number of ST-GCN blocks (default: 4)
-- `stgcn_temporal_kernel`: Temporal convolution kernel size (default: 9)
-- `stgcn_spatial_kernel`: Spatial convolution kernel size (default: 3)
-
-The motion encoder uses **Spatial-Temporal Graph Convolutional Networks** (ST-GCN) from the shared encoders module, which preserve skeletal structure through graph convolutions on the 24-joint SMPL skeleton adjacency. The base LLM can use 4-bit or 8-bit quantization to reduce memory usage, with LoRA adapters (r=32, alpha=64) trained on top.
+- `graph_strategy`: Adjacency strategy (`uniform`, `distance`, `spatial`)
 
 ---
 
@@ -266,9 +271,6 @@ model = ExecutableActivityModel.from_programs(
     eval_timesteps=100
 )
 
-# Compute reward for a state (uses MuJoCo)
-reward = model.compute_reward(timestep=50, model=mujoco_model, data=mujoco_data)
-
 # Save/load model collections
 collection = ActivityModelCollection(eval_timesteps=100)
 collection.add_model(model)
@@ -278,28 +280,18 @@ loaded = ActivityModelCollection.load("models.json")
 
 ### Program Selection
 
-When you have many programs (e.g., 10,000 parsed from a dataset), select a diverse representative subset:
+Select diverse representative subsets from large program collections:
 
 ```python
 from exact.programs import select_diverse_programs
 
-# Select 100 diverse programs from 10,000 using hierarchical clustering
+# Select 100 diverse programs using hierarchical clustering
 result = select_diverse_programs(
-    programs=all_programs,  # List of 10,000 program strings
+    programs=all_programs,  # List of program strings
     budget=100,
-    method="hierarchical",  # or "greedy"
+    method="hierarchical",
 )
-
 print(result.summary())
-# Selected 100 programs from 10000 total
-# Number of clusters: 100
-# Cluster sizes: min=1, max=250, mean=100.0
-
-# Use selected programs for executable model
-model = ExecutableActivityModel.from_programs(
-    programs=result.selected_programs,
-    activity_name="Grab",
-)
 ```
 
 ### Program Format
@@ -314,22 +306,8 @@ Example: `[0,50]head.y(1.65)*rwrist.z(0.45);[50,100]pelvis.y(0.80)`
 
 - **Temporal intervals**: `[start,end]` define when sensor conditions must hold
 - **Sensor predicates**: `joint.axis(value)` - e.g., `head.y(1.65)` means head y-position ≈ 1.65
-- **Conjunction**: `*` combines multiple sensors (all must be satisfied)
+- **Conjunction**: `*` combines multiple sensors (AND)
 - **Sequence**: `;` chains temporal intervals
-
----
-
-## Configuration
-
-All configs in `configs/`:
-
-| Config | Description |
-|--------|-------------|
-| `segmentation.yaml` | Activity segmentation (DLC2Action) |
-| `assessment.yaml` | Activity assessment (STG-NF baseline) |
-| `parser.yaml` | Motion-conditioned parser |
-
-Sweep configs in `configs/sweeps/` for wandb hyperparameter tuning.
 
 ---
 
@@ -337,19 +315,102 @@ Sweep configs in `configs/sweeps/` for wandb hyperparameter tuning.
 
 ### Label Types
 
-Configure via `data.label_type` and `project.annotation_path`:
-
 | Type | Path | Classes | Description |
 |------|------|---------|-------------|
 | `activity` | `D2A_converted_label_activity` | 6 | High-level activities |
-| `verbs` | `D2A_converted_label_verbs` | 28 | Action primitives |
+| `verbs` | `D2A_converted_label_verbs` | 30 | Action primitives |
 | `nouns` | `D2A_converted_label_nouns` | 62 | Object categories |
 
-### Activities
-`cleaning`, `cooking`, `experimental procedure`, `getting ready`, `other_annot`, `preparing ingredients`
+### Verbs (30 classes)
+`Add`, `Adjust`, `Carry`, `Clean`, `Close`, `Cut`, `Dry`, `Grab`, `Grate`, `Hold`, `Move`, `Open`, `Peel`, `Pour`, `Press`, `Put`, `Put_on`, `Read`, `Shake`, `Slide`, `Split`, `Stir`, `Switch`, `Take`, `Take_off`, `Tap`, `Taste`, `Throw`, `Touch`, `Wash`
 
-### Verbs
-`Add`, `Adjust`, `Carry`, `Clean`, `Close`, `Cut`, `Dry`, `Grab`, `Grate`, `Hold`, `Move`, `Open`, `Peel`, `Pour`, `Press`, `Put`, `Put_on`, `Read`, `Shake`, `Slide`, `Split`, `Stir`, `Switch`, `Take_off`, `Taste`, `Throw`, `Touch`, `Wash`
+### Data Conversion
 
-### Nouns
-`Avocado`, `Bottle`, `Bowl`, `Box`, `Broth`, `Brush`, `Butter`, `Button`, `Carrots`, `Cheese`, `Colander`, `Cucumber`, `Cup`, `Cupboard`, `Cutting_board`, `Doser_Glass`, `Drawer`, `Eggplant`, `Fridge`, `Frying_Oil`, `Glove`, `Grater`, `Green_salad`, `Hand`, `Knife`, `Lemon`, `Onions`, `Package`, `Pan`, `Pasta_Spoon`, `Peeler`, `Plate`, `Pot`, `Pot_lid`, `Processed_ingredients`, `Radish`, `Recipe`, `Rice`, `Risotto`, `Salad_bowl`, `Salt`, `Sauce`, `Seasoning`, `Shallots`, `Sink`, `Sink_Sprayer`, `Soap`, `Spatula`, `Sponge`, `Spoon`, `Stock_cube`, `Stoves`, `Surimi`, `Tissue`, `Tomatoes`, `Towel`, `Trash`, `Trivet`, `Water`, `Whip`, `Zucchini`
+To convert raw ESK data to the required format:
+
+```bash
+uv run scripts/esk2dlc.py --esk-path /path/to/raw/esk --output-path /pvc/esk
+```
+
+---
+
+## Script Reference
+
+| Script | Purpose | Key Arguments |
+|--------|---------|---------------|
+| `run_pipeline.py` | Full ExAct pipeline | `--parser-checkpoint`, `--esk-path` |
+| `parse_esk.py` | Parse ESK motion → programs | `--parser-checkpoint`, `--mock`, `--split` |
+| `build_models.py` | Build ActivityModelCollection | `--programs`, `--program-budget` |
+| `assessment_quick.py` | Quick assessment (pre-parsed) | `--programs`, `--train-programs` |
+| `assessment_edit_dist.py` | Full assessment (with parsing) | `--load-models`, `--parser-checkpoint` |
+| `augment_data.py` | Generate augmented training data | `--load-models`, `--num-samples` |
+| `segmentation.py` | Temporal action segmentation | `train_fraction`, `project.data_path` |
+| `parser.py` | Train motion-conditioned parser | `--eval-only`, config overrides |
+| `generate_data.py` | Generate synthetic training data | `--name`, `--num-samples` |
+| `assessment.py` | Flow-based assessment (baseline) | config overrides |
+
+---
+
+## Configuration Files
+
+| Config | Description |
+|--------|-------------|
+| `configs/parser.yaml` | Motion-conditioned parser training |
+| `configs/segmentation.yaml` | Activity segmentation (DLC2Action) |
+| `configs/assessment.yaml` | Activity assessment (STG-NF baseline) |
+| `configs/sweeps/*.yaml` | Hyperparameter sweep configs for wandb |
+
+---
+
+## Project Structure
+
+```
+exact/
+├── anomaly/          # STG-NF normalizing flow models (baseline)
+├── data/             # Dataset utilities (ESK, DLC format)
+├── encoder/          # ST-GCN motion encoder
+├── models/           # Executable activity models
+├── parser/           # Motion-conditioned LLM parser
+└── programs/         # Program grammar, edit distance, selection
+
+scripts/
+├── run_pipeline.py       # Full pipeline orchestration
+├── parse_esk.py          # ESK → programs
+├── build_models.py       # Programs → executable models
+├── assessment_quick.py   # Quick assessment (pre-parsed)
+├── assessment_edit_dist.py  # Full assessment
+├── augment_data.py       # Data augmentation
+├── segmentation.py       # Action segmentation
+├── parser.py             # Parser training
+└── generate_data.py      # Synthetic data generation
+
+configs/
+├── parser.yaml           # Parser training config
+├── segmentation.yaml     # Segmentation config
+├── assessment.yaml       # Assessment config
+└── sweeps/               # Hyperparameter sweep configs
+```
+
+---
+
+## Typical Workflow
+
+```bash
+# 1. Generate synthetic data and train parser
+uv run scripts/generate_data.py --name train --num-samples 15000
+uv run scripts/generate_data.py --name eval --num-samples 1000
+uv run scripts/parser.py
+
+# 2. Parse ESK dataset with trained parser
+uv run scripts/parse_esk.py --parser-checkpoint results/parser/<checkpoint>
+
+# 3. Build executable models
+uv run scripts/build_models.py --programs /pvc/esk/programs_train.json --program-budget 100
+
+# 4. Run assessment
+uv run scripts/assessment_quick.py --programs /pvc/esk/programs_train.json
+
+# 5. (Optional) Generate augmented data and run segmentation
+uv run scripts/augment_data.py --load-models /pvc/esk/models.json --num-samples 5000
+uv run scripts/segmentation.py project.data_path=/pvc/esk/augmented
+```

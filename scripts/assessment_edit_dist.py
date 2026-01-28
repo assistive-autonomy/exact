@@ -140,22 +140,44 @@ def load_training_segments(
         else:
             continue
         
-        # Load poses
+        # Load poses - use SMPL format
         pose_file = None
-        for suffix in ["_body_hand_eye_pose_norm.h5", "_pose_norm.h5"]:
+        for suffix in ["_pose3d_smpl.h5", "_body_hand_eye_pose_norm.h5", "_pose_norm.h5"]:
             candidate = pose_path / f"{video_name}{suffix}"
             if candidate.exists():
                 pose_file = candidate
                 break
         
         if pose_file is None:
+            logger.debug(f"No pose file found for {video_name}")
             continue
         
         with h5py.File(pose_file, "r") as f:
             if "tracks" in f and "table" in f["tracks"]:
-                poses = f["tracks"]["table"]["values_block_0"][:]
+                table = f["tracks"]["table"]
+                # Handle structured array format (SMPL files)
+                if table.dtype.names and "values_block_0" in table.dtype.names:
+                    poses = table["values_block_0"][:]
+                else:
+                    poses = table[:]
             else:
-                continue
+                # Fallback: try direct array
+                keys = list(f.keys())
+                if keys:
+                    poses = f[keys[0]][:]
+                else:
+                    logger.debug(f"Cannot read poses from {pose_file}")
+                    continue
+        
+        # Convert SMPL format (96 features: 24 joints * 4 [x,y,z,likelihood]) 
+        # to parser format (72 features: 24 joints * 3 [x,y,z])
+        if poses.shape[1] == 96:
+            # Remove likelihood column every 4th feature
+            n_joints = 24
+            poses_xyz = np.zeros((poses.shape[0], n_joints * 3), dtype=np.float32)
+            for j in range(n_joints):
+                poses_xyz[:, j*3:j*3+3] = poses[:, j*4:j*4+3]
+            poses = poses_xyz
         
         # Extract segments
         # segments[0] is for this video, segments[0][activity_idx] is list of (start, end)
@@ -361,11 +383,12 @@ def main():
     # Load config
     cfg = load_config(args.config, args.overrides)
     
-    # Paths
+    # Paths - use absolute paths or paths relative to esk_dir from config
+    esk_dir = Path(cfg.data.get("esk_dir", "/pvc/esk"))
     label_type = cfg.data.get("label_type", "verbs")
-    label_dir = f"esk/D2A_converted_label_{label_type}"
-    pose_dir = "esk/D2A_converted_pose_norm"
-    split_path = "esk/trainvaltest_split.txt"
+    label_dir = str(esk_dir / f"D2A_converted_label_{label_type}")
+    pose_dir = str(esk_dir / "D2A_converted_pose_smpl")
+    split_path = str(esk_dir / "traintest_split.txt")
     
     logger.info(f"Label type: {label_type}")
     logger.info(f"Label dir: {label_dir}")
@@ -388,11 +411,17 @@ def main():
     # Load or create model programs
     if args.load_models:
         logger.info(f"Loading models from {args.load_models}")
-        collection = ActivityModelCollection.load(args.load_models)
+        # Load programs directly from JSON without parsing into rewards (much faster)
+        with open(args.load_models, "r") as f:
+            models_data = json.load(f)
+        
         for activity in activity_names:
-            if activity in collection.models:
-                model = collection.models[activity]
-                programs = model.original_programs
+            if activity in models_data.get("models", {}):
+                model_data = models_data["models"][activity]
+                programs = model_data.get("original_programs", [])
+                # Limit programs if requested
+                if args.max_train_programs and len(programs) > args.max_train_programs:
+                    programs = programs[:args.max_train_programs]
                 dist_matrix.set_model_programs(activity, programs)
                 logger.info(f"  {activity}: {len(programs)} programs")
     else:
@@ -441,8 +470,8 @@ def main():
     if args.save_models:
         logger.info(f"Saving models to {args.save_models}")
         # Convert to ActivityModelCollection format
-        from exact.models import ExecutableActivityModel, ActivityModelCollection
-        collection = ActivityModelCollection(eval_timesteps=100)
+        from exact.models import ExecutableActivityModel
+        save_collection = ActivityModelCollection(eval_timesteps=100)
         for activity, programs in dist_matrix.model_programs.items():
             # Extract original program strings from ProgramTree objects
             program_strings = [p.program for p in programs]
@@ -451,8 +480,8 @@ def main():
                 activity_name=activity,
                 eval_timesteps=100,
             )
-            collection.add_model(model)
-        collection.save(args.save_models)
+            save_collection.add_model(model)
+        save_collection.save(args.save_models)
     
     # Parse test programs
     logger.info("Creating test programs from test data...")

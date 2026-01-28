@@ -343,7 +343,16 @@ def main():
         description="Generate augmented data using Executable Activity Models"
     )
     
-    # Data paths
+    # Model loading options (alternative to parsing from scratch)
+    parser.add_argument(
+        "--load-models",
+        type=str,
+        default=None,
+        help="Load pre-built models from JSON (from build_models.py). "
+             "If provided, skips parsing and uses these models directly.",
+    )
+    
+    # Data paths (only needed if not using --load-models)
     parser.add_argument(
         "--data-path",
         type=str,
@@ -452,7 +461,6 @@ def main():
     
     # Set up logging
     logger.info("=== Data Augmentation with Executable Activity Models ===")
-    logger.info(f"Train fraction: {args.train_fraction}")
     logger.info(f"Num samples: {args.num_samples}")
     logger.info(f"Output dir: {args.output_dir}")
     logger.info(f"Dry run: {args.dry_run}")
@@ -463,60 +471,80 @@ def main():
     if TORCH_AVAILABLE:
         torch.manual_seed(args.seed)
     
-    # Load split file and get training videos
-    logger.info("Loading split file...")
-    splits = parse_split_file(args.split_path)
-    train_videos = splits["train"]
-    logger.info(f"Found {len(train_videos)} training videos")
+    # Option 1: Load pre-built models from JSON
+    if args.load_models:
+        logger.info(f"Loading pre-built models from: {args.load_models}")
+        from exact.models import ActivityModelCollection
+        import json
+        
+        with open(args.load_models, "r") as f:
+            models_data = json.load(f)
+        
+        collection = ActivityModelCollection.from_dict(models_data)
+        executable_models = collection.models
+        logger.info(f"Loaded {len(executable_models)} activity models")
+        for name, model in executable_models.items():
+            logger.info(f"  {name}: {model.num_programs} programs")
+    
+    # Option 2: Parse from ESK data
+    else:
+        logger.info(f"Parsing from ESK data (train_fraction={args.train_fraction})")
+        
+        # Load split file and get training videos
+        logger.info("Loading split file...")
+        splits = parse_split_file(args.split_path)
+        train_videos = splits["train"]
+        logger.info(f"Found {len(train_videos)} training videos")
     
     # Subsample training videos
-    train_subset = subsample_videos(train_videos, args.train_fraction, args.seed)
-    logger.info(f"Using {len(train_subset)} videos ({args.train_fraction*100:.0f}%)")
-    
-    # Load training segments
-    logger.info("Loading training segments...")
-    segments = load_training_segments(
-        data_path=args.data_path,
-        label_path=args.label_path,
-        video_names=train_subset,
-    )
-    
-    # Log segment statistics
-    total_segments = sum(len(segs) for segs in segments.values())
-    logger.info(f"Loaded {total_segments} segments across {len(segments)} activities")
-    for name, segs in sorted(segments.items(), key=lambda x: -len(x[1])):
-        if segs:
-            logger.info(f"  {name}: {len(segs)} segments")
-    
-    # Create parser (trained or mock)
-    logger.info("Creating parser...")
-    from exact.parser import load_parser
-    parser_model = load_parser(checkpoint_path=args.parser_checkpoint)
-    if args.parser_checkpoint:
-        logger.info(f"Using trained parser from {args.parser_checkpoint}")
-    else:
-        logger.info("Using mock parser (no checkpoint provided)")
-    
-    logger.info("Creating executable activity models...")
-    
-    # Create executable models
-    executable_models = create_executable_models(
-        segments_by_activity=segments,
-        parser=parser_model,
-        eval_timesteps=args.eval_timesteps,
-        max_programs_per_activity=args.max_programs_per_activity,
-        program_budget=args.program_budget,
-        seed=args.seed,
-    )
-    
-    # Optionally save models
-    if args.save_models:
-        from exact.models import ActivityModelCollection
-        collection = ActivityModelCollection(eval_timesteps=args.eval_timesteps)
-        for model in executable_models.values():
-            collection.add_model(model)
-        collection.save(args.save_models)
-        logger.info(f"Saved models to {args.save_models}")
+        # Subsample training videos
+        train_subset = subsample_videos(train_videos, args.train_fraction, args.seed)
+        logger.info(f"Using {len(train_subset)} videos ({args.train_fraction*100:.0f}%)")
+        
+        # Load training segments
+        logger.info("Loading training segments...")
+        segments = load_training_segments(
+            data_path=args.data_path,
+            label_path=args.label_path,
+            video_names=train_subset,
+        )
+        
+        # Log segment statistics
+        total_segments = sum(len(segs) for segs in segments.values())
+        logger.info(f"Loaded {total_segments} segments across {len(segments)} activities")
+        for name, segs in sorted(segments.items(), key=lambda x: -len(x[1])):
+            if segs:
+                logger.info(f"  {name}: {len(segs)} segments")
+        
+        # Create parser (trained or mock)
+        logger.info("Creating parser...")
+        from exact.parser import load_parser
+        parser_model = load_parser(checkpoint_path=args.parser_checkpoint)
+        if args.parser_checkpoint:
+            logger.info(f"Using trained parser from {args.parser_checkpoint}")
+        else:
+            logger.info("Using mock parser (no checkpoint provided)")
+        
+        logger.info("Creating executable activity models...")
+        
+        # Create executable models
+        executable_models = create_executable_models(
+            segments_by_activity=segments,
+            parser=parser_model,
+            eval_timesteps=args.eval_timesteps,
+            max_programs_per_activity=args.max_programs_per_activity,
+            program_budget=args.program_budget,
+            seed=args.seed,
+        )
+        
+        # Optionally save models
+        if args.save_models:
+            from exact.models import ActivityModelCollection
+            collection = ActivityModelCollection(eval_timesteps=args.eval_timesteps)
+            for model in executable_models.values():
+                collection.add_model(model)
+            collection.save(args.save_models)
+            logger.info(f"Saved models to {args.save_models}")
     
     # Set up behaviour model and environment (unless dry run)
     behaviour_model = None

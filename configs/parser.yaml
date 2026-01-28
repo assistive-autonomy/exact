@@ -16,10 +16,12 @@ load_in_4bit: false  # Set true for larger models if you want a 4-bit base
 # Generation / evaluation settings
 generation_max_new_tokens: 512  # Increased to avoid truncation of longer programs
 generation_retries: 3  # Extra retry for unconstrained fallback
-generation_retry_temperature: 0.8
+generation_retry_temperature: 0.5  # Lower for more deterministic outputs
 generation_retry_top_p: 0.9
+generation_temperature: 0.3  # Primary generation temperature (lower = more focused)
 use_constrained_decoding: true  # Enable Syncode grammar-constrained decoding
 log_generation_attempts: false
+max_frame: 1024  # Maximum frame number for program validation
 
 # ========== ST-GCN ENCODER CONFIG ==========
 # Motion encoder architecture using Spatial-Temporal Graph Convolutional Networks
@@ -36,14 +38,13 @@ stgcn_spatial_kernel: 3  # Spatial graph convolution partitions
 stgcn_dropout: 0.1  # Dropout for regularization
 
 # ========== CROSS-MODAL ATTENTION & ALIGNMENT ==========
-# Forces decoder to ground predictions in motion sequence via explicit attention
-use_cross_attention: true  # Enable cross-attention from decoder to motion encoder
-cross_attention_heads: 8  # Number of attention heads
-
-# Latent space alignment: MSE loss between motion embedding and program embedding
-use_alignment_loss: true  # Enable contrastive/alignment loss
-alignment_weight: 0.1  # Weight for alignment loss (0.1 = 10% of total loss)
+# Latent space alignment: bidirectional InfoNCE contrastive loss
+# Forces motion encoder to produce embeddings aligned with program embeddings
+use_cross_attention: false  # Disabled - alignment loss is more effective
+use_alignment_loss: true  # Enable contrastive alignment loss
+alignment_weight: 0.3  # Weight for alignment loss (0.3 = 30% of total loss)
 alignment_latent_dim: 256  # Dimension of shared latent space
+alignment_temperature: 0.07  # Temperature for InfoNCE softmax (lower = sharper)
 
 # ========== LORA CONFIG ==========
 lora_r: 32

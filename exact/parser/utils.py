@@ -164,10 +164,71 @@ def create_grammar_processor(
     return processor
 
 
+def constrain_frame_numbers(
+    program: str,
+    max_frame: int = 1024,
+) -> str:
+    """Constrain frame numbers in a program to valid range [0, max_frame].
+    
+    Fixes common issues:
+    - Frame numbers > max_frame are scaled/clamped
+    - Negative frame numbers are set to 0
+    - Start frame > end frame are swapped
+    
+    Args:
+        program: Program string with potentially invalid frame numbers
+        max_frame: Maximum allowed frame number (default 1024)
+        
+    Returns:
+        Program with constrained frame numbers
+    """
+    if not program:
+        return program
+    
+    def fix_segment(match):
+        start = int(match.group(1))
+        end = int(match.group(2))
+        rest = match.group(3)  # sensors part
+        
+        # Check if frames are way out of range (likely model error)
+        if start > max_frame or end > max_frame:
+            # Scale down proportionally if both are large
+            if start > max_frame and end > max_frame:
+                scale = max_frame / max(start, end)
+                start = int(start * scale)
+                end = int(end * scale)
+            else:
+                # Clamp to max_frame
+                start = min(start, max_frame)
+                end = min(end, max_frame)
+        
+        # Ensure non-negative
+        start = max(0, start)
+        end = max(0, end)
+        
+        # Ensure start <= end
+        if start > end:
+            start, end = end, start
+        
+        # Ensure minimum segment length
+        if start == end:
+            end = min(start + 1, max_frame)
+        
+        return f"[{start},{end}]{rest}"
+    
+    # Pattern to match [start,end]sensors
+    segment_pattern = re.compile(
+        r"\[(\d+),(\d+)\]([^;\[]+)"
+    )
+    
+    return segment_pattern.sub(fix_segment, program)
+
+
 def post_process_program(
     program: str,
     grammar_path: str | Path | None = None,
     repair: bool = True,
+    max_frame: int = 1024,
 ) -> tuple[str, bool]:
     """Post-process a generated program to ensure validity.
 
@@ -175,11 +236,15 @@ def post_process_program(
         program: Generated program string
         grammar_path: Path to .lark grammar file
         repair: Whether to attempt repair if invalid
+        max_frame: Maximum allowed frame number
 
     Returns:
         Tuple of (processed_program, is_valid)
     """
     program = program.strip()
+    
+    # First, constrain frame numbers to valid range
+    program = constrain_frame_numbers(program, max_frame)
 
     # Quick screen before heavier parsing
     if not validate_program(program, grammar_path):

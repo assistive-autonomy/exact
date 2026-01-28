@@ -177,7 +177,10 @@ def select_programs_hierarchical(
         cluster_indices = np.where(mask)[0]
         cluster_sizes[cluster_id] = len(cluster_indices)
         
-        if len(cluster_indices) == 1:
+        if len(cluster_indices) == 0:
+            # Empty cluster (can happen with degenerate cases)
+            continue
+        elif len(cluster_indices) == 1:
             # Single program in cluster
             medoid_idx = cluster_indices[0]
         else:

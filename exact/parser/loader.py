@@ -115,6 +115,8 @@ class TrainedParser:
         adapter_path = self.checkpoint_path
         if (self.checkpoint_path / "adapter_model.safetensors").exists():
             adapter_path = self.checkpoint_path
+        elif (self.checkpoint_path / "lora_adapter" / "adapter_model.safetensors").exists():
+            adapter_path = self.checkpoint_path / "lora_adapter"
         elif (self.checkpoint_path / "checkpoint-best").exists():
             adapter_path = self.checkpoint_path / "checkpoint-best"
         
@@ -136,19 +138,33 @@ class TrainedParser:
             graph_strategy=self.config.get("graph_strategy", "spatial"),
         )
         
-        # Load encoder weights
-        encoder_path = self.checkpoint_path / "encoder.pt"
+        # Load encoder weights (try both naming conventions)
+        encoder_path = self.checkpoint_path / "trajectory_encoder.pt"
+        if not encoder_path.exists():
+            encoder_path = self.checkpoint_path / "encoder.pt"
         if encoder_path.exists():
             encoder.load_state_dict(torch.load(encoder_path, map_location=self.device))
         
         encoder = encoder.to(self.device)
         
         # Create parser
+        use_alignment = self.config.get("use_alignment_loss", True)
         self.parser = MotionConditionedParser(
             model=model,
             trajectory_encoder=encoder,
             tokenizer=self.tokenizer,
+            use_alignment_loss=use_alignment,
+            alignment_latent_dim=self.config.get("alignment_latent_dim", 256),
+            alignment_temperature=self.config.get("alignment_temperature", 0.07),
         )
+        
+        # Load projection heads if using alignment loss
+        projections_path = self.checkpoint_path / "projections.pt"
+        if use_alignment and projections_path.exists():
+            projections = torch.load(projections_path, map_location=self.device)
+            self.parser.motion_projection.load_state_dict(projections["motion"])
+            self.parser.text_projection.load_state_dict(projections["text"])
+        
         self.parser.eval()
         
         # Create grammar processor if needed
@@ -257,8 +273,11 @@ def load_parser(
         print(f"Warning: Checkpoint not found at {checkpoint_path}, using mock parser")
         return MockParser(**kwargs)
     
-    # Check for required files
-    has_adapter = (checkpoint / "adapter_model.safetensors").exists()
+    # Check for required files (adapter can be in lora_adapter/ subfolder)
+    has_adapter = (
+        (checkpoint / "adapter_model.safetensors").exists() or
+        (checkpoint / "lora_adapter" / "adapter_model.safetensors").exists()
+    )
     has_config = (checkpoint / "config.yaml").exists() or (checkpoint.parent / "config.yaml").exists()
     
     if not has_adapter or not has_config:

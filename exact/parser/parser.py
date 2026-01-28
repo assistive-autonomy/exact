@@ -151,13 +151,50 @@ class MotionProjectionHead(nn.Module):
         return self.norm(projected)
 
 
+def info_nce_loss(
+    motion_latent: torch.Tensor,
+    program_latent: torch.Tensor,
+    temperature: float = 0.07,
+) -> torch.Tensor:
+    """Compute bidirectional InfoNCE contrastive loss.
+    
+    This loss encourages motion embeddings to be similar to their corresponding
+    program embeddings while being dissimilar to other programs in the batch.
+    
+    Args:
+        motion_latent: [B, latent_dim] motion embeddings
+        program_latent: [B, latent_dim] program embeddings  
+        temperature: Temperature for softmax (lower = sharper distribution)
+        
+    Returns:
+        Scalar contrastive loss
+    """
+    batch_size = motion_latent.shape[0]
+    
+    # L2 normalize embeddings
+    motion_latent = F.normalize(motion_latent, p=2, dim=-1)
+    program_latent = F.normalize(program_latent, p=2, dim=-1)
+    
+    # Compute similarity matrix [B, B]
+    # Each row i contains similarity of motion_i with all programs
+    similarity = torch.matmul(motion_latent, program_latent.T) / temperature
+    
+    # Labels: diagonal elements are positive pairs
+    labels = torch.arange(batch_size, device=motion_latent.device)
+    
+    # Bidirectional loss: motion->program and program->motion
+    loss_m2p = F.cross_entropy(similarity, labels)  # motion to program
+    loss_p2m = F.cross_entropy(similarity.T, labels)  # program to motion
+    
+    return (loss_m2p + loss_p2m) / 2
+
+
 class MotionConditionedParser(nn.Module):
     """LLM with ST-GCN motion prefix conditioning and cross-modal attention for program generation.
     
     Key architectural features:
     1. Motion prefix: ST-GCN encoded motion tokens prepended to input sequence
-    2. Cross-modal attention: Explicit attention from decoder to motion embeddings
-    3. Latent alignment: MSE loss between motion embeddings and target program embeddings
+    2. Latent alignment: InfoNCE contrastive loss between motion and program embeddings
     """
 
     def __init__(
@@ -166,11 +203,12 @@ class MotionConditionedParser(nn.Module):
         trajectory_encoder: STGCNEncoder,
         tokenizer: PreTrainedTokenizer = None,
         motion_dim: int = 72,
-        use_cross_attention: bool = True,
+        use_cross_attention: bool = False,  # Deprecated, kept for compatibility
         use_alignment_loss: bool = True,
-        alignment_weight: float = 0.1,
+        alignment_weight: float = 0.3,
         alignment_latent_dim: int = 256,
-        cross_attention_heads: int = 8,
+        alignment_temperature: float = 0.07,
+        cross_attention_heads: int = 8,  # Deprecated, kept for compatibility
     ):
         super().__init__()
 
@@ -178,6 +216,8 @@ class MotionConditionedParser(nn.Module):
         self.trajectory_encoder = trajectory_encoder
         self.tokenizer = tokenizer
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
+        self.alignment_temperature = alignment_temperature
+        self.use_cross_attention = False  # Disabled - use alignment loss instead
         
         # Get hidden dimension from model config
         if hasattr(model, "config"):
@@ -185,15 +225,7 @@ class MotionConditionedParser(nn.Module):
         else:
             hidden_dim = 4096  # Default for DeepSeek-Coder-6.7B
         
-        # Cross-modal attention
-        self.use_cross_attention = use_cross_attention
-        if use_cross_attention:
-            self.cross_attention = CrossModalAttention(
-                hidden_dim=hidden_dim,
-                num_heads=cross_attention_heads,
-            )
-        
-        # Latent space alignment
+        # Latent space alignment (InfoNCE contrastive loss)
         self.use_alignment_loss = use_alignment_loss
         self.alignment_weight = alignment_weight
         if use_alignment_loss:
@@ -309,86 +341,48 @@ class MotionConditionedParser(nn.Module):
         else:
             full_labels = None
 
-        # Forward through model with output_hidden_states for cross-attention and alignment
+        # Forward through model with output_hidden_states for alignment loss
         outputs = self.model(
             inputs_embeds=inputs_embeds,
             attention_mask=full_attention_mask,
             labels=full_labels,
-            output_hidden_states=(self.use_cross_attention or self.use_alignment_loss),
+            output_hidden_states=self.use_alignment_loss,
         )
         
         lm_loss = outputs.loss
         alignment_loss = None
         total_loss = lm_loss
         
-        # Apply cross-modal attention if enabled
-        if self.use_cross_attention and outputs.hidden_states is not None:
-            # Get the last hidden states
-            last_hidden = outputs.hidden_states[-1]  # [B, full_seq_len, hidden_dim]
-            
-            # Extract the decoder portion (after system prompt and motion)
-            decoder_hidden = last_hidden[:, prefix_len:, :]  # [B, seq_len, hidden_dim]
-            
-            # Apply cross-attention to motion embeddings
-            # Note: This is a "late fusion" approach - we process the cross-attention output
-            # but don't modify the forward pass itself. For deeper integration, you would
-            # need to modify the model architecture or use hooks.
-            cross_attended = self.cross_attention(
-                decoder_hidden=decoder_hidden,
-                motion_embeddings=motion_embeddings,
-                motion_mask=motion_mask,
-            )
-            
-            # The cross-attention output can be used to compute an auxiliary loss
-            # that encourages the decoder to use motion information
-            # Here we use a simple reconstruction objective on the motion embeddings
-            if labels is not None:
-                # Pool decoder hidden states to predict motion embedding
-                # This creates a learning signal that forces decoder to encode motion info
-                pooled_decoder = cross_attended.mean(dim=1)  # [B, hidden_dim]
-                pooled_motion = motion_embeddings.mean(dim=1)  # [B, hidden_dim]
-                
-                if self.use_alignment_loss:
-                    # Project both to latent space and compute MSE
-                    projected_decoder = self.motion_projection(pooled_decoder)
-                    projected_motion = self.motion_projection(pooled_motion)
-                    cross_attn_loss = F.mse_loss(projected_decoder, projected_motion.detach())
-                    total_loss = total_loss + 0.01 * cross_attn_loss  # Small weight
-        
         # Compute latent space alignment loss if enabled
+        # This forces the motion encoder to produce embeddings that align with program embeddings
         if self.use_alignment_loss and labels is not None and outputs.hidden_states is not None:
             # Get encoder output: pool motion embeddings
             motion_pooled = motion_embeddings.mean(dim=1)  # [B, hidden_dim]
             motion_latent = self.motion_projection(motion_pooled)  # [B, latent_dim]
             
-            # Get decoder output: embed target tokens and pool
-            # Use the hidden states corresponding to the program tokens
+            # Get decoder output: use hidden states for program tokens
             last_hidden = outputs.hidden_states[-1]  # [B, full_seq_len, hidden_dim]
-            
-            # Get hidden states for program tokens only (after prefix)
             program_hidden = last_hidden[:, prefix_len:, :]  # [B, seq_len, hidden_dim]
             
-            # Mask out padding (where labels == -100 or attention_mask == 0)
-            if labels is not None:
-                # Create mask for valid program tokens (not padding, not -100)
-                valid_mask = (labels != -100) & (attention_mask == 1)  # [B, seq_len]
-                valid_mask = valid_mask.unsqueeze(-1).float()  # [B, seq_len, 1]
-                
-                # Masked mean pooling
-                masked_hidden = program_hidden * valid_mask
-                sum_hidden = masked_hidden.sum(dim=1)  # [B, hidden_dim]
-                count = valid_mask.sum(dim=1).clamp(min=1)  # [B, 1]
-                program_pooled = sum_hidden / count  # [B, hidden_dim]
-            else:
-                program_pooled = program_hidden.mean(dim=1)
+            # Masked mean pooling (exclude padding tokens)
+            valid_mask = (labels != -100) & (attention_mask == 1)  # [B, seq_len]
+            valid_mask = valid_mask.unsqueeze(-1).float()  # [B, seq_len, 1]
             
-            # Project program embedding to latent space
+            masked_hidden = program_hidden * valid_mask
+            sum_hidden = masked_hidden.sum(dim=1)  # [B, hidden_dim]
+            count = valid_mask.sum(dim=1).clamp(min=1)  # [B, 1]
+            program_pooled = sum_hidden / count  # [B, hidden_dim]
+            
+            # Project to shared latent space
             program_latent = self.text_projection(program_pooled)  # [B, latent_dim]
             
-            # MSE loss to align motion and program representations
-            alignment_loss = F.mse_loss(motion_latent, program_latent.detach())
+            # Bidirectional contrastive loss (InfoNCE)
+            alignment_loss = info_nce_loss(
+                motion_latent, 
+                program_latent,
+                temperature=self.alignment_temperature,
+            )
             
-            # Add to total loss with weight
             total_loss = total_loss + self.alignment_weight * alignment_loss
 
         return MotionParserOutput(

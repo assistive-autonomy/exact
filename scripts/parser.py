@@ -21,6 +21,7 @@ from transformers import (
     AutoTokenizer,
     BitsAndBytesConfig,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
     EarlyStoppingCallback,
 )
@@ -98,6 +99,33 @@ def get_collate_fn(tokenizer):
     return collate_fn
 
 
+class EncoderCheckpointCallback(TrainerCallback):
+    """Callback to save encoder and projection heads with each checkpoint."""
+    
+    def __init__(self, parser_model):
+        self.parser_model = parser_model
+    
+    def on_save(self, args, state, control, **kwargs):
+        # Save encoder and projections to the checkpoint directory
+        checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+        if os.path.exists(checkpoint_dir):
+            # Save encoder (attribute is trajectory_encoder in MotionConditionedParser)
+            torch.save(
+                self.parser_model.trajectory_encoder.state_dict(),
+                os.path.join(checkpoint_dir, "trajectory_encoder.pt"),
+            )
+            # Save projection heads if they exist
+            if hasattr(self.parser_model, 'motion_projection') and self.parser_model.motion_projection is not None:
+                torch.save(
+                    {
+                        "motion": self.parser_model.motion_projection.state_dict(),
+                        "text": self.parser_model.text_projection.state_dict(),
+                    },
+                    os.path.join(checkpoint_dir, "projections.pt"),
+                )
+            logger.info(f"Saved encoder and projections to {checkpoint_dir}")
+
+
 def load_eval_samples(h5_path: str, n_samples: int = 8):
     """Load a subset of samples for evaluation."""
     samples = []
@@ -119,10 +147,12 @@ def evaluate_samples(
     dtype: torch.dtype,
     max_new_tokens: int = 256,
     num_retries: int = 2,
-    retry_temperature: float = 0.8,
+    retry_temperature: float = 0.5,
     retry_top_p: float = 0.9,
+    generation_temperature: float = 0.3,
     use_constrained_decoding: bool = True,
     log_attempts: bool = False,
+    max_frame: int = 1024,
 ) -> dict:
     """Evaluate model on sample batch and return metrics."""
     from exact.parser.utils import post_process_program
@@ -144,7 +174,9 @@ def evaluate_samples(
 
         for attempt in range(num_retries + 1):
             use_sampling = attempt > 0
-            temperature = retry_temperature if use_sampling else None
+            # First attempt: use low temperature for focused generation
+            # Retries: use slightly higher temperature for diversity
+            temperature = retry_temperature if use_sampling else generation_temperature
             top_p = retry_top_p if use_sampling else None
             
             # Use constrained decoding for first attempts, fallback to unconstrained + repair
@@ -153,7 +185,7 @@ def evaluate_samples(
             generated_ids = model.generate(
                 motion=motion_batch,
                 max_new_tokens=max_new_tokens,
-                do_sample=use_sampling,
+                do_sample=True,  # Always sample with temperature for more controlled generation
                 temperature=temperature,
                 top_p=top_p,
                 pad_token_id=tokenizer.pad_token_id,
@@ -163,7 +195,7 @@ def evaluate_samples(
             )
 
             raw_predicted = tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
-            predicted, is_valid = post_process_program(raw_predicted, repair=True)
+            predicted, is_valid = post_process_program(raw_predicted, repair=True, max_frame=max_frame)
 
             attempts.append(
                 {
@@ -425,10 +457,12 @@ def main():
         eval_kwargs = {
             "max_new_tokens": cfg.get("generation_max_new_tokens", 256),
             "num_retries": cfg.get("generation_retries", 2),
-            "retry_temperature": cfg.get("generation_retry_temperature", 0.8),
+            "retry_temperature": cfg.get("generation_retry_temperature", 0.5),
             "retry_top_p": cfg.get("generation_retry_top_p", 0.9),
+            "generation_temperature": cfg.get("generation_temperature", 0.3),
             "use_constrained_decoding": cfg.get("use_constrained_decoding", True),
             "log_attempts": cfg.get("log_generation_attempts", False),
+            "max_frame": cfg.get("max_frame", 1024),
         }
 
         # Evaluate
@@ -524,35 +558,28 @@ def main():
     trainable_encoder_params = sum(p.numel() for p in trajectory_encoder.parameters() if p.requires_grad)
     logger.info(f"Encoder params: {trainable_encoder_params:,} trainable / {encoder_params:,} total")
 
-    # Create motion-conditioned parser with cross-modal attention and alignment
-    use_cross_attention = cfg.get("use_cross_attention", True)
+    # Create motion-conditioned parser with alignment loss
     use_alignment_loss = cfg.get("use_alignment_loss", True)
-    alignment_weight = cfg.get("alignment_weight", 0.1)
+    alignment_weight = cfg.get("alignment_weight", 0.3)
     alignment_latent_dim = cfg.get("alignment_latent_dim", 256)
-    cross_attention_heads = cfg.get("cross_attention_heads", 8)
     
     model = MotionConditionedParser(
         model=base_model,
         trajectory_encoder=trajectory_encoder,
         tokenizer=tokenizer,
         motion_dim=cfg.motion_dim,
-        use_cross_attention=use_cross_attention,
         use_alignment_loss=use_alignment_loss,
         alignment_weight=alignment_weight,
         alignment_latent_dim=alignment_latent_dim,
-        cross_attention_heads=cross_attention_heads,
+        alignment_temperature=cfg.get("alignment_temperature", 0.07),
     )
     
-    if use_cross_attention or use_alignment_loss:
-        logger.info(f"Cross-modal attention: {use_cross_attention}, Alignment loss: {use_alignment_loss} (weight={alignment_weight})")
-        # Count new module parameters
-        if use_cross_attention:
-            cross_attn_params = sum(p.numel() for p in model.cross_attention.parameters())
-            logger.info(f"  Cross-attention params: {cross_attn_params:,}")
-        if use_alignment_loss:
-            proj_params = sum(p.numel() for p in model.motion_projection.parameters()) + \
-                         sum(p.numel() for p in model.text_projection.parameters())
-            logger.info(f"  Projection head params: {proj_params:,}")
+    if use_alignment_loss:
+        logger.info(f"Alignment loss: enabled (weight={alignment_weight})")
+        logger.info(f"  Type: bidirectional InfoNCE, temperature={cfg.get('alignment_temperature', 0.07)}")
+        proj_params = sum(p.numel() for p in model.motion_projection.parameters()) + \
+                     sum(p.numel() for p in model.text_projection.parameters())
+        logger.info(f"  Projection head params: {proj_params:,}")
 
     # Load datasets
     logger.info("[4/4] Loading datasets...")
@@ -634,6 +661,9 @@ def main():
         )
         logger.info(f"Early stopping enabled (patience={early_stopping_patience})")
 
+    # Always add encoder checkpoint callback to save encoder with each checkpoint
+    callbacks.append(EncoderCheckpointCallback(model))
+
     # Initialize trainer
     trainer = Trainer(
         model=model,
@@ -661,14 +691,6 @@ def main():
         output_dir / "trajectory_encoder.pt",
     )
     
-    # Save cross-attention module if used
-    if use_cross_attention:
-        torch.save(
-            model.cross_attention.state_dict(),
-            output_dir / "cross_attention.pt",
-        )
-        logger.info("Saved cross-attention module")
-    
     # Save projection heads if used
     if use_alignment_loss:
         torch.save(
@@ -693,10 +715,12 @@ def main():
     eval_kwargs = {
         "max_new_tokens": cfg.get("generation_max_new_tokens", 256),
         "num_retries": cfg.get("generation_retries", 2),
-        "retry_temperature": cfg.get("generation_retry_temperature", 0.8),
+        "retry_temperature": cfg.get("generation_retry_temperature", 0.5),
         "retry_top_p": cfg.get("generation_retry_top_p", 0.9),
+        "generation_temperature": cfg.get("generation_temperature", 0.3),
         "use_constrained_decoding": cfg.get("use_constrained_decoding", True),
         "log_attempts": cfg.get("log_generation_attempts", False),
+        "max_frame": cfg.get("max_frame", 1024),
     }
 
     # Move model to device for evaluation
@@ -803,36 +827,31 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
 
     trajectory_encoder.load_state_dict(torch.load(encoder_path, map_location=device))
 
-    # Create motion-conditioned parser with optional cross-modal attention and alignment
-    # Load cross-attention module if it was saved
-    cross_attention_path = os.path.join(checkpoint_dir, "cross_attention.pt")
+    # Create motion-conditioned parser with optional alignment loss
     projections_path = os.path.join(checkpoint_dir, "projections.pt")
-    
-    use_cross_attention = config.get("use_cross_attention", os.path.exists(cross_attention_path))
     use_alignment_loss = config.get("use_alignment_loss", os.path.exists(projections_path))
     
     model = MotionConditionedParser(
         model=base_model,
         trajectory_encoder=trajectory_encoder,
         tokenizer=tokenizer,
-        use_cross_attention=use_cross_attention,
         use_alignment_loss=use_alignment_loss,
-        alignment_weight=config.get("alignment_weight", 0.1),
+        alignment_weight=config.get("alignment_weight", 0.3),
         alignment_latent_dim=config.get("alignment_latent_dim", 256),
-        cross_attention_heads=config.get("cross_attention_heads", 8),
+        alignment_temperature=config.get("alignment_temperature", 0.07),
     )
-    
-    # Load cross-attention weights if available
-    if use_cross_attention and os.path.exists(cross_attention_path):
-        logger.info(f"Loading cross-attention from: {cross_attention_path}")
-        model.cross_attention.load_state_dict(torch.load(cross_attention_path, map_location=device))
     
     # Load projection heads if available
     if use_alignment_loss and os.path.exists(projections_path):
         logger.info(f"Loading projection heads from: {projections_path}")
         projections = torch.load(projections_path, map_location=device)
-        model.motion_projection.load_state_dict(projections["motion"])
-        model.text_projection.load_state_dict(projections["text"])
+        # Handle both old format (motion/text) and new format (motion_proj/program_proj)
+        if "motion_proj" in projections:
+            model.motion_proj.load_state_dict(projections["motion_proj"])
+            model.program_proj.load_state_dict(projections["program_proj"])
+        else:
+            model.motion_proj.load_state_dict(projections["motion"])
+            model.program_proj.load_state_dict(projections["text"])
     
     model.eval()
 
