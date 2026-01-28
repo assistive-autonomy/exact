@@ -8,7 +8,7 @@ out
 logs
 config.json
 wandb
-*.ipynb
+# .ipynb
 cache/ # for lark parser
 
 # Byte-compiled / optimized / DLL files
