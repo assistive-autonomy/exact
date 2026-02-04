@@ -119,6 +119,67 @@ def main():
         default=10,
         help="Number of samples per worker task (larger = less overhead)",
     )
+    # Program generation parameters
+    parser.add_argument(
+        "--min-preds",
+        type=int,
+        default=1,
+        help="Minimum number of predicates per segment",
+    )
+    parser.add_argument(
+        "--max-preds",
+        type=int,
+        default=5,
+        help="Maximum number of predicates per segment",
+    )
+    parser.add_argument(
+        "--min-value",
+        type=float,
+        default=0.0,
+        help="Minimum value multiplier for predicates",
+    )
+    parser.add_argument(
+        "--max-value",
+        type=float,
+        default=2.0,
+        help="Maximum value multiplier for predicates",
+    )
+    parser.add_argument(
+        "--value-step",
+        type=float,
+        default=0.1,
+        help="Step size for value discretization",
+    )
+    parser.add_argument(
+        "--num-intervals",
+        type=int,
+        default=10,
+        help="Number of time intervals/segments in program",
+    )
+    parser.add_argument(
+        "--min-interval-time",
+        type=int,
+        default=1,
+        help="Minimum timesteps per interval",
+    )
+    parser.add_argument(
+        "--max-timesteps",
+        type=int,
+        default=1024,
+        help="Maximum total timesteps",
+    )
+    parser.add_argument(
+        "--allowed-parts",
+        type=str,
+        default=None,
+        help="Comma-separated list of allowed body parts (default: all)",
+    )
+    parser.add_argument(
+        "--allowed-axes",
+        type=str,
+        default=None,
+        help="Comma-separated list of allowed axes: x,y,z (default: all)",
+    )
     args = parser.parse_args()
 
     num_workers = args.num_workers or max(1, cpu_count() - 1)
@@ -130,18 +191,39 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    # Program generation parameters (fixed, opinionated defaults)
+    # Parse allowed parts and axes
+    allowed_parts = BODY_PARTS
+    if args.allowed_parts:
+        allowed_parts = [p.strip() for p in args.allowed_parts.split(",")]
+        invalid_parts = set(allowed_parts) - set(BODY_PARTS)
+        if invalid_parts:
+            logger.error(f"Invalid body parts: {invalid_parts}")
+            logger.error(f"Valid parts: {BODY_PARTS}")
+            sys.exit(1)
+    
+    allowed_axes = None
+    if args.allowed_axes:
+        allowed_axes = [a.strip() for a in args.allowed_axes.split(",")]
+        invalid_axes = set(allowed_axes) - {"x", "y", "z"}
+        if invalid_axes:
+            logger.error(f"Invalid axes: {invalid_axes}. Must be x, y, or z")
+            sys.exit(1)
+
+    # Program generation parameters
     program_kwargs = dict(
-        min_preds=1,
-        max_preds=5,
-        min_value=0.0,
-        max_value=2.0,
-        value_step=0.1,
-        allowed_parts=BODY_PARTS,
-        max_timesteps=1024,
-        num_intervals=10,
-        min_interval_time=1,
+        min_preds=args.min_preds,
+        max_preds=args.max_preds,
+        min_value=args.min_value,
+        max_value=args.max_value,
+        value_step=args.value_step,
+        allowed_parts=allowed_parts,
+        allowed_axes=allowed_axes,
+        max_timesteps=args.max_timesteps,
+        num_intervals=args.num_intervals,
+        min_interval_time=args.min_interval_time,
     )
+    
+    logger.info(f"Program generation params: {program_kwargs}")
 
     logger.info("Generating programs...")
     programs = [generate_program(**program_kwargs) for _ in range(args.num_samples)]
