@@ -176,6 +176,10 @@ def main(cfg: DictConfig):
     logger.info("Activity Segmentation Configuration")
     logger.info(f"\n{OmegaConf.to_yaml(cfg)}")
 
+    # Unwrap the segmentation config group if present
+    if "segmentation" in cfg:
+        cfg = cfg.segmentation
+
     # Extract project configuration
     project_cfg = cfg.project
     models = cfg.models
