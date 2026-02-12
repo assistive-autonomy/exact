@@ -1,453 +1,466 @@
+"""Cross-Attention Motion Parser with InfoNCE Alignment.
+
+Architecture: ST-GCN motion encoder + gated cross-attention layers injected into
+a LoRA fine-tuned code LLM. Motion features serve as key/value for cross-attention
+at selected decoder layers, providing strong conditioning at every level of the LLM.
+
+An auxiliary InfoNCE contrastive loss aligns the motion encoder's latent space
+with the LLM's program embedding space. Matching (motion, program) pairs are
+pulled together while non-matching pairs are pushed apart, ensuring the encoder
+learns representations that the LLM can meaningfully attend to.
+
+Key design decisions:
+    - Gated cross-attention (gate init=0) for stable training start
+    - Cross-attention injected every N decoder layers (configurable)
+    - InfoNCE alignment between pooled motion features and LLM program embeddings
+    - Generation seeded with "Program: " text prompt (not just embeddings)
+    - Grammar-constrained decoding compatible via logits processors
+"""
+
+import os
+from dataclasses import dataclass
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PreTrainedTokenizer
 from transformers.modeling_outputs import ModelOutput
-from dataclasses import dataclass
-from typing import Optional
 
-from syncode import SyncodeLogitsProcessor
-
+from exact.data.dataset import PROMPT_PREFIX
 from exact.encoder import STGCNEncoder
-
-# Default system prompt describing the motion-to-program task
-# Keep it minimal to avoid confusing the model with Python-like language
-DEFAULT_SYSTEM_PROMPT = """Convert motion to a program. Grammar:
-start: motion (";" motion)*
-motion: "[" NUMBER "," NUMBER "]" sensor ("*" sensor)*
-sensor: JOINT "." AXIS "(" NUMBER ")"
-JOINT: "pelvis"|"torso"|"spine"|"chest"|"neck"|"head"|"lhip"|"lknee"|"lankle"|"ltoe"|"rhip"|"rknee"|"rankle"|"rtoe"|"lthorax"|"lshoulder"|"lelbow"|"lwrist"|"lhand"|"rthorax"|"rshoulder"|"relbow"|"rwrist"|"rhand"
-AXIS: "x"|"y"|"z"
-NUMBER: integer or decimal
-[start_frame,end_frame] defines temporal segment. Sensors describe joint movements.
-Example: [0,512]head.y(1.5)*rwrist.z(0.4);[512,1024]pelvis.y(0.8)
-Motion embedding follows. Output program:"""
+from exact.parser.cross_attention import GatedCrossAttention
 
 
 @dataclass
-class MotionParserOutput(ModelOutput):
-    """Output from MotionConditionedParser with auxiliary losses.
-
-    Inherits from ModelOutput to be compatible with HuggingFace Trainer.
-    """
+class ParserOutput(ModelOutput):
+    """Output from CrossAttentionParser."""
 
     loss: Optional[torch.Tensor] = None
+    logits: Optional[torch.Tensor] = None
     lm_loss: Optional[torch.Tensor] = None
     alignment_loss: Optional[torch.Tensor] = None
-    logits: Optional[torch.Tensor] = None
 
 
-class CrossModalAttention(nn.Module):
-    """Cross-attention layer for attending to motion embeddings from decoder states.
-    
-    This forces the decoder to explicitly ground its predictions in the motion sequence
-    by computing attention over the encoder outputs at each decoding step.
+class CrossAttentionParser(nn.Module):
     """
-    
-    def __init__(self, hidden_dim: int, num_heads: int = 8, dropout: float = 0.1):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-        self.head_dim = hidden_dim // num_heads
-        
-        assert hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads"
-        
-        # Query comes from decoder hidden states
-        self.q_proj = nn.Linear(hidden_dim, hidden_dim)
-        # Key and value come from motion encoder
-        self.k_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.v_proj = nn.Linear(hidden_dim, hidden_dim)
-        # Output projection
-        self.out_proj = nn.Linear(hidden_dim, hidden_dim)
-        
-        self.dropout = nn.Dropout(dropout)
-        self.layer_norm = nn.LayerNorm(hidden_dim)
-        
-        # Gating mechanism to blend cross-attention with original hidden states
-        # Starts at 0 so initially the model behavior is unchanged
-        self.gate = nn.Parameter(torch.zeros(1))
-    
-    def forward(
-        self,
-        decoder_hidden: torch.Tensor,  # [B, seq_len, hidden_dim]
-        motion_embeddings: torch.Tensor,  # [B, num_motion_tokens, hidden_dim]
-        motion_mask: Optional[torch.Tensor] = None,  # [B, num_motion_tokens]
-    ) -> torch.Tensor:
-        """Compute cross-attention from decoder to motion encoder.
-        
-        Returns:
-            Updated decoder hidden states with motion context blended in.
-        """
-        batch_size, seq_len, _ = decoder_hidden.shape
-        num_motion_tokens = motion_embeddings.shape[1]
-        
-        # Project queries from decoder, keys/values from motion
-        q = self.q_proj(decoder_hidden)  # [B, seq_len, hidden_dim]
-        k = self.k_proj(motion_embeddings)  # [B, num_motion_tokens, hidden_dim]
-        v = self.v_proj(motion_embeddings)  # [B, num_motion_tokens, hidden_dim]
-        
-        # Reshape for multi-head attention
-        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, num_motion_tokens, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, num_motion_tokens, self.num_heads, self.head_dim).transpose(1, 2)
-        # q: [B, num_heads, seq_len, head_dim]
-        # k, v: [B, num_heads, num_motion_tokens, head_dim]
-        
-        # Scaled dot-product attention
-        scale = self.head_dim ** -0.5
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * scale
-        # attn_weights: [B, num_heads, seq_len, num_motion_tokens]
-        
-        # Apply motion mask if provided
-        if motion_mask is not None:
-            # Expand mask for heads: [B, 1, 1, num_motion_tokens]
-            mask = motion_mask.unsqueeze(1).unsqueeze(2)
-            attn_weights = attn_weights.masked_fill(mask == 0, float('-inf'))
-        
-        attn_weights = F.softmax(attn_weights, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-        
-        # Apply attention to values
-        attn_output = torch.matmul(attn_weights, v)
-        # attn_output: [B, num_heads, seq_len, head_dim]
-        
-        # Reshape back
-        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_dim)
-        attn_output = self.out_proj(attn_output)
-        
-        # Gated residual connection - gate starts at 0, learned during training
-        gate = torch.sigmoid(self.gate)
-        output = decoder_hidden + gate * self.layer_norm(attn_output)
-        
-        return output
+    Motion-to-program parser using cross-attention conditioning + LoRA.
 
+    Architecture:
+        1. ST-GCN encodes motion [B, T, 72] → [B, num_temporal_tokens, encoder_dim]
+        2. Motion features projected to LLM hidden dim and normalized
+        3. Gated cross-attention layers injected at every Nth LLM decoder layer
+           - Query = text hidden states, K/V = motion features
+           - Gated residual: h' = h + tanh(gate) * CrossAttn(LN(h), motion)
+        4. LoRA adapts the LLM self-attention weights
+        5. Generation seeded with "Program: " text prompt
 
-class MotionProjectionHead(nn.Module):
-    """Projects motion embeddings to a latent space for alignment loss.
-    
-    Used to align encoder output with decoder embeddings of the target program.
-    """
-    
-    def __init__(self, hidden_dim: int, latent_dim: int = 256):
-        super().__init__()
-        self.projection = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, latent_dim),
-        )
-        # Layer norm for stability
-        self.norm = nn.LayerNorm(latent_dim)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Project and normalize embeddings.
-        
-        Args:
-            x: [B, seq_len, hidden_dim] or [B, hidden_dim]
-            
-        Returns:
-            Projected embeddings: [B, latent_dim] (pooled) or [B, seq_len, latent_dim]
-        """
-        projected = self.projection(x)
-        return self.norm(projected)
+    Cross-attention provides much stronger conditioning than prefix-only approaches
+    because the motion signal is refreshed at every injected decoder layer, not just
+    at the input embedding level.
 
-
-def info_nce_loss(
-    motion_latent: torch.Tensor,
-    program_latent: torch.Tensor,
-    temperature: float = 0.07,
-) -> torch.Tensor:
-    """Compute bidirectional InfoNCE contrastive loss.
-    
-    This loss encourages motion embeddings to be similar to their corresponding
-    program embeddings while being dissimilar to other programs in the batch.
-    
     Args:
-        motion_latent: [B, latent_dim] motion embeddings
-        program_latent: [B, latent_dim] program embeddings  
-        temperature: Temperature for softmax (lower = sharper distribution)
-        
-    Returns:
-        Scalar contrastive loss
-    """
-    batch_size = motion_latent.shape[0]
-    
-    # L2 normalize embeddings
-    motion_latent = F.normalize(motion_latent, p=2, dim=-1)
-    program_latent = F.normalize(program_latent, p=2, dim=-1)
-    
-    # Compute similarity matrix [B, B]
-    # Each row i contains similarity of motion_i with all programs
-    similarity = torch.matmul(motion_latent, program_latent.T) / temperature
-    
-    # Labels: diagonal elements are positive pairs
-    labels = torch.arange(batch_size, device=motion_latent.device)
-    
-    # Bidirectional loss: motion->program and program->motion
-    loss_m2p = F.cross_entropy(similarity, labels)  # motion to program
-    loss_p2m = F.cross_entropy(similarity.T, labels)  # program to motion
-    
-    return (loss_m2p + loss_p2m) / 2
-
-
-class MotionConditionedParser(nn.Module):
-    """LLM with ST-GCN motion prefix conditioning and cross-modal attention for program generation.
-    
-    Key architectural features:
-    1. Motion prefix: ST-GCN encoded motion tokens prepended to input sequence
-    2. Latent alignment: InfoNCE contrastive loss between motion and program embeddings
+        model: LoRA-adapted LLM (PeftModel or CausalLM)
+        trajectory_encoder: ST-GCN motion encoder
+        tokenizer: HuggingFace tokenizer
+        encoder_dim: ST-GCN output dimension
+        cross_attn_every_n: Insert cross-attention every N decoder layers
+        cross_attn_num_heads: Number of attention heads in cross-attention
+        cross_attn_dropout: Dropout in cross-attention layers
     """
 
     def __init__(
         self,
         model,
         trajectory_encoder: STGCNEncoder,
-        tokenizer: PreTrainedTokenizer = None,
-        motion_dim: int = 72,
-        use_cross_attention: bool = False,  # Deprecated, kept for compatibility
-        use_alignment_loss: bool = True,
-        alignment_weight: float = 0.3,
-        alignment_latent_dim: int = 256,
+        tokenizer: PreTrainedTokenizer,
+        encoder_dim: int = 2048,
+        cross_attn_every_n: int = 4,
+        cross_attn_num_heads: int = 8,
+        cross_attn_dropout: float = 0.1,
+        alignment_weight: float = 0.1,
+        alignment_dim: int = 256,
         alignment_temperature: float = 0.07,
-        cross_attention_heads: int = 8,  # Deprecated, kept for compatibility
     ):
         super().__init__()
 
         self.model = model
         self.trajectory_encoder = trajectory_encoder
         self.tokenizer = tokenizer
-        self.system_prompt = DEFAULT_SYSTEM_PROMPT
-        self.alignment_temperature = alignment_temperature
-        self.use_cross_attention = False  # Disabled - use alignment loss instead
-        
-        # Get hidden dimension from model config
-        if hasattr(model, "config"):
-            hidden_dim = model.config.hidden_size
+
+        # Get LLM hidden dimension
+        hidden_dim = model.config.hidden_size
+        self.hidden_dim = hidden_dim
+        self.encoder_dim = encoder_dim
+
+        # Motion projection to LLM hidden dim (identity if dims match)
+        if encoder_dim != hidden_dim:
+            self.motion_projection = nn.Linear(encoder_dim, hidden_dim)
         else:
-            hidden_dim = 4096  # Default for DeepSeek-Coder-6.7B
-        
-        # Latent space alignment (InfoNCE contrastive loss)
-        self.use_alignment_loss = use_alignment_loss
+            self.motion_projection = nn.Identity()
+
+        self.motion_norm = nn.LayerNorm(hidden_dim)
+
+        # ── InfoNCE alignment ───────────────────────────────────────────
+        # Projection heads map motion/program embeddings to shared latent space.
+        # The contrastive loss aligns the encoder with the LLM's representations.
         self.alignment_weight = alignment_weight
-        if use_alignment_loss:
-            self.motion_projection = MotionProjectionHead(
-                hidden_dim=hidden_dim, 
-                latent_dim=alignment_latent_dim,
-            )
-            self.text_projection = MotionProjectionHead(
-                hidden_dim=hidden_dim, 
-                latent_dim=alignment_latent_dim,
-            )
+        self.alignment_temperature = alignment_temperature
+
+        # Motion projection head: pool temporal tokens → single vector → latent
+        self.motion_align_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, alignment_dim),
+        )
+
+        # Program projection head: pool LLM hidden states → latent
+        self.program_align_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, alignment_dim),
+        )
+
+        # Learnable log-temperature for InfoNCE (CLIP-style)
+        self.logit_scale = nn.Parameter(
+            torch.tensor(1.0 / alignment_temperature).log()
+        )
+
+        # Determine which decoder layers get cross-attention
+        num_layers = model.config.num_hidden_layers
+        self.cross_attn_layer_indices = list(
+            range(cross_attn_every_n - 1, num_layers, cross_attn_every_n)
+        )
+
+        # Create gated cross-attention modules
+        self.cross_attn_layers = nn.ModuleDict(
+            {
+                str(idx): GatedCrossAttention(
+                    hidden_dim=hidden_dim,
+                    num_heads=cross_attn_num_heads,
+                    dropout=cross_attn_dropout,
+                )
+                for idx in self.cross_attn_layer_indices
+            }
+        )
+
+        # Motion features cache (set during forward/generate, cleared after)
+        self._motion_features: Optional[torch.Tensor] = None
+
+        # Cached prompt token IDs for generation
+        self._prompt_prefix = PROMPT_PREFIX
+        self._prompt_ids = None
+
+        # Inject cross-attention into LLM decoder layers
+        self._inject_cross_attention()
+
+    @property
+    def dtype(self):
+        """Return model dtype."""
+        if hasattr(self.model, "dtype"):
+            return self.model.dtype
+        for p in self.model.parameters():
+            return p.dtype
+        return torch.float32
+
+    @property
+    def device(self):
+        """Return model device."""
+        for p in self.model.parameters():
+            return p.device
+        return torch.device("cpu")
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        """Enable gradient checkpointing on the underlying model."""
         if hasattr(self.model, "gradient_checkpointing_enable"):
             self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
 
     def gradient_checkpointing_disable(self):
-        """Disable gradient checkpointing on the underlying model."""
         if hasattr(self.model, "gradient_checkpointing_disable"):
             self.model.gradient_checkpointing_disable()
 
-    def _get_system_prompt_embeds(self, batch_size: int, device: torch.device):
-        """Get system prompt embeddings.
+    def _get_decoder_layers(self):
+        """Navigate through PEFT/model wrappers to find decoder layers."""
+        candidates = [
+            # PeftModel → LoraModel → CausalLM → Model → layers
+            lambda m: m.base_model.model.model.layers,
+            # PeftModel → CausalLM → Model → layers
+            lambda m: m.base_model.model.layers,
+            # CausalLM → Model → layers
+            lambda m: m.model.layers,
+            # Direct access
+            lambda m: m.layers,
+        ]
+        for get_layers in candidates:
+            try:
+                layers = get_layers(self.model)
+                if isinstance(layers, nn.ModuleList):
+                    return layers
+            except AttributeError:
+                continue
+        raise RuntimeError(f"Cannot find decoder layers in {type(self.model)}")
+
+    def _inject_cross_attention(self):
+        """Inject gated cross-attention into selected LLM decoder layers.
+
+        Monkey-patches the forward method of each selected decoder layer to
+        apply cross-attention after the layer's normal self-attn + FFN pass.
+        The motion features are accessed via self._motion_features which is
+        set before forward/generate and cleared after.
+
+        This approach is compatible with gradient checkpointing because
+        nn.Module.__call__ invokes the patched forward method.
+        """
+        decoder_layers = self._get_decoder_layers()
+
+        for idx_str, xattn in self.cross_attn_layers.items():
+            idx = int(idx_str)
+            original_forward = decoder_layers[idx].forward
+
+            # Closure captures the correct references for each layer
+            def make_forward(orig_fn, xattn_mod, parser_ref):
+                def new_forward(*args, **kwargs):
+                    outputs = orig_fn(*args, **kwargs)
+                    if parser_ref._motion_features is not None:
+                        hidden_states = outputs[0]
+                        motion = parser_ref._motion_features.to(hidden_states.dtype)
+                        hidden_states = xattn_mod(hidden_states, motion)
+                        outputs = (hidden_states,) + outputs[1:]
+                    return outputs
+
+                return new_forward
+
+            decoder_layers[idx].forward = make_forward(
+                original_forward, xattn, self
+            )
+
+    def _encode_motion(self, motion: torch.Tensor) -> torch.Tensor:
+        """
+        Encode motion to cross-attention features.
+
+        Args:
+            motion: [B, T, 72] raw motion sequence
 
         Returns:
-            system_embeds: [batch_size, prompt_len, hidden_dim]
-            system_mask: [batch_size, prompt_len]
+            motion_features: [B, num_temporal_tokens, hidden_dim]
         """
-        if self.tokenizer is None or not self.system_prompt:
-            return None, None
+        # ST-GCN encoding (float32 for BatchNorm stability)
+        motion_features = self.trajectory_encoder(motion)
 
-        # Tokenize system prompt
-        encoded = self.tokenizer(
-            self.system_prompt,
-            return_tensors="pt",
-            add_special_tokens=True,
-        )
-        prompt_ids = encoded["input_ids"].to(device)
-        prompt_mask = encoded["attention_mask"].to(device)
+        # Cast to model dtype, project and normalize to LLM hidden dim
+        target_dtype = self.motion_norm.weight.dtype
+        target_device = self.motion_norm.weight.device
+        motion_features = motion_features.to(device=target_device, dtype=target_dtype)
+        motion_features = self.motion_projection(motion_features)
+        motion_features = self.motion_norm(motion_features)
 
-        # Get embeddings and expand for batch
-        prompt_embeds = self.model.get_input_embeddings()(prompt_ids)
-        prompt_embeds = prompt_embeds.expand(batch_size, -1, -1)
-        prompt_mask = prompt_mask.expand(batch_size, -1)
+        return motion_features
 
-        return prompt_embeds, prompt_mask
+    def _get_prompt_ids(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        """Get tokenized 'Program: ' prompt IDs for generation seeding."""
+        if self._prompt_ids is None or self._prompt_ids.device != device:
+            encoded = self.tokenizer(
+                self._prompt_prefix,
+                return_tensors="pt",
+                add_special_tokens=False,
+            )
+            self._prompt_ids = encoded["input_ids"].to(device)
+        return self._prompt_ids.expand(batch_size, -1)
+
+    def _compute_alignment_loss(
+        self,
+        motion_features: torch.Tensor,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute InfoNCE contrastive loss between motion and program embeddings.
+
+        Pools motion temporal tokens and LLM hidden states to single vectors,
+        projects both into a shared latent space, and computes symmetric
+        cross-entropy (CLIP-style) over cosine similarities.
+
+        Args:
+            motion_features: [B, num_temporal_tokens, hidden_dim]
+            hidden_states: [B, seq_len, hidden_dim] LLM last hidden states
+            attention_mask: [B, seq_len] to mask padding when pooling
+
+        Returns:
+            Scalar InfoNCE loss
+        """
+        # Pool motion: mean over temporal tokens → [B, hidden_dim]
+        motion_pooled = motion_features.mean(dim=1)
+
+        # Pool program: mean over non-padding tokens → [B, hidden_dim]
+        mask = attention_mask.unsqueeze(-1).to(hidden_states.dtype)  # [B, T, 1]
+        program_pooled = (hidden_states * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+
+        # Project to shared alignment space
+        motion_embed = F.normalize(self.motion_align_head(motion_pooled), dim=-1)
+        program_embed = F.normalize(self.program_align_head(program_pooled), dim=-1)
+
+        # Compute scaled cosine similarity matrix [B, B]
+        logit_scale = self.logit_scale.exp().clamp(max=100.0)
+        logits = logit_scale * motion_embed @ program_embed.t()
+
+        # Symmetric cross-entropy (motion→program + program→motion)
+        labels = torch.arange(logits.shape[0], device=logits.device)
+        loss_m2p = F.cross_entropy(logits, labels)
+        loss_p2m = F.cross_entropy(logits.t(), labels)
+
+        return (loss_m2p + loss_p2m) / 2
 
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        motion: torch.Tensor,
+        motion: torch.Tensor = None,
         labels: torch.Tensor = None,
-    ) -> MotionParserOutput:
-        """Forward pass with motion conditioning, cross-attention, and alignment loss.
+        **kwargs,
+    ) -> ParserOutput:
+        """
+        Training forward pass: LM loss + InfoNCE alignment loss.
+
+        The motion features are encoded once and cached. Each injected decoder
+        layer applies cross-attention using these cached features. After the
+        LM forward pass, an InfoNCE contrastive loss aligns the motion encoder's
+        latent space with the LLM's program representations.
+
+        Total loss = LM_loss + alignment_weight * InfoNCE_loss
 
         Args:
-            input_ids: [batch_size, seq_len] token ids
-            attention_mask: [batch_size, seq_len] attention mask
-            motion: [batch_size, motion_len, motion_dim] motion sequence
-            labels: [batch_size, seq_len] target labels (optional)
-
-        Returns:
-            MotionParserOutput with loss, alignment_loss, and logits
+            input_ids: [B, seq_len] token IDs for "Program: <program><eos>"
+            attention_mask: [B, seq_len]
+            motion: [B, T, 72] motion sequence (None disables conditioning)
+            labels: [B, seq_len] target labels for LM loss
         """
-        batch_size = motion.shape[0]
-        device = motion.device
+        # Encode and cache motion features for cross-attention layers
+        motion_features = None
+        if motion is not None:
+            motion_features = self._encode_motion(motion)
+            self._motion_features = motion_features
 
-        # Get embeddings
-        token_embeds = self.model.get_input_embeddings()(input_ids)
-        motion_embeddings = self.trajectory_encoder(motion)
-        # Cast motion embeddings to match token embeddings dtype (e.g., bf16)
-        motion_embeddings = motion_embeddings.to(token_embeds.dtype)
-
-        system_embeds, system_mask = self._get_system_prompt_embeds(batch_size, device)
-
-        # Build inputs: [system_prompt] + [motion] + [tokens]
-        if system_embeds is not None:
-            inputs_embeds = torch.cat(
-                [system_embeds, motion_embeddings, token_embeds], dim=1
+        try:
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+                return_dict=True,
+                output_hidden_states=True,
             )
-            prefix_len = system_embeds.shape[1] + motion_embeddings.shape[1]
-            system_len = system_embeds.shape[1]
-        else:
-            inputs_embeds = torch.cat([motion_embeddings, token_embeds], dim=1)
-            prefix_len = motion_embeddings.shape[1]
-            system_len = 0
+        finally:
+            self._motion_features = None
 
-        # Build attention mask
-        motion_mask = torch.ones(
-            batch_size,
-            motion_embeddings.shape[1],
-            dtype=torch.long,
-            device=device,
-        )
-        if system_mask is not None:
-            full_attention_mask = torch.cat(
-                [system_mask, motion_mask, attention_mask], dim=1
-            )
-        else:
-            full_attention_mask = torch.cat([motion_mask, attention_mask], dim=1)
-
-        # Prepare labels: mask out system prompt and motion prefix tokens
-        if labels is not None:
-            prefix_labels = torch.full(
-                (batch_size, prefix_len),
-                -100,
-                dtype=torch.long,
-                device=device,
-            )
-            full_labels = torch.cat([prefix_labels, labels], dim=1)
-        else:
-            full_labels = None
-
-        # Forward through model with output_hidden_states for alignment loss
-        outputs = self.model(
-            inputs_embeds=inputs_embeds,
-            attention_mask=full_attention_mask,
-            labels=full_labels,
-            output_hidden_states=self.use_alignment_loss,
-        )
-        
         lm_loss = outputs.loss
-        alignment_loss = None
         total_loss = lm_loss
-        
-        # Compute latent space alignment loss if enabled
-        # This forces the motion encoder to produce embeddings that align with program embeddings
-        if self.use_alignment_loss and labels is not None and outputs.hidden_states is not None:
-            # Get encoder output: pool motion embeddings
-            motion_pooled = motion_embeddings.mean(dim=1)  # [B, hidden_dim]
-            motion_latent = self.motion_projection(motion_pooled)  # [B, latent_dim]
-            
-            # Get decoder output: use hidden states for program tokens
-            last_hidden = outputs.hidden_states[-1]  # [B, full_seq_len, hidden_dim]
-            program_hidden = last_hidden[:, prefix_len:, :]  # [B, seq_len, hidden_dim]
-            
-            # Masked mean pooling (exclude padding tokens)
-            valid_mask = (labels != -100) & (attention_mask == 1)  # [B, seq_len]
-            valid_mask = valid_mask.unsqueeze(-1).float()  # [B, seq_len, 1]
-            
-            masked_hidden = program_hidden * valid_mask
-            sum_hidden = masked_hidden.sum(dim=1)  # [B, hidden_dim]
-            count = valid_mask.sum(dim=1).clamp(min=1)  # [B, 1]
-            program_pooled = sum_hidden / count  # [B, hidden_dim]
-            
-            # Project to shared latent space
-            program_latent = self.text_projection(program_pooled)  # [B, latent_dim]
-            
-            # Bidirectional contrastive loss (InfoNCE)
-            alignment_loss = info_nce_loss(
-                motion_latent, 
-                program_latent,
-                temperature=self.alignment_temperature,
-            )
-            
-            total_loss = total_loss + self.alignment_weight * alignment_loss
+        alignment_loss = None
 
-        return MotionParserOutput(
+        # Compute InfoNCE alignment loss during training
+        if motion_features is not None and self.alignment_weight > 0 and self.training:
+            # Use last hidden state from the LLM for program embeddings
+            last_hidden = outputs.hidden_states[-1]
+            alignment_loss = self._compute_alignment_loss(
+                motion_features, last_hidden, attention_mask
+            )
+            total_loss = lm_loss + self.alignment_weight * alignment_loss
+
+        # Store loss breakdown for logging callback
+        self._last_lm_loss = lm_loss.item() if lm_loss is not None else None
+        self._last_alignment_loss = alignment_loss.item() if alignment_loss is not None else None
+
+        return ParserOutput(
             loss=total_loss,
+            logits=outputs.logits,
             lm_loss=lm_loss,
             alignment_loss=alignment_loss,
-            logits=outputs.logits,
         )
 
     @torch.no_grad()
     def generate(
         self,
         motion: torch.Tensor,
-        max_new_tokens: int = 128,
-        grammar_processor: SyncodeLogitsProcessor | None = None,
+        max_new_tokens: int = 256,
+        temperature: float = 0.3,
+        top_p: float = 0.95,
+        do_sample: bool = True,
+        grammar_processor=None,
         **kwargs,
     ) -> torch.Tensor:
-        """Generate program from motion sequence.
+        """
+        Generate program from motion, seeded with 'Program: ' prompt.
+
+        The motion features are encoded and cached for the entire generation
+        loop. The LLM's generate() is called with "Program: " as the input,
+        and cross-attention to motion features happens at every injected layer
+        for each generated token.
 
         Args:
-            motion: [batch_size, motion_len, motion_dim] motion sequence
-            max_new_tokens: maximum tokens to generate
-            grammar_processor: SyncodeLogitsProcessor for grammar-constrained decoding
+            motion: [B, T, 72] motion sequence
+            max_new_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            top_p: Nucleus sampling threshold
+            do_sample: Whether to sample or greedy decode
+            grammar_processor: Optional grammar-constrained logits processor
 
         Returns:
-            generated_ids: [batch_size, generated_len]
+            generated_ids: [B, prompt_len + generated_len] token IDs
         """
         batch_size = motion.shape[0]
         device = motion.device
 
-        motion_embeddings = self.trajectory_encoder(motion)
-        # Cast motion embeddings to match model dtype (e.g., bf16)
-        motion_embeddings = motion_embeddings.to(self.model.dtype)
-        
-        system_embeds, system_mask = self._get_system_prompt_embeds(batch_size, device)
+        # Encode and cache motion features for entire generation
+        self._motion_features = self._encode_motion(motion)
 
-        # Build inputs: [system_prompt] + [motion]
-        if system_embeds is not None:
-            inputs_embeds = torch.cat([system_embeds, motion_embeddings], dim=1)
-            motion_mask = torch.ones(
-                batch_size,
-                motion_embeddings.shape[1],
-                dtype=torch.long,
-                device=device,
-            )
-            attention_mask = torch.cat([system_mask, motion_mask], dim=1)
-        else:
-            inputs_embeds = motion_embeddings
-            attention_mask = torch.ones(
-                batch_size,
-                motion_embeddings.shape[1],
-                dtype=torch.long,
-                device=device,
-            )
+        # Seed generation with "Program: " prompt
+        prompt_ids = self._get_prompt_ids(batch_size, device)
+        prompt_mask = torch.ones_like(prompt_ids)
 
-        # Reset grammar processor state if provided
+        # Setup logits processors
+        logits_processor = kwargs.pop("logits_processor", [])
         if grammar_processor is not None:
             grammar_processor.reset()
-            kwargs["logits_processor"] = kwargs.get("logits_processor", []) + [
-                grammar_processor
-            ]
+            logits_processor.append(grammar_processor)
 
-        return self.model.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            max_new_tokens=max_new_tokens,
-            **kwargs,
+        try:
+            generated = self.model.generate(
+                input_ids=prompt_ids,
+                attention_mask=prompt_mask,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature if do_sample else None,
+                top_p=top_p if do_sample else None,
+                do_sample=do_sample,
+                logits_processor=logits_processor if logits_processor else None,
+                **kwargs,
+            )
+        finally:
+            self._motion_features = None
+
+        return generated
+
+    def save_pretrained(self, save_directory: str):
+        """Save trainable components (encoder + cross-attention) for loading.
+
+        The LoRA adapter is saved separately by PEFT's save_pretrained.
+        """
+        os.makedirs(save_directory, exist_ok=True)
+
+        # Save ST-GCN encoder
+        torch.save(
+            self.trajectory_encoder.state_dict(),
+            os.path.join(save_directory, "trajectory_encoder.pt"),
         )
+
+        # Save cross-attention layers + motion projection + norm + alignment heads
+        save_dict = {
+            "cross_attn_layer_indices": self.cross_attn_layer_indices,
+            "cross_attn_layers": self.cross_attn_layers.state_dict(),
+            "motion_norm": self.motion_norm.state_dict(),
+            "motion_align_head": self.motion_align_head.state_dict(),
+            "program_align_head": self.program_align_head.state_dict(),
+            "logit_scale": self.logit_scale.data,
+            "encoder_dim": self.encoder_dim,
+            "hidden_dim": self.hidden_dim,
+        }
+        if not isinstance(self.motion_projection, nn.Identity):
+            save_dict["motion_projection"] = self.motion_projection.state_dict()
+
+        torch.save(save_dict, os.path.join(save_directory, "cross_attention.pt"))

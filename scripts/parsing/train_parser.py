@@ -1,0 +1,970 @@
+#!/usr/bin/env python
+"""Motion-conditioned Prefix Parser: training and evaluation.
+
+Architecture: ST-GCN motion prefix tokens + LoRA fine-tuned LLM.
+"""
+
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+# Disable tokenizers parallelism to avoid forking warnings
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+import h5py
+import torch
+from loguru import logger
+from omegaconf import DictConfig, OmegaConf
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+from tqdm import tqdm
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    Trainer,
+    TrainerCallback,
+    TrainingArguments,
+    EarlyStoppingCallback,
+)
+
+# Add parent to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from exact.data import TrajectoryGenerationDataset
+from exact.data.dataset import PROMPT_PREFIX
+from exact.parser import CrossAttentionParser
+from exact.parser.utils import create_grammar_processor
+from exact.encoder import STGCNEncoder
+
+try:
+    import wandb
+
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def load_config(config_path: str, overrides: list[str] = None) -> DictConfig:
+    """Load config file and apply CLI overrides."""
+    base_cfg = OmegaConf.load(config_path)
+    if overrides:
+        override_cfg = OmegaConf.from_dotlist(overrides)
+        cfg = OmegaConf.merge(base_cfg, override_cfg)
+    else:
+        cfg = base_cfg
+    return cfg
+
+
+def set_seed(seed: int):
+    """Set random seeds for reproducibility."""
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def get_device(device_str: str) -> torch.device:
+    if device_str == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(device_str)
+
+
+def get_model_hidden_size(model) -> int:
+    """Get hidden size from model config."""
+    config = model.config
+    if hasattr(config, "text_config") and hasattr(config.text_config, "hidden_size"):
+        return config.text_config.hidden_size
+    if hasattr(config, "hidden_size"):
+        return config.hidden_size
+    raise AttributeError(f"Cannot find hidden_size in model config: {type(config)}")
+
+
+def get_collate_fn(tokenizer):
+    """Create a collate function for the dataloader."""
+
+    def collate_fn(batch):
+        input_ids = torch.stack([x["input_ids"] for x in batch])
+        attention_mask = torch.stack([x["attention_mask"] for x in batch])
+        obs = torch.stack([x["obs"] for x in batch])
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "motion": obs,
+            "labels": input_ids.clone(),
+        }
+
+    return collate_fn
+
+
+# ─── Callbacks ────────────────────────────────────────────────────────────────
+
+
+class EncoderCheckpointCallback(TrainerCallback):
+    """Save encoder and cross-attention weights with each checkpoint."""
+
+    def __init__(self, parser_model: CrossAttentionParser):
+        self.parser_model = parser_model
+
+    def on_save(self, args, state, control, **kwargs):
+        checkpoint_dir = os.path.join(
+            args.output_dir, f"checkpoint-{state.global_step}"
+        )
+        if os.path.exists(checkpoint_dir):
+            self.parser_model.save_pretrained(checkpoint_dir)
+            logger.debug(f"Saved encoder + projections to {checkpoint_dir}")
+
+
+class AlignmentLoggingCallback(TrainerCallback):
+    """Log lm_loss and alignment_loss as separate wandb/log metrics."""
+
+    def __init__(self, parser_model: CrossAttentionParser):
+        self.parser_model = parser_model
+        self._last_lm_loss = None
+        self._last_alignment_loss = None
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs is None:
+            return
+        # The model stores the most recent loss breakdown in forward()
+        m = self.parser_model
+        if hasattr(m, "_last_lm_loss") and m._last_lm_loss is not None:
+            logs["train/lm_loss"] = m._last_lm_loss
+        if hasattr(m, "_last_alignment_loss") and m._last_alignment_loss is not None:
+            logs["train/alignment_loss"] = m._last_alignment_loss
+            logs["train/logit_scale"] = m.logit_scale.exp().item()
+
+
+# ─── Evaluation ───────────────────────────────────────────────────────────────
+
+
+def load_eval_samples(h5_path: str, n_samples: int = 8):
+    """Load a subset of samples for generation-based evaluation."""
+    samples = []
+    with h5py.File(h5_path, "r") as f:
+        keys = list(f.keys())[:n_samples]
+        for key in keys:
+            motion = f[key]["motion"][()]
+            program = f[key].attrs["program"]
+            samples.append(
+                {
+                    "key": key,
+                    "motion": torch.tensor(motion, dtype=torch.float32),
+                    "program": program,
+                }
+            )
+    return samples
+
+
+@torch.no_grad()
+def evaluate_samples(
+    model: CrossAttentionParser,
+    tokenizer,
+    samples: list,
+    device: torch.device,
+    dtype: torch.dtype,
+    max_new_tokens: int = 256,
+    num_retries: int = 2,
+    retry_temperature: float = 0.5,
+    retry_top_p: float = 0.9,
+    generation_temperature: float = 0.3,
+    use_constrained_decoding: bool = True,
+    log_attempts: bool = False,
+    max_frame: int = 1024,
+) -> dict:
+    """Evaluate model on sample batch and return metrics."""
+    from exact.parser.utils import post_process_program, validate_program
+    from exact.programs.edit_distance import program_edit_distance, parse_to_tree
+    from lark.exceptions import LarkError
+
+    model.eval()
+
+    grammar_processor = (
+        create_grammar_processor(tokenizer) if use_constrained_decoding else None
+    )
+
+    results = []
+    exact_matches = 0
+    valid_programs = 0
+    edit_distances = []
+
+    def _strip_prompt(text: str) -> str:
+        """Strip the prompt prefix from generated text."""
+        text = text.strip()
+        if text.startswith(PROMPT_PREFIX):
+            text = text[len(PROMPT_PREFIX):]
+        return text.strip()
+
+    def _generate_with_retries(motion_batch: torch.Tensor):
+        """Try generation with increasing temperature on grammar failures."""
+        # First attempt: low temperature (near-greedy)
+        generated_ids = model.generate(
+            motion=motion_batch,
+            max_new_tokens=max_new_tokens,
+            temperature=generation_temperature,
+            do_sample=generation_temperature > 0,
+            grammar_processor=grammar_processor,
+        )
+        raw = _strip_prompt(
+            tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+        )
+        program, is_valid = post_process_program(raw, repair=True, max_frame=max_frame)
+        if is_valid:
+            return program, raw, None
+
+        # Retry with higher temperature
+        all_attempts = [(raw, program, is_valid)]
+        for retry in range(num_retries):
+            temp = retry_temperature + retry * 0.2
+            generated_ids = model.generate(
+                motion=motion_batch,
+                max_new_tokens=max_new_tokens,
+                temperature=temp,
+                top_p=retry_top_p,
+                do_sample=True,
+                grammar_processor=grammar_processor,
+            )
+            raw = _strip_prompt(
+                tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+            )
+            program, is_valid = post_process_program(
+                raw, repair=True, max_frame=max_frame
+            )
+            all_attempts.append((raw, program, is_valid))
+            if is_valid:
+                return program, raw, all_attempts if log_attempts else None
+
+        # Return best attempt (first valid, or last)
+        for raw, program, is_valid in all_attempts:
+            if is_valid:
+                return program, raw, all_attempts if log_attempts else None
+        return program, raw, all_attempts if log_attempts else None
+
+    for sample in tqdm(samples, desc="Evaluating samples"):
+        motion = sample["motion"].unsqueeze(0).to(device)
+        target = sample["program"]
+
+        try:
+            predicted, raw_predicted, attempts = _generate_with_retries(motion)
+        except Exception as e:
+            logger.warning(f"Generation failed for {sample['key']}: {e}")
+            predicted, raw_predicted, attempts = "", None, None
+
+        # Check exact match
+        is_exact = predicted.strip() == target.strip()
+        if is_exact:
+            exact_matches += 1
+
+        # Check validity
+        is_valid = validate_program(predicted) if predicted else False
+        if is_valid:
+            valid_programs += 1
+
+        # Compute normalized edit distance
+        norm_edit_dist = None
+        if is_valid and predicted.strip():
+            try:
+                target_tree = parse_to_tree(target)
+                pred_tree = parse_to_tree(predicted)
+                raw_dist = program_edit_distance(target_tree, pred_tree)
+                max_size = max(len(target_tree), len(pred_tree))
+                norm_edit_dist = raw_dist / max_size if max_size > 0 else 0.0
+                edit_distances.append(norm_edit_dist)
+            except (LarkError, Exception) as e:
+                logger.debug(f"Edit distance failed: {e}")
+
+        results.append(
+            {
+                "key": sample["key"],
+                "target": target,
+                "predicted": predicted,
+                "raw_predicted": raw_predicted,
+                "exact_match": is_exact,
+                "is_valid": is_valid,
+                "normalized_edit_distance": norm_edit_dist,
+                "attempts": attempts,
+            }
+        )
+
+    accuracy = exact_matches / len(samples) if samples else 0
+    validity_rate = valid_programs / len(samples) if samples else 0
+    mean_edit_distance = (
+        sum(edit_distances) / len(edit_distances) if edit_distances else None
+    )
+
+    return {
+        "accuracy": accuracy,
+        "validity_rate": validity_rate,
+        "mean_normalized_edit_distance": mean_edit_distance,
+        "exact_matches": exact_matches,
+        "valid_programs": valid_programs,
+        "total": len(samples),
+        "samples": results,
+    }
+
+
+def log_samples_to_wandb(eval_results: dict, step: int = None):
+    """Log sample predictions to wandb as a table."""
+    if not WANDB_AVAILABLE:
+        return
+
+    table = wandb.Table(
+        columns=["key", "target", "predicted", "exact_match", "valid", "edit_dist"]
+    )
+
+    for sample in eval_results["samples"]:
+        edit_dist_str = (
+            f"{sample.get('normalized_edit_distance', 'N/A'):.3f}"
+            if sample.get("normalized_edit_distance") is not None
+            else "N/A"
+        )
+        table.add_data(
+            sample["key"],
+            sample["target"],
+            sample["predicted"],
+            "✓" if sample["exact_match"] else "✗",
+            "✓" if sample.get("is_valid", True) else "✗",
+            edit_dist_str,
+        )
+
+    log_data = {
+        "eval/sample_predictions": table,
+        "eval/accuracy": eval_results["accuracy"],
+        "eval/exact_matches": eval_results["exact_matches"],
+        "eval/validity_rate": eval_results.get("validity_rate", 1.0),
+        "eval/valid_programs": eval_results.get("valid_programs", eval_results["total"]),
+    }
+
+    if eval_results.get("mean_normalized_edit_distance") is not None:
+        log_data["eval/mean_normalized_edit_distance"] = eval_results[
+            "mean_normalized_edit_distance"
+        ]
+
+    if step is not None:
+        wandb.log(log_data, step=step)
+    else:
+        wandb.log(log_data)
+
+
+def print_eval_results(eval_results: dict):
+    """Pretty print evaluation results."""
+    logger.info("SAMPLE EVALUATION RESULTS")
+    logger.info(
+        f"Accuracy: {eval_results['exact_matches']}/{eval_results['total']} "
+        f"({eval_results['accuracy']:.1%})"
+    )
+    logger.info(
+        f"Validity: {eval_results.get('valid_programs', eval_results['total'])}/"
+        f"{eval_results['total']} ({eval_results.get('validity_rate', 1.0):.1%})"
+    )
+    if eval_results.get("mean_normalized_edit_distance") is not None:
+        logger.info(
+            f"Mean Normalized Edit Distance: "
+            f"{eval_results['mean_normalized_edit_distance']:.3f} (lower is better)"
+        )
+
+    for sample in eval_results["samples"]:
+        match_status = "✓" if sample["exact_match"] else "✗"
+        valid_status = "V" if sample.get("is_valid", True) else "X"
+        edit_dist = sample.get("normalized_edit_distance")
+        edit_str = f" ED={edit_dist:.2f}" if edit_dist is not None else ""
+        logger.info(f"[{match_status}|{valid_status}]{edit_str} {sample['key']}")
+        logger.info(f"  Target:    {sample['target']}")
+        logger.info(f"  Predicted: {sample['predicted']}")
+        if sample.get("raw_predicted") and sample["raw_predicted"] != sample["predicted"]:
+            logger.info(f"  Raw:       {sample['raw_predicted']}")
+
+
+# ─── Checkpoint Loading ──────────────────────────────────────────────────────
+
+
+def load_checkpoint(checkpoint_dir: str, device: torch.device):
+    """Load trained CrossAttentionParser from checkpoint directory."""
+    import yaml
+
+    # Find config.yaml (in checkpoint dir or parent)
+    config_path = os.path.join(checkpoint_dir, "config.yaml")
+    if not os.path.exists(config_path):
+        parent_dir = os.path.dirname(checkpoint_dir.rstrip("/"))
+        config_path = os.path.join(parent_dir, "config.yaml")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(
+            f"Config not found in: {checkpoint_dir} or parent directory"
+        )
+
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+
+    model_dtype = torch.bfloat16
+
+    load_in_4bit = config.get("load_in_4bit", False)
+    quant_config = None
+    if load_in_4bit:
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+
+    # Load tokenizer + base model
+    logger.info(f"Loading base model: {config['model_name']}")
+    tokenizer = AutoTokenizer.from_pretrained(config["model_name"])
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    base_model = AutoModelForCausalLM.from_pretrained(
+        config["model_name"],
+        torch_dtype=None if load_in_4bit else model_dtype,
+        device_map="auto",
+        low_cpu_mem_usage=not load_in_4bit,
+        quantization_config=quant_config,
+    )
+    model_hidden_size = get_model_hidden_size(base_model)
+
+    # Load LoRA adapter - try lora_adapter folder first, then pytorch_model.bin
+    lora_path = os.path.join(checkpoint_dir, "lora_adapter")
+    pytorch_model_path = os.path.join(checkpoint_dir, "pytorch_model.bin")
+
+    if os.path.exists(lora_path):
+        logger.info(f"Loading LoRA adapter from: {lora_path}")
+        base_model = PeftModel.from_pretrained(base_model, lora_path)
+    elif os.path.exists(pytorch_model_path):
+        # Load from Trainer checkpoint format - apply LoRA first then load weights
+        logger.info(f"Loading from Trainer checkpoint: {pytorch_model_path}")
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=config.get("lora_r", 16),
+            lora_alpha=config.get("lora_alpha", 32),
+            lora_dropout=0.0,  # No dropout at inference
+            target_modules=list(
+                config.get(
+                    "target_modules",
+                    ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+                )
+            ),
+            bias="none",
+        )
+        base_model = get_peft_model(base_model, lora_config)
+
+        # Load checkpoint state dict and filter for model weights
+        checkpoint = torch.load(pytorch_model_path, map_location=device)
+        model_state = {
+            k.replace("model.", "", 1): v
+            for k, v in checkpoint.items()
+            if k.startswith("model.")
+        }
+        base_model.load_state_dict(model_state, strict=False)
+        logger.info("Loaded LoRA weights from pytorch_model.bin")
+    else:
+        logger.warning(f"LoRA adapter not found at {lora_path}")
+
+    # Load ST-GCN encoder
+    encoder_path = os.path.join(checkpoint_dir, "trajectory_encoder.pt")
+    if not os.path.exists(encoder_path):
+        raise FileNotFoundError(f"Trajectory encoder not found: {encoder_path}")
+
+    num_nodes = config["motion_dim"] // 3
+    trajectory_encoder = STGCNEncoder(
+        num_nodes=num_nodes,
+        input_channels=3,
+        hidden_channels=config.get("stgcn_hidden_channels", 64),
+        output_dim=model_hidden_size,
+        num_blocks=config.get("stgcn_num_blocks", 4),
+        num_temporal_tokens=config.get("stgcn_num_temporal_tokens", 64),
+        temporal_kernel_size=config.get("stgcn_temporal_kernel", 9),
+        spatial_kernel_size=config.get("stgcn_spatial_kernel", 3),
+        dropout=config.get("stgcn_dropout", 0.1),
+        graph_strategy=config.get("graph_strategy", "spatial"),
+    ).to(device)
+
+    trajectory_encoder.load_state_dict(torch.load(encoder_path, map_location=device))
+    logger.info("Loaded ST-GCN encoder")
+
+    # Create CrossAttentionParser (injects cross-attention into LLM)
+    model = CrossAttentionParser(
+        model=base_model,
+        trajectory_encoder=trajectory_encoder,
+        tokenizer=tokenizer,
+        encoder_dim=model_hidden_size,
+        cross_attn_every_n=config.get("cross_attn_every_n", 4),
+        cross_attn_num_heads=config.get("cross_attn_num_heads", 8),
+        cross_attn_dropout=config.get("cross_attn_dropout", 0.1),
+        alignment_weight=config.get("alignment_weight", 0.1),
+        alignment_dim=config.get("alignment_dim", 256),
+        alignment_temperature=config.get("alignment_temperature", 0.07),
+    )
+
+    # Load cross-attention weights (includes alignment heads)
+    xattn_path = os.path.join(checkpoint_dir, "cross_attention.pt")
+    if os.path.exists(xattn_path):
+        logger.info(f"Loading cross-attention weights from: {xattn_path}")
+        xattn_data = torch.load(xattn_path, map_location=device)
+        model.cross_attn_layers.load_state_dict(xattn_data["cross_attn_layers"])
+        model.motion_norm.load_state_dict(xattn_data["motion_norm"])
+        if "motion_projection" in xattn_data and not isinstance(
+            model.motion_projection, torch.nn.Identity
+        ):
+            model.motion_projection.load_state_dict(xattn_data["motion_projection"])
+        # Load alignment heads if present
+        if "motion_align_head" in xattn_data:
+            model.motion_align_head.load_state_dict(xattn_data["motion_align_head"])
+        if "program_align_head" in xattn_data:
+            model.program_align_head.load_state_dict(xattn_data["program_align_head"])
+        if "logit_scale" in xattn_data:
+            model.logit_scale.data = xattn_data["logit_scale"]
+    else:
+        # Try loading from pytorch_model.bin (Trainer checkpoint format)
+        if os.path.exists(pytorch_model_path):
+            checkpoint = torch.load(pytorch_model_path, map_location="cpu")
+            xattn_state = {
+                k.replace("cross_attn_layers.", ""): v
+                for k, v in checkpoint.items()
+                if k.startswith("cross_attn_layers.")
+            }
+            if xattn_state:
+                model.cross_attn_layers.load_state_dict(xattn_state)
+                logger.info("Loaded cross-attention from pytorch_model.bin")
+            norm_state = {
+                k.replace("motion_norm.", ""): v
+                for k, v in checkpoint.items()
+                if k.startswith("motion_norm.")
+            }
+            if norm_state:
+                model.motion_norm.load_state_dict(norm_state)
+            # Try alignment heads from checkpoint
+            for prefix in ("motion_align_head.", "program_align_head."):
+                head_state = {
+                    k.replace(prefix, ""): v
+                    for k, v in checkpoint.items()
+                    if k.startswith(prefix)
+                }
+                head_name = prefix.rstrip(".")
+                if head_state:
+                    getattr(model, head_name).load_state_dict(head_state)
+                    logger.info(f"Loaded {head_name} from pytorch_model.bin")
+            if "logit_scale" in checkpoint:
+                model.logit_scale.data = checkpoint["logit_scale"]
+
+    # Move trainable components to correct device/dtype
+    for xattn in model.cross_attn_layers.values():
+        xattn.to(device=device, dtype=model_dtype)
+    model.motion_norm.to(device=device, dtype=model_dtype)
+    if not isinstance(model.motion_projection, torch.nn.Identity):
+        model.motion_projection.to(device=device, dtype=model_dtype)
+    model.motion_align_head.to(device=device, dtype=model_dtype)
+    model.program_align_head.to(device=device, dtype=model_dtype)
+    model.logit_scale.data = model.logit_scale.data.to(device=device)
+
+    model.eval()
+    logger.info(
+        f"Loaded CrossAttentionParser "
+        f"(cross-attn at layers {model.cross_attn_layer_indices})"
+    )
+
+    return model, tokenizer, config, model_dtype
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Motion-conditioned Prefix Parser")
+    parser.add_argument(
+        "--config", type=str, default="configs/parser.yaml", help="Config file"
+    )
+    parser.add_argument(
+        "--eval-only",
+        type=str,
+        default=None,
+        help="Checkpoint dir for eval only",
+    )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Resume training from checkpoint dir",
+    )
+    parser.add_argument("overrides", nargs="*", help="Config overrides (key=value)")
+    args = parser.parse_args()
+
+    # Load config
+    cfg = load_config(args.config, args.overrides)
+
+    device = get_device(cfg.get("device", "auto"))
+    model_dtype = torch.bfloat16
+    set_seed(cfg.seed)
+
+    # Handle resume vs new run
+    resume_from_checkpoint = None
+    if args.resume:
+        output_dir = Path(args.resume)
+        if not output_dir.exists():
+            raise FileNotFoundError(f"Resume directory not found: {args.resume}")
+
+        checkpoints = sorted(
+            output_dir.glob("checkpoint-*"),
+            key=lambda x: int(x.name.split("-")[1]),
+        )
+        if checkpoints:
+            resume_from_checkpoint = str(checkpoints[-1])
+            logger.info(f"Resuming from checkpoint: {resume_from_checkpoint}")
+        else:
+            logger.warning(f"No checkpoints found in {output_dir}, starting fresh")
+
+        saved_config = output_dir / "config.yaml"
+        if saved_config.exists():
+            logger.info(f"Loading config from resumed run: {saved_config}")
+            cfg = OmegaConf.load(saved_config)
+            if args.overrides:
+                override_cfg = OmegaConf.from_dotlist(args.overrides)
+                cfg = OmegaConf.merge(cfg, override_cfg)
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = Path(cfg.get("output_dir", "results/parser")) / timestamp
+        output_dir.mkdir(parents=True, exist_ok=True)
+        OmegaConf.save(cfg, output_dir / "config.yaml")
+
+    run_name = output_dir.name
+
+    # Initialize wandb
+    use_wandb = cfg.get("wandb_mode", "disabled") != "disabled" and WANDB_AVAILABLE
+    if use_wandb:
+        wandb_id_file = output_dir / "wandb_run_id.txt"
+        wandb_resume = None
+        wandb_id = None
+
+        if args.resume and wandb_id_file.exists():
+            wandb_id = wandb_id_file.read_text().strip()
+            wandb_resume = "must"
+            logger.info(f"Resuming wandb run: {wandb_id}")
+
+        wandb.init(
+            project=cfg.wandb_project,
+            entity=cfg.wandb_entity,
+            name=f"parser_{run_name}",
+            config=OmegaConf.to_container(cfg, resolve=True),
+            mode=cfg.wandb_mode,
+            id=wandb_id,
+            resume=wandb_resume,
+        )
+
+        if not wandb_id_file.exists():
+            wandb_id_file.write_text(wandb.run.id)
+
+    logger.info("Motion-conditioned Prefix Parser")
+    logger.info(f"Device: {device}")
+    logger.info(f"Output: {output_dir}")
+    if args.resume:
+        logger.info(f"Resuming from: {resume_from_checkpoint}")
+
+    # ── Eval-only mode ──────────────────────────────────────────────────────
+
+    if args.eval_only:
+        logger.info(f"Eval-only mode: {args.eval_only}")
+        model, tokenizer, _, model_dtype = load_checkpoint(args.eval_only, device)
+
+        eval_samples = load_eval_samples(
+            cfg.eval_data, n_samples=cfg.get("eval_samples", 8)
+        )
+
+        eval_results = evaluate_samples(
+            model,
+            tokenizer,
+            eval_samples,
+            device,
+            model_dtype,
+            max_new_tokens=cfg.get("generation_max_new_tokens", 256),
+            num_retries=cfg.get("generation_retries", 2),
+            retry_temperature=cfg.get("generation_retry_temperature", 0.5),
+            retry_top_p=cfg.get("generation_retry_top_p", 0.9),
+            generation_temperature=cfg.get("generation_temperature", 0.3),
+            use_constrained_decoding=cfg.get("use_constrained_decoding", True),
+            log_attempts=cfg.get("log_generation_attempts", False),
+            max_frame=cfg.get("max_frame", 1024),
+        )
+        print_eval_results(eval_results)
+
+        if use_wandb:
+            log_samples_to_wandb(eval_results)
+            wandb.finish()
+        return
+
+    # ── Training mode ───────────────────────────────────────────────────────
+
+    # [1/4] Load model and tokenizer
+    logger.info("[1/4] Loading model and tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    load_in_4bit = cfg.get("load_in_4bit", False)
+    quant_config = None
+    if load_in_4bit:
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+        logger.info("Loading base model with 4-bit quantization")
+
+    base_model = AutoModelForCausalLM.from_pretrained(
+        cfg.model_name,
+        torch_dtype=None if load_in_4bit else torch.bfloat16,
+        device_map="auto",
+        low_cpu_mem_usage=not load_in_4bit,
+        quantization_config=quant_config,
+    )
+    model_hidden_size = get_model_hidden_size(base_model)
+    logger.info(f"Model: {cfg.model_name}, hidden_size: {model_hidden_size}")
+
+    # [2/4] Apply LoRA
+    logger.info("[2/4] Applying LoRA...")
+    lora_config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=cfg.lora_r,
+        lora_alpha=cfg.lora_alpha,
+        lora_dropout=cfg.lora_dropout,
+        target_modules=list(
+            cfg.get(
+                "target_modules",
+                ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            )
+        ),
+        bias="none",
+    )
+    base_model = get_peft_model(base_model, lora_config)
+    base_model.print_trainable_parameters()
+
+    # [3/4] Initialize ST-GCN encoder
+    logger.info("[3/4] Initializing ST-GCN trajectory encoder...")
+
+    num_nodes = cfg.motion_dim // 3
+    num_temporal_tokens = cfg.get("stgcn_num_temporal_tokens", 64)
+    trajectory_encoder = STGCNEncoder(
+        num_nodes=num_nodes,
+        input_channels=3,
+        hidden_channels=cfg.get("stgcn_hidden_channels", 64),
+        output_dim=model_hidden_size,
+        num_blocks=cfg.get("stgcn_num_blocks", 4),
+        num_temporal_tokens=num_temporal_tokens,
+        temporal_kernel_size=cfg.get("stgcn_temporal_kernel", 9),
+        spatial_kernel_size=cfg.get("stgcn_spatial_kernel", 3),
+        dropout=cfg.get("stgcn_dropout", 0.1),
+        graph_strategy=cfg.get("graph_strategy", "spatial"),
+    ).to(device="cuda")  # Keep float32 for BatchNorm stability
+
+    encoder_params = sum(p.numel() for p in trajectory_encoder.parameters())
+    logger.info(
+        f"ST-GCN: {num_nodes} joints, {cfg.get('stgcn_num_blocks', 4)} blocks, "
+        f"{num_temporal_tokens} temporal tokens, {encoder_params:,} params"
+    )
+
+    # Create CrossAttentionParser
+    model = CrossAttentionParser(
+        model=base_model,
+        trajectory_encoder=trajectory_encoder,
+        tokenizer=tokenizer,
+        encoder_dim=model_hidden_size,
+        cross_attn_every_n=cfg.get("cross_attn_every_n", 4),
+        cross_attn_num_heads=cfg.get("cross_attn_num_heads", 8),
+        cross_attn_dropout=cfg.get("cross_attn_dropout", 0.1),
+        alignment_weight=cfg.get("alignment_weight", 0.1),
+        alignment_dim=cfg.get("alignment_dim", 256),
+        alignment_temperature=cfg.get("alignment_temperature", 0.07),
+    )
+
+    # Move cross-attention modules to CUDA with bf16
+    model.motion_norm = model.motion_norm.to(device="cuda", dtype=model_dtype)
+    for xattn in model.cross_attn_layers.values():
+        xattn.to(device="cuda", dtype=model_dtype)
+    if not isinstance(model.motion_projection, torch.nn.Identity):
+        model.motion_projection = model.motion_projection.to(device="cuda", dtype=model_dtype)
+
+    # Move alignment heads to CUDA
+    model.motion_align_head = model.motion_align_head.to(device="cuda", dtype=model_dtype)
+    model.program_align_head = model.program_align_head.to(device="cuda", dtype=model_dtype)
+    model.logit_scale.data = model.logit_scale.data.to(device="cuda")
+
+    cross_attn_params = sum(p.numel() for p in model.cross_attn_layers.parameters())
+    align_params = (
+        sum(p.numel() for p in model.motion_align_head.parameters())
+        + sum(p.numel() for p in model.program_align_head.parameters())
+        + 1  # logit_scale
+    )
+    proj_desc = "identity" if isinstance(model.motion_projection, torch.nn.Identity) else "linear"
+    logger.info(
+        f"CrossAttentionParser: {len(model.cross_attn_layer_indices)} cross-attn layers "
+        f"at {model.cross_attn_layer_indices}, {cross_attn_params:,} cross-attn params, "
+        f"projection={proj_desc}, alignment_weight={model.alignment_weight}, "
+        f"{align_params:,} alignment params"
+    )
+
+    # [4/4] Load datasets
+    logger.info("[4/4] Loading datasets...")
+    if not os.path.exists(cfg.train_data):
+        raise FileNotFoundError(f"Training data not found: {cfg.train_data}")
+
+    train_dataset = TrajectoryGenerationDataset(
+        path=cfg.train_data,
+        tokenizer=tokenizer,
+        max_seq_length=cfg.max_seq_length,
+    )
+    logger.info(f"Loaded {len(train_dataset)} training samples")
+
+    eval_dataset = None
+    if cfg.eval_data and os.path.exists(cfg.eval_data):
+        eval_dataset = TrajectoryGenerationDataset(
+            path=cfg.eval_data,
+            tokenizer=tokenizer,
+            max_seq_length=cfg.max_seq_length,
+        )
+        max_eval_samples = cfg.get("max_eval_samples_training", None)
+        if max_eval_samples and len(eval_dataset) > max_eval_samples:
+            import random
+
+            indices = random.sample(range(len(eval_dataset)), max_eval_samples)
+            eval_dataset = torch.utils.data.Subset(eval_dataset, indices)
+            logger.info(
+                f"Using {max_eval_samples} eval samples (subsampled for speed)"
+            )
+        else:
+            logger.info(f"Loaded {len(eval_dataset)} evaluation samples")
+
+    # ── Training arguments ──────────────────────────────────────────────────
+
+    warmup_args = {}
+    if cfg.get("warmup_ratio", 0) > 0:
+        warmup_args["warmup_ratio"] = cfg.warmup_ratio
+    elif cfg.get("warmup_steps", 0) > 0:
+        warmup_args["warmup_steps"] = cfg.warmup_steps
+
+    save_args = {
+        "save_strategy": cfg.save_strategy,
+        "save_total_limit": cfg.save_total_limit,
+    }
+    if cfg.save_strategy == "steps":
+        save_args["save_steps"] = cfg.get("save_steps", 500)
+
+    training_args = TrainingArguments(
+        output_dir=str(output_dir),
+        run_name=f"parser_{run_name}",
+        num_train_epochs=cfg.num_train_epochs,
+        per_device_train_batch_size=cfg.per_device_train_batch_size,
+        per_device_eval_batch_size=cfg.per_device_eval_batch_size,
+        gradient_accumulation_steps=cfg.gradient_accumulation_steps,
+        learning_rate=cfg.learning_rate,
+        weight_decay=cfg.weight_decay,
+        max_grad_norm=cfg.max_grad_norm,
+        lr_scheduler_type=cfg.get("lr_scheduler_type", "linear"),
+        **warmup_args,
+        **save_args,
+        logging_steps=cfg.logging_steps,
+        eval_strategy=cfg.eval_strategy if eval_dataset else "no",
+        eval_steps=cfg.get("eval_steps", 500) if eval_dataset else None,
+        load_best_model_at_end=cfg.load_best_model_at_end if eval_dataset else False,
+        metric_for_best_model=cfg.metric_for_best_model,
+        greater_is_better=False,
+        dataloader_num_workers=cfg.dataloader_num_workers,
+        dataloader_pin_memory=device.type == "cuda",
+        dataloader_prefetch_factor=cfg.get("dataloader_prefetch_factor", 2),
+        report_to="wandb" if use_wandb else "none",
+        seed=cfg.seed,
+        remove_unused_columns=False,
+        save_safetensors=False,
+        bf16=cfg.get("bf16", True),
+        gradient_checkpointing=cfg.get("gradient_checkpointing", False),
+    )
+
+    # ── Callbacks ───────────────────────────────────────────────────────────
+
+    callbacks = []
+    early_stopping_patience = cfg.get("early_stopping_patience", 0)
+    if early_stopping_patience > 0 and eval_dataset:
+        callbacks.append(
+            EarlyStoppingCallback(early_stopping_patience=early_stopping_patience)
+        )
+        logger.info(f"Early stopping enabled (patience={early_stopping_patience})")
+
+    callbacks.append(EncoderCheckpointCallback(model))
+    callbacks.append(AlignmentLoggingCallback(model))
+
+    # ── Train ───────────────────────────────────────────────────────────────
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        data_collator=get_collate_fn(tokenizer),
+        callbacks=callbacks,
+    )
+
+    if resume_from_checkpoint:
+        logger.info(f"Resuming training from: {resume_from_checkpoint}")
+    else:
+        logger.info("Starting training...")
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+
+    # ── Save ────────────────────────────────────────────────────────────────
+
+    logger.info("Saving model...")
+    trainer.save_model()
+
+    # Save encoder + cross-attention weights
+    model.save_pretrained(str(output_dir))
+
+    # Save LoRA adapter
+    base_model.save_pretrained(output_dir / "lora_adapter")
+    tokenizer.save_pretrained(output_dir / "lora_adapter")
+
+    # ── Post-training evaluation ────────────────────────────────────────────
+
+    logger.info("Running sample evaluation...")
+    eval_samples = load_eval_samples(
+        cfg.eval_data, n_samples=cfg.get("eval_samples", 8)
+    )
+
+    model.to(device)
+    eval_results = evaluate_samples(
+        model,
+        tokenizer,
+        eval_samples,
+        device,
+        model_dtype,
+        max_new_tokens=cfg.get("generation_max_new_tokens", 256),
+        num_retries=cfg.get("generation_retries", 2),
+        retry_temperature=cfg.get("generation_retry_temperature", 0.5),
+        retry_top_p=cfg.get("generation_retry_top_p", 0.9),
+        generation_temperature=cfg.get("generation_temperature", 0.3),
+        use_constrained_decoding=cfg.get("use_constrained_decoding", True),
+        log_attempts=cfg.get("log_generation_attempts", False),
+        max_frame=cfg.get("max_frame", 1024),
+    )
+    print_eval_results(eval_results)
+
+    # Save results
+    with open(output_dir / "eval_results.json", "w") as f:
+        json.dump(eval_results, f, indent=2)
+
+    if use_wandb:
+        log_samples_to_wandb(eval_results)
+        wandb.summary["final_accuracy"] = eval_results["accuracy"]
+        wandb.summary["final_validity_rate"] = eval_results["validity_rate"]
+        if eval_results.get("mean_normalized_edit_distance") is not None:
+            wandb.summary["final_mean_edit_distance"] = eval_results[
+                "mean_normalized_edit_distance"
+            ]
+        wandb.finish()
+
+    logger.success(f"Training complete! Results saved to: {output_dir}")
+
+
+if __name__ == "__main__":
+    main()

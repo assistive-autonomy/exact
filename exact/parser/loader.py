@@ -40,7 +40,7 @@ class ParserProtocol(Protocol):
 
 
 class TrainedParser:
-    """Wrapper for trained MotionConditionedParser models.
+    """Wrapper for trained CrossAttentionParser models.
     
     Loads a trained parser from a checkpoint directory and provides
     a simple parse() interface.
@@ -83,7 +83,7 @@ class TrainedParser:
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from peft import PeftModel
         
-        from exact.parser import MotionConditionedParser
+        from exact.parser.parser import CrossAttentionParser
         from exact.encoder import STGCNEncoder
         from .utils import create_grammar_processor
         
@@ -99,7 +99,7 @@ class TrainedParser:
             raise FileNotFoundError(f"Config not found at {config_path}")
         
         # Load tokenizer
-        model_name = self.config.get("model_name", "meta-llama/Llama-3.2-3B")
+        model_name = self.config.get("model_name", "/pvc/Qwen/Qwen2.5-Coder-3B")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -123,22 +123,24 @@ class TrainedParser:
         model = PeftModel.from_pretrained(base_model, adapter_path)
         
         # Create ST-GCN encoder from config
-        motion_dim = self.config.get("motion_dim", 72)
         hidden_size = self._get_model_hidden_size(model)
+        motion_dim = self.config.get("motion_dim", 72)
+        num_nodes = motion_dim // 3
         
         encoder = STGCNEncoder(
-            num_nodes=self.config.get("stgcn_num_nodes", 24),
-            input_channels=self.config.get("stgcn_input_channels", 3),
+            num_nodes=num_nodes,
+            input_channels=3,
             hidden_channels=self.config.get("stgcn_hidden_channels", 64),
             output_dim=hidden_size,
             num_blocks=self.config.get("stgcn_num_blocks", 4),
+            num_temporal_tokens=self.config.get("stgcn_num_temporal_tokens", 64),
             temporal_kernel_size=self.config.get("stgcn_temporal_kernel", 9),
             spatial_kernel_size=self.config.get("stgcn_spatial_kernel", 3),
             dropout=self.config.get("stgcn_dropout", 0.1),
             graph_strategy=self.config.get("graph_strategy", "spatial"),
         )
         
-        # Load encoder weights (try both naming conventions)
+        # Load encoder weights
         encoder_path = self.checkpoint_path / "trajectory_encoder.pt"
         if not encoder_path.exists():
             encoder_path = self.checkpoint_path / "encoder.pt"
@@ -147,23 +149,37 @@ class TrainedParser:
         
         encoder = encoder.to(self.device)
         
-        # Create parser
-        use_alignment = self.config.get("use_alignment_loss", True)
-        self.parser = MotionConditionedParser(
+        # Create CrossAttentionParser
+        self.parser = CrossAttentionParser(
             model=model,
             trajectory_encoder=encoder,
             tokenizer=self.tokenizer,
-            use_alignment_loss=use_alignment,
-            alignment_latent_dim=self.config.get("alignment_latent_dim", 256),
+            encoder_dim=hidden_size,
+            cross_attn_every_n=self.config.get("cross_attn_every_n", 4),
+            cross_attn_num_heads=self.config.get("cross_attn_num_heads", 8),
+            cross_attn_dropout=self.config.get("cross_attn_dropout", 0.1),
+            alignment_weight=self.config.get("alignment_weight", 0.1),
+            alignment_dim=self.config.get("alignment_dim", 256),
             alignment_temperature=self.config.get("alignment_temperature", 0.07),
         )
         
-        # Load projection heads if using alignment loss
-        projections_path = self.checkpoint_path / "projections.pt"
-        if use_alignment and projections_path.exists():
-            projections = torch.load(projections_path, map_location=self.device)
-            self.parser.motion_projection.load_state_dict(projections["motion"])
-            self.parser.text_projection.load_state_dict(projections["text"])
+        # Load cross-attention weights (includes alignment heads)
+        xattn_path = self.checkpoint_path / "cross_attention.pt"
+        if xattn_path.exists():
+            xattn_data = torch.load(xattn_path, map_location=self.device)
+            self.parser.cross_attn_layers.load_state_dict(xattn_data["cross_attn_layers"])
+            self.parser.motion_norm.load_state_dict(xattn_data["motion_norm"])
+            if "motion_projection" in xattn_data and not isinstance(
+                self.parser.motion_projection, torch.nn.Identity
+            ):
+                self.parser.motion_projection.load_state_dict(xattn_data["motion_projection"])
+            # Load alignment heads if present
+            if "motion_align_head" in xattn_data:
+                self.parser.motion_align_head.load_state_dict(xattn_data["motion_align_head"])
+            if "program_align_head" in xattn_data:
+                self.parser.program_align_head.load_state_dict(xattn_data["program_align_head"])
+            if "logit_scale" in xattn_data:
+                self.parser.logit_scale.data = xattn_data["logit_scale"]
         
         self.parser.eval()
         
@@ -215,7 +231,11 @@ class TrainedParser:
         )
         
         # Decode and post-process
+        from exact.data.dataset import PROMPT_PREFIX
         raw_program = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
+        # Strip prompt prefix if present
+        if raw_program.startswith(PROMPT_PREFIX):
+            raw_program = raw_program[len(PROMPT_PREFIX):]
         program, _ = post_process_program(raw_program, repair=True)
         
         return program

@@ -14,7 +14,9 @@ class TrainConfig(BaseModel):
     motion_dim: int
     motion_hidden_dim: int
     motion_num_layers: int
-    num_prefix_tokens: int
+    cross_attn_every_n: int = 4
+    cross_attn_num_heads: int = 8
+    cross_attn_dropout: float = 0.1
 
     lora_r: int
     lora_alpha: int

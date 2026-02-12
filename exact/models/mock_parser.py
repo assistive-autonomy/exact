@@ -169,7 +169,7 @@ class MockParser:
     pipeline before the real parser is trained.
     
     In the real implementation, this would be replaced by:
-        parser = MotionConditionedParser(...)
+        parser = CrossAttentionParser(...)
         program = parser.generate(motion_segment)
     """
     

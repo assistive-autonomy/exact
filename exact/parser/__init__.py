@@ -1,4 +1,6 @@
-from .parser import MotionConditionedParser, DEFAULT_SYSTEM_PROMPT
+# Cross-attention motion parser
+from .parser import CrossAttentionParser, ParserOutput
+from .cross_attention import GatedCrossAttention
 from exact.encoder import STGCNEncoder
 from .utils import (
     create_grammar_processor,
@@ -11,10 +13,13 @@ from .utils import (
 from .loader import load_parser, TrainedParser
 
 __all__ = [
-    "MotionConditionedParser",
+    # Cross-attention parser
+    "CrossAttentionParser",
+    "ParserOutput",
+    "GatedCrossAttention",
     "STGCNEncoder",
+    # Utilities
     "create_grammar_processor",
-    "DEFAULT_SYSTEM_PROMPT",
     "validate_program",
     "repair_program",
     "post_process_program",

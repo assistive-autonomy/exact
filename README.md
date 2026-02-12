@@ -339,8 +339,9 @@ uv run scripts/esk2dlc.py --esk-path /path/to/raw/esk --output-path /pvc/esk
 | Script | Purpose | Key Arguments |
 |--------|---------|---------------|
 | `run_pipeline.py` | Full ExAct pipeline | `--parser-checkpoint`, `--esk-path` |
-| `parse_esk.py` | Parse ESK motion → programs | `--parser-checkpoint`, `--mock`, `--split` |
+| `parse_esk.py` | Parse ESK motion → programs | `--parser-checkpoint`, `--label-type`, `--split` |
 | `build_models.py` | Build ActivityModelCollection | `--programs`, `--program-budget` |
+| `assessment_exec.py` | Executable model assessment (wandb) | `--train-programs`, `--label-type` |
 | `assessment_quick.py` | Quick assessment (pre-parsed) | `--programs`, `--train-programs` |
 | `assessment_edit_dist.py` | Full assessment (with parsing) | `--load-models`, `--parser-checkpoint` |
 | `augment_data.py` | Generate augmented training data | `--load-models`, `--num-samples` |

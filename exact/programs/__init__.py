@@ -6,6 +6,7 @@ from .edit_distance import (
     program_edit_distance,
     min_distance_to_model,
     batch_min_distances,
+    _compute_row_distances,
     ProgramDistanceMatrix,
     VALUE_TOLERANCE,
 )

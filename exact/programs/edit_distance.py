@@ -295,6 +295,68 @@ def batch_min_distances(
     return distances
 
 
+def _compute_row_distances(
+    query_activity_idx: int,
+    query_activity: str,
+    query_programs_data: list[tuple[list[str], list[list[int]], str]],
+    model_activities: list[str],
+    model_programs_data: dict[str, list[tuple[list[str], list[list[int]], str]]],
+    n_activities: int,
+) -> tuple[int, np.ndarray, np.ndarray]:
+    """Compute one row of the distance matrix (for parallel execution).
+    
+    Args:
+        query_activity_idx: Index of query activity in matrix
+        query_activity: Name of query activity
+        query_programs_data: List of (nodes, adj, program) tuples for queries
+        model_activities: List of all activity names
+        model_programs_data: Dict mapping activity -> list of (nodes, adj, program)
+        n_activities: Number of activities
+        
+    Returns:
+        Tuple of (row_idx, mean_distances, std_distances)
+    """
+    from edist.uted import uted
+    
+    row_means = np.zeros(n_activities)
+    row_stds = np.zeros(n_activities)
+    
+    # Reconstruct ProgramTree objects
+    query_trees = [
+        ProgramTree(nodes=nodes, adj=adj, program=prog)
+        for nodes, adj, prog in query_programs_data
+    ]
+    
+    for j, model_activity in enumerate(model_activities):
+        if model_activity not in model_programs_data:
+            continue
+            
+        model_data = model_programs_data[model_activity]
+        model_trees = [
+            ProgramTree(nodes=nodes, adj=adj, program=prog)
+            for nodes, adj, prog in model_data
+        ]
+        
+        # Compute min distance for each query
+        distances = []
+        for query in query_trees:
+            min_dist = float('inf')
+            for model in model_trees:
+                dist = uted(
+                    query.nodes, query.adj,
+                    model.nodes, model.adj,
+                    delta=None
+                )
+                if dist < min_dist:
+                    min_dist = dist
+            distances.append(min_dist)
+        
+        row_means[j] = np.mean(distances)
+        row_stds[j] = np.std(distances)
+    
+    return query_activity_idx, row_means, row_stds
+
+
 class ProgramDistanceMatrix:
     """Compute and store separability matrix using program edit distances.
     
@@ -350,18 +412,22 @@ class ProgramDistanceMatrix:
         tree = parse_to_tree(program) if isinstance(program, str) else program
         self.test_programs[activity].append(tree)
     
-    def compute_matrix(self, delta: Optional[Callable] = None, verbose: bool = True) -> np.ndarray:
+    def compute_matrix(self, delta: Optional[Callable] = None, verbose: bool = True, num_workers: int = 1) -> np.ndarray:
         """Compute the separability matrix.
         
         Args:
             delta: Optional custom cost function
             verbose: Whether to show progress
+            num_workers: Number of parallel workers (default: 1 = sequential)
             
         Returns:
             Matrix M where M[i,j] = mean min-distance from activity i tests to activity j model
         """
         import numpy as np
         from tqdm import tqdm
+        
+        if num_workers > 1:
+            return self._compute_matrix_parallel(num_workers, verbose)
         
         matrix = np.zeros((self.n_activities, self.n_activities))
         matrix_std = np.zeros((self.n_activities, self.n_activities))
@@ -387,6 +453,71 @@ class ProgramDistanceMatrix:
                 
                 matrix[i, j] = np.mean(distances)
                 matrix_std[i, j] = np.std(distances)
+        
+        self.matrix = matrix
+        self.matrix_std = matrix_std
+        
+        return matrix
+    
+    def _compute_matrix_parallel(self, num_workers: int, verbose: bool = True) -> np.ndarray:
+        """Compute the separability matrix using parallel workers.
+        
+        Args:
+            num_workers: Number of parallel workers
+            verbose: Whether to show progress
+            
+        Returns:
+            Matrix M where M[i,j] = mean min-distance from activity i tests to activity j model
+        """
+        import numpy as np
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from tqdm import tqdm
+        
+        matrix = np.zeros((self.n_activities, self.n_activities))
+        matrix_std = np.zeros((self.n_activities, self.n_activities))
+        
+        # Convert ProgramTree objects to serializable tuples
+        model_programs_data = {}
+        for activity, trees in self.model_programs.items():
+            model_programs_data[activity] = [
+                (t.nodes, t.adj, t.program) for t in trees
+            ]
+        
+        # Prepare tasks - one per query activity
+        tasks = []
+        for i, query_activity in enumerate(self.activity_names):
+            if query_activity not in self.test_programs:
+                continue
+            
+            query_data = [
+                (t.nodes, t.adj, t.program)
+                for t in self.test_programs[query_activity]
+            ]
+            tasks.append((i, query_activity, query_data))
+        
+        # Execute in parallel
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            futures = {}
+            for i, query_activity, query_data in tasks:
+                future = executor.submit(
+                    _compute_row_distances,
+                    i,
+                    query_activity,
+                    query_data,
+                    self.activity_names,
+                    model_programs_data,
+                    self.n_activities,
+                )
+                futures[future] = query_activity
+            
+            iterator = as_completed(futures)
+            if verbose:
+                iterator = tqdm(iterator, total=len(futures), desc="Computing distance matrix (parallel)")
+            
+            for future in iterator:
+                row_idx, row_means, row_stds = future.result()
+                matrix[row_idx, :] = row_means
+                matrix_std[row_idx, :] = row_stds
         
         self.matrix = matrix
         self.matrix_std = matrix_std
