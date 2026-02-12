@@ -111,6 +111,8 @@ def build_params_dict(cfg: DictConfig) -> dict:
         "model": OmegaConf.to_container(cfg.model),
         "features": OmegaConf.to_container(cfg.features),
     }
+    if "augmentations" in cfg and cfg.augmentations is not None:
+        params["augmentations"] = OmegaConf.to_container(cfg.augmentations)
     return params
 
 
@@ -186,6 +188,10 @@ def main(cfg: DictConfig):
     project_name = get_project_name(project_cfg.project_name, train_fraction)
     logger.info(f"Project name: {project_name} (train_fraction={train_fraction})")
 
+    evaluate_only = cfg.get("evaluate_only", False)
+    if evaluate_only:
+        logger.info("Evaluate-only mode enabled: skipping hyperparameter search and training")
+
     # Parse the base split file
     base_split_path = cfg.training.split_path
     base_splits = parse_split_file(base_split_path)
@@ -228,120 +234,155 @@ def main(cfg: DictConfig):
     logger.info(f"Using temp directory for split files: {temp_dir}")
 
     try:
-        # =====================================================================
-        # PHASE 1: Hyperparameter Search
-        # Use subsampled train data (same fraction) for hyperparameter tuning
-        # =====================================================================
-        logger.info(f"Running hyperparameter search for {len(models)} models...")
-        logger.info(f"  Using {train_fraction*100:.0f}% of training data for HP search")
+        if not evaluate_only:
+            # =====================================================================
+            # PHASE 1: Hyperparameter Search
+            # Use subsampled train data (same fraction) for hyperparameter tuning
+            # =====================================================================
+            logger.info(f"Running hyperparameter search for {len(models)} models...")
+            logger.info(f"  Using {train_fraction*100:.0f}% of training data for HP search")
         
-        # Create a subsampled split file for HP search (seed=0 for consistency)
-        hp_splits = subsample_train_videos(base_splits, train_fraction, seed=0)
-        hp_split_path = temp_dir / "hp_search_split.txt"
-        write_split_file(hp_splits, str(hp_split_path))
+            # Create a subsampled split file for HP search (seed=0 for consistency)
+            hp_splits = subsample_train_videos(base_splits, train_fraction, seed=0)
+            hp_split_path = temp_dir / "hp_search_split.txt"
+            write_split_file(hp_splits, str(hp_split_path))
         
-        # Parameters for hyperparameter search phase
-        hp_search_params = {
-            "general": {"model_name": None},  # Will be set per model
-            "training": {
-                "num_epochs": cfg.hyperparameter_search_epochs,
-                "partition_method": "file",
-                "split_path": str(hp_split_path),
-            },
-        }
+            # Parameters for hyperparameter search phase
+            hp_search_params = {
+                "general": {"model_name": None},  # Will be set per model
+                "training": {
+                    "num_epochs": cfg.hyperparameter_search_epochs,
+                    "partition_method": "file",
+                    "split_path": str(hp_split_path),
+                },
+            }
         
-        for model in models:
-            search_name = f"{model}_search"
+            for model in models:
+                search_name = f"{model}_search"
             
-            # Skip if search already exists
-            if search_name in existing_searches:
-                logger.info(f"  Skipping {model} - search '{search_name}' already exists")
-                continue
+                # Skip if search already exists
+                if search_name in existing_searches:
+                    logger.info(f"  Skipping {model} - search '{search_name}' already exists")
+                    continue
             
-            # Build model-specific search space
-            search_space = build_search_space(cfg, model_name=model)
-            if search_space:
-                logger.info(f"  Custom search space for {model} with {len(search_space)} parameters:")
-                for param_name, param_spec in search_space.items():
-                    logger.info(f"    - {param_name}: {param_spec}")
+                # Build model-specific search space
+                search_space = build_search_space(cfg, model_name=model)
+                if search_space:
+                    logger.info(f"  Custom search space for {model} with {len(search_space)} parameters:")
+                    for param_name, param_spec in search_space.items():
+                        logger.info(f"    - {param_name}: {param_spec}")
                 
-            logger.info(f"  Searching for {model}...")
-            hp_search_params["general"]["model_name"] = model
+                logger.info(f"  Searching for {model}...")
+                hp_search_params["general"]["model_name"] = model
             
-            if search_space:
-                # Use custom search space
-                project.run_hyperparameter_search(
-                    search_name,
-                    search_space=search_space,
-                    metric=cfg.hyperparameter_search_metric,
-                    n_trials=cfg.hyperparameter_search_trials,
-                    parameters_update=hp_search_params,
-                    force=False,
-                )
-            else:
-                # Use default search space for model
-                project.run_default_hyperparameter_search(
-                    search_name,
-                    model_name=model,
-                    num_epochs=cfg.hyperparameter_search_epochs,
-                    n_trials=cfg.hyperparameter_search_trials,
-                    metric=cfg.hyperparameter_search_metric,
-                )
+                try:
+                    if search_space:
+                        # Use custom search space
+                        project.run_hyperparameter_search(
+                            search_name,
+                            search_space=search_space,
+                            metric=cfg.hyperparameter_search_metric,
+                            n_trials=cfg.hyperparameter_search_trials,
+                            parameters_update=hp_search_params,
+                            force=False,
+                        )
+                    else:
+                        # Use default search space for model
+                        project.run_default_hyperparameter_search(
+                            search_name,
+                            model_name=model,
+                            num_epochs=cfg.hyperparameter_search_epochs,
+                            n_trials=cfg.hyperparameter_search_trials,
+                            metric=cfg.hyperparameter_search_metric,
+                        )
+                except FileExistsError:
+                    # Stale search directory from a previous incomplete run;
+                    # remove it and retry once.
+                    import shutil as _shutil
+                    stale = Path(project_cfg.projects_path) / project_name / "results" / "searches" / search_name
+                    logger.warning(f"  Stale search dir found ({stale}), removing and retrying...")
+                    _shutil.rmtree(stale, ignore_errors=True)
+                    if search_space:
+                        project.run_hyperparameter_search(
+                            search_name,
+                            search_space=search_space,
+                            metric=cfg.hyperparameter_search_metric,
+                            n_trials=cfg.hyperparameter_search_trials,
+                            parameters_update=hp_search_params,
+                            force=False,
+                        )
+                    else:
+                        project.run_default_hyperparameter_search(
+                            search_name,
+                            model_name=model,
+                            num_epochs=cfg.hyperparameter_search_epochs,
+                            n_trials=cfg.hyperparameter_search_trials,
+                            metric=cfg.hyperparameter_search_metric,
+                        )
+                except RuntimeError as e:
+                    if "zero total variance" in str(e):
+                        logger.warning(
+                            f"  Optuna param-importance plot failed for {model} "
+                            f"(zero variance across trials). Search results are still saved."
+                        )
+                    else:
+                        raise
             
-            # Clean up memory after each model's hyperparameter search
-            logger.info(f"  Cleaning up memory after {model} search...")
-            cleanup_memory()
+                # Clean up memory after each model's hyperparameter search
+                logger.info(f"  Cleaning up memory after {model} search...")
+                cleanup_memory()
 
         # =====================================================================
         # PHASE 2: Final Training
         # Train with best hyperparameters, each seed uses different random subset
         # =====================================================================
-        logger.info(f"Training final models for {len(models)} architectures...")
-        logger.info(f"  Using {train_fraction*100:.0f}% of training data, {num_seeds} seeds each")
+        if not evaluate_only:
+            logger.info(f"Training final models for {len(models)} architectures...")
+            logger.info(f"  Using {train_fraction*100:.0f}% of training data, {num_seeds} seeds each")
         
-        for model in models:
-            search_name = f"{model}_search"
+            for model in models:
+                search_name = f"{model}_search"
             
-            # Check if search exists (required for training)
-            current_searches = set(project.list_searches().index.tolist())
-            if search_name not in existing_searches and search_name not in current_searches:
-                logger.warning(f"  Skipping {model} training - search '{search_name}' not found")
-                continue
-            
-            # Train each seed with a different random subset
-            for seed_idx in range(num_seeds):
-                episode_name = f"{model}_best_seed{seed_idx}"
-                
-                # Skip if episode already exists
-                if episode_name in existing_episodes:
-                    logger.info(f"  Skipping {model} seed {seed_idx} - episode '{episode_name}' already exists")
+                # Check if search exists (required for training)
+                current_searches = set(project.list_searches().index.tolist())
+                if search_name not in existing_searches and search_name not in current_searches:
+                    logger.warning(f"  Skipping {model} training - search '{search_name}' not found")
                     continue
+            
+                # Train each seed with a different random subset
+                for seed_idx in range(num_seeds):
+                    episode_name = f"{model}_best_seed{seed_idx}"
                 
-                logger.info(f"  Training {model} seed {seed_idx}/{num_seeds-1}...")
+                    # Skip if episode already exists
+                    if episode_name in existing_episodes:
+                        logger.info(f"  Skipping {model} seed {seed_idx} - episode '{episode_name}' already exists")
+                        continue
                 
-                # Create subsampled split file for this seed
-                seed_splits = subsample_train_videos(base_splits, train_fraction, seed=seed_idx)
-                seed_split_path = temp_dir / f"train_split_seed{seed_idx}.txt"
-                write_split_file(seed_splits, str(seed_split_path))
+                    logger.info(f"  Training {model} seed {seed_idx}/{num_seeds-1}...")
                 
-                # Run single episode (n_seeds=1 since we handle seeds manually)
-                project.run_episode(
-                    episode_name,
-                    load_search=search_name,
-                    parameters_update={
-                        "general": {"model_name": model},
-                        "training": {
-                            "num_epochs": cfg.training.num_epochs,
-                            "partition_method": "file",
-                            "split_path": str(seed_split_path),
+                    # Create subsampled split file for this seed
+                    seed_splits = subsample_train_videos(base_splits, train_fraction, seed=seed_idx)
+                    seed_split_path = temp_dir / f"train_split_seed{seed_idx}.txt"
+                    write_split_file(seed_splits, str(seed_split_path))
+                
+                    # Run single episode (n_seeds=1 since we handle seeds manually)
+                    project.run_episode(
+                        episode_name,
+                        load_search=search_name,
+                        parameters_update={
+                            "general": {"model_name": model},
+                            "training": {
+                                "num_epochs": cfg.training.num_epochs,
+                                "partition_method": "file",
+                                "split_path": str(seed_split_path),
+                            },
                         },
-                    },
-                    n_seeds=1,  # We handle seeds manually for different subsets
-                    force=False,
-                )
+                        n_seeds=1,  # We handle seeds manually for different subsets
+                        force=False,
+                    )
                 
-                # Clean up memory after each seed
-                cleanup_memory()
+                    # Clean up memory after each seed
+                    cleanup_memory()
 
         # =====================================================================
         # PHASE 3: Final Evaluation on Test Set

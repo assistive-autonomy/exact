@@ -41,27 +41,32 @@ def load_train_test_split(split_file: Path) -> tuple[list[str], list[str]]:
 
 
 def load_pose_file(pose_path: Path) -> tuple[np.ndarray, str]:
-    """Load SMPL pose data from HDF5 file."""
+    """Load SMPL pose data from HDF5 file.
+
+    Returns axis-angle rotations with joints ordered as
+    ``SMPL_KEYPOINTS`` (24 joints).
+
+    Args:
+        pose_path: Path to HDF5 pose file.
+
+    Returns:
+        (pose_data, individual_id) where pose_data has shape (T, 24, 3).
+    """
     df = pd.read_hdf(pose_path)
 
     # Get individual ID from columns
     individual_id = df.columns.get_level_values("individuals").unique()[0]
 
-    # Reshape: (T, V*4) -> (T, V, 4) -> (T, V, 3) (drop likelihood)
+    # Extract per-keypoint xyz (drop likelihood column)
     n_frames = len(df)
     n_keypoints = len(SMPL_KEYPOINTS)
 
     pose_data = np.zeros((n_frames, n_keypoints, 3), dtype=np.float32)
     for i, kp in enumerate(SMPL_KEYPOINTS):
-        pose_data[:, i, 0] = (
-            df.iloc[:, df.columns.get_level_values("bodyparts") == kp].iloc[:, 0].values
-        )  # x
-        pose_data[:, i, 1] = (
-            df.iloc[:, df.columns.get_level_values("bodyparts") == kp].iloc[:, 1].values
-        )  # y
-        pose_data[:, i, 2] = (
-            df.iloc[:, df.columns.get_level_values("bodyparts") == kp].iloc[:, 2].values
-        )  # z
+        cols = df.columns.get_level_values("bodyparts") == kp
+        pose_data[:, i, 0] = df.iloc[:, cols].iloc[:, 0].values  # x
+        pose_data[:, i, 1] = df.iloc[:, cols].iloc[:, 1].values  # y
+        pose_data[:, i, 2] = df.iloc[:, cols].iloc[:, 2].values  # z
 
     return pose_data, individual_id
 

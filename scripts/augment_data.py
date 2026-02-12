@@ -93,7 +93,9 @@ def load_training_segments(
     Returns:
         Dictionary mapping activity_name -> list of segment info dicts
     """
-    from exact.data.utils import load_labels, load_pose_data, extract_segment_poses
+    from exact.data.utils import load_labels, extract_segment_poses
+    from exact.data.esk import load_pose_file
+    from exact.data.env import smpl_rotations_to_positions
     
     all_segments = {}
     activity_names = None
@@ -106,7 +108,9 @@ def load_training_segments(
             logger.warning(f"Missing files for {video_name}, skipping")
             continue
         
-        poses = load_pose_data(str(pose_file))
+        # Load SMPL axis-angle rotations (T, 24, 3) and convert to positions (T, 72)
+        pose_data, _ = load_pose_file(pose_file)
+        poses = smpl_rotations_to_positions(pose_data)  # (T, 72)
         labels = load_labels(str(label_file))
         
         if activity_names is None:
@@ -213,41 +217,40 @@ def create_executable_models(
 
 
 def observation_to_pose96(obs: np.ndarray) -> np.ndarray:
-    """Convert HumEnv observation (358-dim) to ESK pose format (96-dim).
+    """Convert HumEnv observation (358-dim) to ESK-compatible pose format (96-dim).
     
-    This is a simplified conversion that extracts the most relevant
-    pose information for the ESK format.
+    Extracts root-relative 3D joint positions from the HumEnv observation
+    (24 joints × 3 xyz = 72 dims), then appends a likelihood column per
+    joint to produce the 96-dim format expected by DLC2Action:
+    24 joints × 4 (x, y, z, likelihood).
     
     Args:
         obs: HumEnv observation [358] or [N, 358]
         
     Returns:
-        ESK pose [96] or [N, 96]
+        ESK-compatible pose [96] or [N, 96]
     """
-    # HumEnv observation structure (358 dims):
-    # - root_h_obs: [0:1] - root height
-    # - local_body_pos: [1:70] - 23 joints * 3 (x,y,z) relative to root
-    # - local_body_rot_obs: [70:214] - rotations
-    # - local_body_vel: [214:286] - velocities
-    # - local_body_ang_vel: [286:358] - angular velocities
-    
-    # ESK format uses 96 dims (32 joints * 3)
-    # We'll use: root height + local_body_pos (69 dims) + some rotations
+    from exact.data.env import extract_joint_positions
     
     is_batched = obs.ndim > 1
     if not is_batched:
         obs = obs[np.newaxis, :]
     
-    # Extract relevant features
-    root_h = obs[:, 0:1]  # 1
-    local_pos = obs[:, 1:70]  # 69 (23 joints * 3)
-    # Pad with some rotation info to reach 96 dims
-    local_rot = obs[:, 70:96]  # 26 dims to reach 96 total
+    # Extract root-relative joint positions: (N, 72) = 24 joints × 3 xyz
+    joint_positions = extract_joint_positions(obs)  # (N, 72)
     
-    pose96 = np.concatenate([root_h, local_pos, local_rot], axis=-1)
+    # Reshape to (N, 24, 3) for per-joint processing
+    positions_3d = joint_positions.reshape(-1, 24, 3)
+    
+    # Add likelihood column (1.0 = confident) per joint
+    likelihood = np.ones((*positions_3d.shape[:-1], 1), dtype=np.float32)
+    
+    # Concatenate: (x, y, z, likelihood) per joint → (N, 24, 4) → flatten to (N, 96)
+    pose_with_lik = np.concatenate([positions_3d, likelihood], axis=-1)
+    pose96 = pose_with_lik.reshape(-1, 96)
     
     if not is_batched:
-        pose96 = pose96.squeeze(0)
+        pose96 = pose96[0]
     
     return pose96.astype(np.float32)
 

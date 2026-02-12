@@ -169,8 +169,9 @@ def load_training_segments(
                     logger.debug(f"Cannot read poses from {pose_file}")
                     continue
         
-        # Convert SMPL format (96 features: 24 joints * 4 [x,y,z,likelihood]) 
-        # to parser format (72 features: 24 joints * 3 [x,y,z])
+        # Convert 96-dim (24 joints × 4 [x, y, z, likelihood])
+        # to 72-dim (24 joints × 3, dropping likelihood).
+        # Joints are in SMPL_KEYPOINTS order.
         if poses.shape[1] == 96:
             # Remove likelihood column every 4th feature
             n_joints = 24

@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-# SMPL keypoint names (24 keypoints)
+# SMPL keypoint names (24 keypoints) — canonical ordering used everywhere
 SMPL_KEYPOINTS = [
     "Pelvis",
     "L_Hip",
@@ -32,6 +32,27 @@ SMPL_KEYPOINTS = [
     "R_Wrist",
     "R_Hand",
 ]
+
+# ---------------------------------------------------------------------------
+# Raw SMPL fitting order → SMPL_KEYPOINTS permutation
+#
+# The raw CSV from SMPL body fitting uses the canonical SMPL parameter order:
+#   0:Pelvis 1:L_Hip 2:R_Hip 3:Spine1 4:L_Knee 5:R_Knee 6:Spine2
+#   7:L_Ankle 8:R_Ankle 9:Spine3 10:L_Foot 11:R_Foot 12:Neck
+#   13:L_Collar 14:R_Collar 15:Head 16:L_Shoulder 17:R_Shoulder
+#   18:L_Elbow 19:R_Elbow 20:L_Wrist 21:R_Wrist 22:L_Hand 23:R_Hand
+#
+# _RAW_TO_SMPL_PERM[j] gives the raw index whose data belongs at
+# SMPL_KEYPOINTS[j].
+# ---------------------------------------------------------------------------
+_RAW_TO_SMPL = {
+    0: 0, 1: 1, 2: 5, 3: 9, 4: 2, 5: 6, 6: 10, 7: 3, 8: 7,
+    9: 11, 10: 4, 11: 8, 12: 12, 13: 14, 14: 19, 15: 13,
+    16: 15, 17: 20, 18: 16, 19: 21, 20: 17, 21: 22, 22: 18, 23: 23,
+}
+_RAW_TO_SMPL_PERM = np.empty(24, dtype=int)
+for _raw, _out in _RAW_TO_SMPL.items():
+    _RAW_TO_SMPL_PERM[_out] = _raw
 
 
 def extract_episode_info(file_path: Path) -> tuple[str, str, str] | None:
@@ -98,8 +119,13 @@ def convert_pose_file(pose_file: Path, output_path: Path) -> bool:
         else:
             pose_padded = pose_array[:, :expected_size]
 
-        # Reshape to (frames, keypoints, 3)
+        # Reshape to (frames, keypoints, 3) — still in raw SMPL fitting order
         pose_array = pose_padded.reshape(n_frames, n_keypoints, 3)
+
+        # Reorder from raw SMPL fitting order to SMPL_KEYPOINTS order.
+        # Raw CSV:        Pelvis, L_Hip, R_Hip, Spine1, L_Knee, R_Knee, ...
+        # SMPL_KEYPOINTS: Pelvis, L_Hip, L_Knee, L_Ankle, L_Toe, R_Hip, ...
+        pose_array = pose_array[:, _RAW_TO_SMPL_PERM, :]
 
         # Create likelihood column based on coordinate variance
         # Padded coordinates (0, 0, 0) get low likelihood, real coordinates get high likelihood

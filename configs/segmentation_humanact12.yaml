@@ -1,18 +1,19 @@
-# Activity Segmentation Configuration (DLC2Action)
+# Activity Segmentation Configuration - HumanAct12 (DLC2Action)
+# Converted from HumanAct12 dataset using scripts/convert_humanact12.py
 
 project:
-  project_name: esk_verbs
+  project_name: humanact12_actions_augment
   projects_path: dlc2a_benchmark
   data_type: dlc_track
   annotation_type: dlc
-  data_path: ../esk/D2A_converted_pose_smpl
-  annotation_path: ../esk/D2A_converted_label_verbs
+  data_path: ../humanact12/D2A_converted_pose_smpl
+  annotation_path: ../humanact12/D2A_converted_label_actions
 
 general:
   model_name: c2f_tcn
   metric_functions: [precision, recall, f1]
   ignored_clips: null
-  len_segment: 1028
+  len_segment: 512
   overlap: 0.75
   interactive: false
   exclusive: false
@@ -29,19 +30,21 @@ data:
   filter_background: false
   visibility_min_score: 0
   visibility_min_frac: 0
-  num_cpus: 2  # Limit parallel workers to reduce memory usage
+  num_cpus: 2
 
 training:
   lr: 0.001
   device: auto
   num_epochs: 50
-  to_ram: false
-  batch_size: 32  # Reduced from 64 to lower memory usage
+  to_ram: true
+  batch_size: 32
+  augment_train: 1
+  augment_val: 0
   normalize: true
   temporal_subsampling_size: 0.85
   parallel: false
   partition_method: file
-  split_path: ../esk/trainvaltest_split.txt
+  split_path: ../humanact12/trainvaltest_split.txt
 
 losses:
   ms_tcn:
@@ -79,13 +82,8 @@ hyperparameter_search_metric: f1
 num_seeds: 3
 models: [ms_tcn3, c2f_tcn, edtcn, c2f_transformer]
 
-# Fraction of training data to use (1.0 = 100%, 0.5 = 50%, 0.25 = 25%)
-# Each seed will use a different random subset of training videos
-# Validation and test sets remain unchanged
 train_fraction: 1.0
 
-# Custom hyperparameter search space (only search these parameters)
-# Set to null to use default search space for each model
 hyperparameter_search_space:
   losses/ms_tcn/focal:
     type: categorical
@@ -104,8 +102,8 @@ hyperparameter_search_space:
     high: 128
   general/len_segment:
     type: categorical
-    choices: [1024] 
+    choices: [512]
 
-output_dir: results/segmentation
+output_dir: results/segmentation_humanact12
 training_curves_path: training_curves.png
-results_table_path: results_verbs_50.csv
+results_table_path: results_humanact12_augment_100.csv

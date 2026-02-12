@@ -123,15 +123,26 @@ def generate_trajectory(
 
     return all_obss, all_actions
 
-def load_pose_data(pose_path: str) -> np.ndarray:
+def load_pose_data(pose_path: str, as_positions: bool = False) -> np.ndarray:
     """Load pose data from ESK HDF5 file.
     
     Args:
         pose_path: Path to pose HDF5 file
-        
+        as_positions: If True, convert axis-angle rotations to root-relative
+            3D joint positions via MuJoCo FK. Returns (T, 72) instead of (T, 96).
+            
     Returns:
-        Pose array of shape [num_frames, 96]
+        Pose array of shape [num_frames, 96] (raw, SMPL_KEYPOINTS order,
+        24 joints × 4 [ax-angle x, y, z, likelihood]) or
+        [num_frames, 72] (positions, 24 joints × 3 [x, y, z]).
     """
+    if as_positions:
+        from exact.data.esk import load_pose_file
+        from exact.data.env import smpl_rotations_to_positions
+        
+        pose_data, _ = load_pose_file(pose_path)  # (T, 24, 3) axis-angle
+        return smpl_rotations_to_positions(pose_data)  # (T, 72) positions
+    
     with h5py.File(pose_path, "r") as f:
         table = f["tracks/table"][:]
         poses = table["values_block_0"]

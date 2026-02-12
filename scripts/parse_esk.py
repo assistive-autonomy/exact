@@ -52,6 +52,9 @@ from tqdm import tqdm
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from exact.data.esk import load_pose_file
+from exact.data.env import smpl_rotations_to_positions
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Parse ESK dataset into programs")
@@ -164,6 +167,11 @@ def load_segments_from_video(
 ) -> dict[str, list[dict]]:
     """Load all segments from a single video.
     
+    Loads SMPL axis-angle rotations from ESK HDF5, converts them to
+    root-relative 3D joint positions via MuJoCo forward kinematics,
+    and returns segments as (T, 72) position arrays matching the format
+    used for parser training.
+    
     Returns:
         Dict mapping activity_name -> list of segment dicts with 'poses', 'start', 'end'
     """
@@ -174,18 +182,17 @@ def load_segments_from_video(
         logger.warning(f"Missing files for {video_name}")
         return {}
     
-    # Load poses
-    with h5py.File(pose_file, "r") as f:
-        if "tracks" in f and "table" in f["tracks"]:
-            poses = f["tracks"]["table"]["values_block_0"][:]
-        else:
-            # Try direct array
-            keys = list(f.keys())
-            if keys:
-                poses = f[keys[0]][:]
-            else:
-                logger.warning(f"Cannot read poses from {pose_file}")
-                return {}
+    # Load SMPL axis-angle rotations (T, 24, 3) via pandas reader
+    try:
+        pose_data, _ = load_pose_file(pose_file)
+    except Exception as e:
+        logger.warning(f"Cannot read poses from {pose_file}: {e}")
+        return {}
+    
+    # Convert axis-angle rotations → root-relative 3D positions (T, 72)
+    # This matches the format produced by generate_data.py / extract_joint_positions()
+    logger.debug(f"Converting {video_name}: {pose_data.shape[0]} frames, rotations → positions")
+    poses = smpl_rotations_to_positions(pose_data)  # (T, 72)
     
     # Load labels
     with open(label_file, "rb") as f:
