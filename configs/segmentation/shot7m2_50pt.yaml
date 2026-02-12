@@ -1,0 +1,103 @@
+project:
+  project_name: shot7m2_50pt
+  projects_path: dlc2a_benchmark
+  data_type: dlc_track
+  annotation_type: dlc
+  data_path: ../shot7m2/D2A_converted_pose_smpl
+  annotation_path: ../shot7m2/annotations
+
+general:
+  model_name: c2f_tcn
+  metric_functions: [precision, recall, f1]
+  ignored_clips: null
+  len_segment: 1028
+  overlap: 0.75
+  interactive: false
+  exclusive: false
+
+data:
+  data_suffix: _pose3d_smpl.h5
+  feature_suffix: null
+  annotation_suffix: _annotations.pickle
+  canvas_shape: [100, 100, 100]
+  ignored_bodyparts: null
+  likelihood_threshold: 0
+  behaviors: null
+  filter_annotated: false
+  filter_background: false
+  visibility_min_score: 0
+  visibility_min_frac: 0
+  num_cpus: 2  # Limit parallel workers to reduce memory usage
+
+training:
+  lr: 0.001
+  device: auto
+  num_epochs: 50
+  to_ram: false
+  batch_size: 32  # Reduced from 64 to lower memory usage
+  normalize: true
+  temporal_subsampling_size: 0.85
+  parallel: false
+  partition_method: file
+  split_path: ../shot7m2/split.txt
+
+losses:
+  ms_tcn:
+    focal: true
+    gamma: 2
+    alpha: 0.001
+
+metrics:
+  f1:
+    average: macro
+    ignored_classes: null
+    threshold_value: 0.5
+
+features:
+  keys: [coords, speed_joints, acc_joints, angle, intra_distance, coord_diff, center, speed_direction]
+  averaging_window: 1
+  distance_pairs: null
+  angle_pairs: null
+  zone_vertices: null
+  zone_bools: null
+  zone_distances: null
+  area_vertices: null
+
+augmentations:
+  use_default_augmentations: true
+  augmentations: null
+
+model:
+  num_f_maps: 128
+  feature_dim: null
+
+hyperparameter_search_epochs: 10
+hyperparameter_search_trials: 20
+hyperparameter_search_metric: f1
+num_seeds: 3
+models: [ms_tcn3, c2f_tcn, edtcn, c2f_transformer]
+
+train_fraction: 0.5
+
+hyperparameter_search_space:
+  losses/ms_tcn/focal:
+    type: categorical
+    choices: [true, false]
+  losses/ms_tcn/alpha:
+    type: float_log
+    low: 0.00001
+    high: 0.01
+  training/temporal_subsampling_size:
+    type: float
+    low: 0.75
+    high: 1.0
+  model/num_f_maps:
+    type: int_log
+    low: 32
+    high: 128
+  general/len_segment:
+    type: categorical
+    choices: [1024] 
+
+output_dir: results/segmentation
+results_table_path: results_shot7m2_50.csv
