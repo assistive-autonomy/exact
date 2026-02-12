@@ -170,7 +170,7 @@ def build_search_space(cfg: DictConfig, model_name: str = None) -> dict:
     return search_space
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="segmentation")
+@hydra.main(version_base=None, config_path="../../configs", config_name="segmentation")
 def main(cfg: DictConfig):
     """Run activity segmentation with DLC2Action framework."""
     logger.info("Activity Segmentation Configuration")

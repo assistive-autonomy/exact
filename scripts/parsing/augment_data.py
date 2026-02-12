@@ -13,13 +13,10 @@ Workflow:
 5. Save augmented data in ESK format for DLC2Action pipeline
 
 Usage:
-    python scripts/augment_data.py --config configs/augmentation.yaml
-    
-    # Or with command-line overrides:
-    python scripts/augment_data.py \
-        --train-fraction 0.25 \
-        --num-samples 10000 \
-        --output-dir data/augmented
+    python scripts/parsing/augment_data.py \
+        --load-models /pvc/esk/models.json \
+        --num-samples 1000 \
+        --output-dir /pvc/esk/augmented
 """
 
 import argparse
@@ -593,7 +590,7 @@ def main():
     # Print usage instructions
     print("\n" + "="*60)
     print("To use augmented data with segmentation:")
-    print(f"  python scripts/segmentation.py \\")
+    print(f"  python scripts/tasks/segmentation.py \\")
     print(f"    project.data_path={output_dir} \\")
     print(f"    project.annotation_path={output_dir} \\")
     print(f"    training.split_path=<new_split_file>")

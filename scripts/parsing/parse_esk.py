@@ -27,13 +27,13 @@ Output format:
 
 Usage:
     # Parse training data with trained parser
-    uv run scripts/parse_esk.py --parser-checkpoint results/parser/<checkpoint>
+    uv run scripts/parsing/parse_esk.py --parser-checkpoint results/parser/<checkpoint>
     
     # Parse 50% of training data (for reduced experiments)
-    uv run scripts/parse_esk.py --parser-checkpoint results/parser/<checkpoint> --train-fraction 0.5
+    uv run scripts/parsing/parse_esk.py --parser-checkpoint results/parser/<checkpoint> --train-fraction 0.5
     
     # Use mock parser for testing pipeline
-    uv run scripts/parse_esk.py --mock
+    uv run scripts/parsing/parse_esk.py --mock
 """
 
 import argparse

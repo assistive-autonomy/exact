@@ -97,9 +97,13 @@ class TestValidateProgram:
             assert validate_program(program) is True, f"Joint '{joint}' should be valid"
 
     def test_valid_with_whitespace(self):
-        """Test that programs with whitespace are valid (after ignoring ws)."""
-        # The grammar now includes %ignore for whitespace
-        assert validate_program("[0, 20] head.y(1.65)") is True
+        """Programs with whitespace should be rejected by validate but accepted after repair."""
+        # validate_program rejects whitespace (fast char-whitelist check)
+        assert validate_program("[0, 20] head.y(1.65)") is False
+        # But repair_program + validate should work
+        from exact.parser.utils import repair_program
+        repaired = repair_program("[0, 20] head.y(1.65)")
+        assert validate_program(repaired) is True
 
 
 class TestRepairProgram:

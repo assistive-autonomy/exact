@@ -19,12 +19,12 @@ Workflow:
 
 Usage:
     # Using pre-parsed programs (fast)
-    uv run scripts/assessment_exec.py \
+    uv run scripts/tasks/assessment_exec.py \
         --train-programs /pvc/esk/programs_train.json \
         --label-type verbs
 
     # Parse on the fly (slower, uses LLM)
-    uv run scripts/assessment_exec.py \
+    uv run scripts/tasks/assessment_exec.py \
         --parser-checkpoint results/parser/20260122_225017 \
         --label-type activity
 """

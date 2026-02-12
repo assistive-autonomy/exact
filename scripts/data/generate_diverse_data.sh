@@ -45,7 +45,7 @@ echo ""
 # Subset 1: Simple programs (1-2 segments, 1-2 predicates)
 # ----------------------------------------------------------
 echo "[1/10] Simple programs (1-2 segments, 1-2 predicates)..."
-uv run python scripts/generate_data.py \
+uv run python scripts/data/generate_data.py \
     --name subset_01_simple \
     --num-samples $SAMPLES_PER_SUBSET \
     --output-dir "$SUBSET_DIR" \
@@ -60,7 +60,7 @@ uv run python scripts/generate_data.py \
 # Subset 2: Complex programs (8-10 segments, 4-5 predicates)
 # ----------------------------------------------------------
 echo "[2/10] Complex programs (8-10 segments, 4-5 predicates)..."
-uv run python scripts/generate_data.py \
+uv run python scripts/data/generate_data.py \
     --name subset_02_complex \
     --num-samples $SAMPLES_PER_SUBSET \
     --output-dir "$SUBSET_DIR" \
@@ -75,7 +75,7 @@ uv run python scripts/generate_data.py \
 # Subset 3: Upper body focus
 # ----------------------------------------------------------
 echo "[3/10] Upper body focus..."
-uv run python scripts/generate_data.py \
+uv run python scripts/data/generate_data.py \
     --name subset_03_upper_body \
     --num-samples $SAMPLES_PER_SUBSET \
     --output-dir "$SUBSET_DIR" \
@@ -87,7 +87,7 @@ uv run python scripts/generate_data.py \
 # Subset 4: Lower body focus
 # ----------------------------------------------------------
 echo "[4/10] Lower body focus..."
-uv run python scripts/generate_data.py \
+uv run python scripts/data/generate_data.py \
     --name subset_04_lower_body \
     --num-samples $SAMPLES_PER_SUBSET \
     --output-dir "$SUBSET_DIR" \
@@ -99,7 +99,7 @@ uv run python scripts/generate_data.py \
 # Subset 5: Subtle movements (low multipliers 0.0-1.0)
 # ----------------------------------------------------------
 echo "[5/10] Subtle movements (low multipliers)..."
-uv run python scripts/generate_data.py \
+uv run python scripts/data/generate_data.py \
     --name subset_05_subtle \
     --num-samples $SAMPLES_PER_SUBSET \
     --output-dir "$SUBSET_DIR" \
@@ -113,7 +113,7 @@ uv run python scripts/generate_data.py \
 # Subset 6: Extreme movements (high multipliers 1.0-2.0)
 # ----------------------------------------------------------
 echo "[6/10] Extreme movements (high multipliers)..."
-uv run python scripts/generate_data.py \
+uv run python scripts/data/generate_data.py \
     --name subset_06_extreme \
     --num-samples $SAMPLES_PER_SUBSET \
     --output-dir "$SUBSET_DIR" \
@@ -127,7 +127,7 @@ uv run python scripts/generate_data.py \
 # Subset 7: Short precise segments (many short intervals)
 # ----------------------------------------------------------
 echo "[7/10] Short precise segments..."
-uv run python scripts/generate_data.py \
+uv run python scripts/data/generate_data.py \
     --name subset_07_short_segments \
     --num-samples $SAMPLES_PER_SUBSET \
     --output-dir "$SUBSET_DIR" \
@@ -141,7 +141,7 @@ uv run python scripts/generate_data.py \
 # Subset 8: Long broad segments (few long intervals)
 # ----------------------------------------------------------
 echo "[8/10] Long broad segments..."
-uv run python scripts/generate_data.py \
+uv run python scripts/data/generate_data.py \
     --name subset_08_long_segments \
     --num-samples $SAMPLES_PER_SUBSET \
     --output-dir "$SUBSET_DIR" \
@@ -157,7 +157,7 @@ echo "[9/10] Single axis focus (mixed)..."
 # Split into 3 sub-batches for each axis
 AXIS_SAMPLES=$((SAMPLES_PER_SUBSET / 3))
 
-uv run python scripts/generate_data.py \
+uv run python scripts/data/generate_data.py \
     --name subset_09a_x_axis \
     --num-samples $AXIS_SAMPLES \
     --output-dir "$SUBSET_DIR" \
@@ -165,7 +165,7 @@ uv run python scripts/generate_data.py \
     --num-workers $NUM_WORKERS \
     --allowed-axes "x"
 
-uv run python scripts/generate_data.py \
+uv run python scripts/data/generate_data.py \
     --name subset_09b_y_axis \
     --num-samples $AXIS_SAMPLES \
     --output-dir "$SUBSET_DIR" \
@@ -173,7 +173,7 @@ uv run python scripts/generate_data.py \
     --num-workers $NUM_WORKERS \
     --allowed-axes "y"
 
-uv run python scripts/generate_data.py \
+uv run python scripts/data/generate_data.py \
     --name subset_09c_z_axis \
     --num-samples $AXIS_SAMPLES \
     --output-dir "$SUBSET_DIR" \
@@ -185,7 +185,7 @@ uv run python scripts/generate_data.py \
 # Subset 10: Mixed diversity (balanced parameters)
 # ----------------------------------------------------------
 echo "[10/10] Mixed diversity (balanced)..."
-uv run python scripts/generate_data.py \
+uv run python scripts/data/generate_data.py \
     --name subset_10_mixed \
     --num-samples $SAMPLES_PER_SUBSET \
     --output-dir "$SUBSET_DIR" \
@@ -202,7 +202,7 @@ echo "Merging all subsets into single training file"
 echo "=============================================="
 
 # Merge all HDF5 files
-uv run python scripts/merge_datasets.py \
+uv run python scripts/data/merge_datasets.py \
     --input-dir "$SUBSET_DIR" \
     --output "$OUTPUT_DIR/train_diverse.h5" \
     --shuffle

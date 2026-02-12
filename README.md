@@ -28,9 +28,9 @@ uv venv && uv sync
 
 ```bash
 # Train parser on synthetic data
-uv run scripts/generate_data.py --name train --num-samples 10000
-uv run scripts/generate_data.py --name eval --num-samples 1000
-uv run scripts/parser.py
+uv run scripts/data/generate_data.py --name train --num-samples 10000
+uv run scripts/data/generate_data.py --name eval --num-samples 1000
+uv run scripts/parsing/train_parser.py
 
 # Once parser is trained, run the full ESK pipeline (see below)
 ```
@@ -41,28 +41,6 @@ uv run scripts/parser.py
 
 After training the parser, use these scripts to process the ESK dataset:
 
-### Full Pipeline (Recommended)
-
-Run all steps with a single command:
-
-```bash
-# Full pipeline with trained parser
-uv run scripts/run_pipeline.py \
-    --parser-checkpoint results/parser/20260122_225017 \
-    --esk-path /pvc/esk
-
-# Skip parsing if programs already exist
-uv run scripts/run_pipeline.py \
-    --skip-parsing \
-    --programs /pvc/esk/programs_train.json
-
-# Quick test with fewer programs
-uv run scripts/run_pipeline.py \
-    --parser-checkpoint results/parser/20260122_225017 \
-    --max-programs 20 \
-    --max-test-programs 10
-```
-
 ### Step-by-Step Pipeline
 
 #### Step 1: Parse ESK → Programs
@@ -71,7 +49,7 @@ Convert motion segments from the ESK dataset into symbolic programs:
 
 ```bash
 # Parse training data with trained parser
-uv run scripts/parse_esk.py \
+uv run scripts/parsing/parse_esk.py \
     --parser-checkpoint results/parser/20260122_225017 \
     --esk-path /pvc/esk \
     --split train
@@ -111,11 +89,11 @@ Compile parsed programs into ActivityModelCollection:
 
 ```bash
 # Build models from parsed programs
-uv run scripts/build_models.py \
+uv run scripts/parsing/build_models.py \
     --programs /pvc/esk/programs_train.json
 
 # With program budget (select 50 diverse programs per activity)
-uv run scripts/build_models.py \
+uv run scripts/parsing/build_models.py \
     --programs /pvc/esk/programs_train.json \
     --program-budget 50 \
     --output /pvc/esk/models.json
@@ -135,7 +113,7 @@ Evaluate activity separability using program edit distance:
 **Quick Assessment** (uses pre-parsed programs, no LLM inference needed):
 
 ```bash
-uv run scripts/assessment_quick.py \
+uv run scripts/tasks/assessment_quick.py \
     --programs /pvc/esk/programs_train.json \
     --output-dir results/assessment_quick \
     --train-programs 15 \
@@ -145,7 +123,7 @@ uv run scripts/assessment_quick.py \
 **Full Assessment** (parses test data with LLM):
 
 ```bash
-uv run scripts/assessment_edit_dist.py \
+uv run scripts/tasks/assessment_edit_dist.py \
     --load-models /pvc/esk/models.json \
     --parser-checkpoint results/parser/20260122_225017 \
     --max-train-programs 50 \
@@ -159,7 +137,7 @@ Output:
 #### Step 4: Generate Augmented Data (Optional)
 
 ```bash
-uv run scripts/augment_data.py \
+uv run scripts/parsing/augment_data.py \
     --load-models /pvc/esk/models.json \
     --num-samples 1000 \
     --output-dir /pvc/esk/augmented
@@ -169,10 +147,10 @@ uv run scripts/augment_data.py \
 
 ```bash
 # Baseline segmentation
-uv run scripts/segmentation.py
+uv run scripts/tasks/segmentation.py
 
 # With augmented data
-uv run scripts/segmentation.py project.data_path=/pvc/esk/augmented
+uv run scripts/tasks/segmentation.py project.data_path=/pvc/esk/augmented
 ```
 
 ---
@@ -207,8 +185,8 @@ Train a motion-conditioned parser on a single GPU (e.g., H200).
 
 1. Generate synthetic data:
 ```bash
-uv run scripts/generate_data.py --name train --num-samples 15000 --output-dir ../exact_data
-uv run scripts/generate_data.py --name eval --num-samples 1000 --output-dir ../exact_data
+uv run scripts/data/generate_data.py --name train --num-samples 15000 --output-dir ../exact_data
+uv run scripts/data/generate_data.py --name eval --num-samples 1000 --output-dir ../exact_data
 ```
 
 2. Login to HuggingFace for model access:
@@ -220,13 +198,13 @@ huggingface-cli login
 
 ```bash
 # Default training (uses configs/parser.yaml)
-uv run scripts/parser.py
+uv run scripts/parsing/train_parser.py
 
 # Custom hyperparameters
-uv run scripts/parser.py num_train_epochs=20 learning_rate=1e-5
+uv run scripts/parsing/train_parser.py num_train_epochs=20 learning_rate=1e-5
 
 # Evaluate checkpoint
-uv run scripts/parser.py --eval-only results/parser/20260122_225017
+uv run scripts/parsing/train_parser.py --eval-only results/parser/20260122_225017
 ```
 
 ### Configuration
@@ -338,17 +316,17 @@ uv run scripts/esk2dlc.py --esk-path /path/to/raw/esk --output-path /pvc/esk
 
 | Script | Purpose | Key Arguments |
 |--------|---------|---------------|
-| `run_pipeline.py` | Full ExAct pipeline | `--parser-checkpoint`, `--esk-path` |
-| `parse_esk.py` | Parse ESK motion → programs | `--parser-checkpoint`, `--label-type`, `--split` |
-| `build_models.py` | Build ActivityModelCollection | `--programs`, `--program-budget` |
-| `assessment_exec.py` | Executable model assessment (wandb) | `--train-programs`, `--label-type` |
-| `assessment_quick.py` | Quick assessment (pre-parsed) | `--programs`, `--train-programs` |
-| `assessment_edit_dist.py` | Full assessment (with parsing) | `--load-models`, `--parser-checkpoint` |
-| `augment_data.py` | Generate augmented training data | `--load-models`, `--num-samples` |
-| `segmentation.py` | Temporal action segmentation | `train_fraction`, `project.data_path` |
-| `parser.py` | Train motion-conditioned parser | `--eval-only`, config overrides |
-| `generate_data.py` | Generate synthetic training data | `--name`, `--num-samples` |
-| `assessment.py` | Flow-based assessment (baseline) | config overrides |
+| `scripts/parsing/train_parser.py` | Train motion-conditioned parser | `--eval-only`, config overrides |
+| `scripts/parsing/parse_esk.py` | Parse ESK motion → programs | `--parser-checkpoint`, `--label-type`, `--split` |
+| `scripts/parsing/build_models.py` | Build ActivityModelCollection | `--programs`, `--program-budget` |
+| `scripts/parsing/augment_data.py` | Generate augmented training data | `--load-models`, `--num-samples` |
+| `scripts/tasks/assessment_exec.py` | Executable model assessment (wandb) | `--train-programs`, `--label-type` |
+| `scripts/tasks/assessment_quick.py` | Quick assessment (pre-parsed) | `--programs`, `--train-programs` |
+| `scripts/tasks/assessment_edit_dist.py` | Full assessment (with parsing) | `--load-models`, `--parser-checkpoint` |
+| `scripts/tasks/assessment.py` | Flow-based assessment (baseline) | config overrides |
+| `scripts/tasks/segmentation.py` | Temporal action segmentation | `train_fraction`, `project.data_path` |
+| `scripts/data/generate_data.py` | Generate synthetic training data | `--name`, `--num-samples` |
+| `scripts/data/generate_diverse_data.sh` | Generate diverse training data | `[output_dir]`, `[total_samples]` |
 
 ---
 
@@ -375,15 +353,22 @@ exact/
 └── programs/         # Program grammar, edit distance, selection
 
 scripts/
-├── run_pipeline.py       # Full pipeline orchestration
-├── parse_esk.py          # ESK → programs
-├── build_models.py       # Programs → executable models
-├── assessment_quick.py   # Quick assessment (pre-parsed)
-├── assessment_edit_dist.py  # Full assessment
-├── augment_data.py       # Data augmentation
-├── segmentation.py       # Action segmentation
-├── parser.py             # Parser training
-└── generate_data.py      # Synthetic data generation
+├── parsing/
+│   ├── train_parser.py       # Parser training
+│   ├── parse_esk.py          # ESK → programs
+│   ├── build_models.py       # Programs → executable models
+│   ├── augment_data.py       # Data augmentation
+│   └── retrieval_baseline.py # Encoder retrieval baseline
+├── tasks/
+│   ├── assessment_quick.py   # Quick assessment (pre-parsed)
+│   ├── assessment_edit_dist.py  # Full assessment
+│   ├── assessment_exec.py    # Executable model assessment (wandb)
+│   ├── assessment.py         # Flow-based assessment (baseline)
+│   └── segmentation.py       # Action segmentation
+└── data/
+    ├── generate_data.py      # Synthetic data generation
+    ├── generate_diverse_data.sh  # Diverse data generation
+    └── merge_datasets.py     # Merge HDF5 datasets
 
 configs/
 ├── parser.yaml           # Parser training config
@@ -398,20 +383,20 @@ configs/
 
 ```bash
 # 1. Generate synthetic data and train parser
-uv run scripts/generate_data.py --name train --num-samples 15000
-uv run scripts/generate_data.py --name eval --num-samples 1000
-uv run scripts/parser.py
+uv run scripts/data/generate_data.py --name train --num-samples 15000
+uv run scripts/data/generate_data.py --name eval --num-samples 1000
+uv run scripts/parsing/train_parser.py
 
 # 2. Parse ESK dataset with trained parser
-uv run scripts/parse_esk.py --parser-checkpoint results/parser/<checkpoint>
+uv run scripts/parsing/parse_esk.py --parser-checkpoint results/parser/<checkpoint>
 
 # 3. Build executable models
-uv run scripts/build_models.py --programs /pvc/esk/programs_train.json --program-budget 100
+uv run scripts/parsing/build_models.py --programs /pvc/esk/programs_train.json --program-budget 100
 
 # 4. Run assessment
-uv run scripts/assessment_quick.py --programs /pvc/esk/programs_train.json
+uv run scripts/tasks/assessment_quick.py --programs /pvc/esk/programs_train.json
 
 # 5. (Optional) Generate augmented data and run segmentation
-uv run scripts/augment_data.py --load-models /pvc/esk/models.json --num-samples 5000
-uv run scripts/segmentation.py project.data_path=/pvc/esk/augmented
+uv run scripts/parsing/augment_data.py --load-models /pvc/esk/models.json --num-samples 5000
+uv run scripts/tasks/segmentation.py project.data_path=/pvc/esk/augmented
 ```

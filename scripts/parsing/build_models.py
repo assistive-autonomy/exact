@@ -23,13 +23,13 @@ The collection is saved as a JSON file with the following structure:
 
 Usage:
     # Build models from parsed programs
-    uv run scripts/build_models.py --programs ../esk/programs_train.json
+    uv run scripts/parsing/build_models.py --programs ../esk/programs_train.json
     
     # Build models with program budget (select diverse subset)
-    uv run scripts/build_models.py --programs ../esk/programs_train.json --program-budget 50
+    uv run scripts/parsing/build_models.py --programs ../esk/programs_train.json --program-budget 50
     
     # Custom output path
-    uv run scripts/build_models.py --programs ../esk/programs_train.json --output ../esk/models.json
+    uv run scripts/parsing/build_models.py --programs ../esk/programs_train.json --output ../esk/models.json
 """
 
 import argparse
