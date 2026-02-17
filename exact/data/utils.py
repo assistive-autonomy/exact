@@ -1,3 +1,4 @@
+import re
 import pickle
 import h5py
 from pathlib import Path
@@ -9,6 +10,75 @@ import torch
 from exact.data.env import HumEnv, extract_joint_positions, JOINT_POS_DIM
 from exact.bm import BehaviourModel
 from exact.programs.rewards import SensorReward, Reward
+
+
+# ── Joint-activity label extraction ──────────────────────────────────────────
+
+# Canonical ordering of program joint names (matches grammar + BODY_PARTS)
+PROGRAM_JOINTS = [
+    "pelvis", "torso", "spine", "chest", "neck", "head",
+    "lhip", "lknee", "lankle", "ltoe",
+    "rhip", "rknee", "rankle", "rtoe",
+    "lthorax", "lshoulder", "lelbow", "lwrist", "lhand",
+    "rthorax", "rshoulder", "relbow", "rwrist", "rhand",
+]
+JOINT_TO_IDX = {j: i for i, j in enumerate(PROGRAM_JOINTS)}
+NUM_PROGRAM_JOINTS = len(PROGRAM_JOINTS)
+
+# Pre-compiled regex for fast segment extraction
+# Matches: [start,end]joint.axis(value)*...  (semicolon-separated segments)
+_SEGMENT_RE = re.compile(
+    r"\[(-?\d+(?:\.\d*)?),\s*(-?\d+(?:\.\d*)?)\]"   # [start,end]
+    r"((?:[a-z]+\.[xyz]\(-?[\d.]+\)\*?)+)"           # joint.axis(val)*...
+)
+_JOINT_RE = re.compile(r"([a-z]+)\.([xyz])\(")
+
+
+def extract_joint_activity_labels(
+    program: str,
+    num_temporal_tokens: int,
+    max_frame: int = 1024,
+) -> torch.Tensor:
+    """Extract per-token joint activity labels from a program string.
+
+    For each temporal token (covering a time window of the motion), produces
+    a 24-dim binary vector indicating which joints are active in that window.
+
+    Args:
+        program: Program string, e.g. "[0,512]head.y(1.5)*rwrist.z(0.4);[512,1024]pelvis.y(0.8)"
+        num_temporal_tokens: Number of temporal tokens the encoder produces
+        max_frame: Total number of frames in the motion sequence
+
+    Returns:
+        labels: [num_temporal_tokens, 24] binary float tensor
+    """
+    labels = torch.zeros(num_temporal_tokens, NUM_PROGRAM_JOINTS)
+    frames_per_token = max_frame / num_temporal_tokens
+
+    for match in _SEGMENT_RE.finditer(program):
+        seg_start = float(match.group(1))
+        seg_end = float(match.group(2))
+        sensors_str = match.group(3)
+
+        # Which joints appear in this segment?
+        active_joints = set()
+        for jmatch in _JOINT_RE.finditer(sensors_str):
+            joint_name = jmatch.group(1)
+            if joint_name in JOINT_TO_IDX:
+                active_joints.add(JOINT_TO_IDX[joint_name])
+
+        if not active_joints:
+            continue
+
+        # Which temporal tokens overlap with this segment?
+        tok_start = max(0, int(seg_start / frames_per_token))
+        tok_end = min(num_temporal_tokens, int(np.ceil(seg_end / frames_per_token)))
+
+        for tok_idx in range(tok_start, tok_end):
+            for joint_idx in active_joints:
+                labels[tok_idx, joint_idx] = 1.0
+
+    return labels
 
 
 @torch.inference_mode()

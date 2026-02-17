@@ -2,7 +2,7 @@ from exact.data import HumEnv, TrajectoryGenerationDataset
 from exact.bm import BehaviourModel
 from exact.programs import Reward, generate_program, parse_program
 from exact.config import TrainConfig
-from exact.parser import CrossAttentionParser
+from exact.parser import MotionPrefixParser
 from exact.encoder import STGCNEncoder
 from exact.data.utils import generate_motion, generate_trajectory
 from exact.models import (
@@ -21,7 +21,7 @@ __all__ = [
     "generate_program",
     "parse_program",
     "TrainConfig",
-    "CrossAttentionParser",
+    "MotionPrefixParser",
     "STGCNEncoder",
     "TrajectoryGenerationDataset",
     "generate_motion",

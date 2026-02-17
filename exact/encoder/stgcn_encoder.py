@@ -83,11 +83,13 @@ class STGCNEncoder(nn.Module):
         self.temporal_pool = nn.AdaptiveAvgPool2d((num_temporal_tokens, num_nodes))
 
         # Output projection to target embedding space (per temporal token)
+        # Direct projection avoids bottleneck: hidden_channels*num_nodes → output_dim
+        # (Previous hidden_channels*4=256 intermediate caused 6:1 compression of joint info)
         self.output_projection = nn.Sequential(
-            nn.Linear(hidden_channels * num_nodes, hidden_channels * 4),
+            nn.Linear(hidden_channels * num_nodes, output_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_channels * 4, output_dim),
+            nn.Linear(output_dim, output_dim),
             nn.LayerNorm(output_dim),
         )
 

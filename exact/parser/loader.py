@@ -40,7 +40,7 @@ class ParserProtocol(Protocol):
 
 
 class TrainedParser:
-    """Wrapper for trained CrossAttentionParser models.
+    """Wrapper for trained MotionPrefixParser models.
     
     Loads a trained parser from a checkpoint directory and provides
     a simple parse() interface.
@@ -83,7 +83,7 @@ class TrainedParser:
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from peft import PeftModel
         
-        from exact.parser.parser import CrossAttentionParser
+        from exact.parser.parser import MotionPrefixParser
         from exact.encoder import STGCNEncoder
         from .utils import create_grammar_processor
         
@@ -133,7 +133,7 @@ class TrainedParser:
             hidden_channels=self.config.get("stgcn_hidden_channels", 64),
             output_dim=hidden_size,
             num_blocks=self.config.get("stgcn_num_blocks", 4),
-            num_temporal_tokens=self.config.get("stgcn_num_temporal_tokens", 64),
+            num_temporal_tokens=self.config.get("stgcn_num_temporal_tokens", 16),
             temporal_kernel_size=self.config.get("stgcn_temporal_kernel", 9),
             spatial_kernel_size=self.config.get("stgcn_spatial_kernel", 3),
             dropout=self.config.get("stgcn_dropout", 0.1),
@@ -149,37 +149,31 @@ class TrainedParser:
         
         encoder = encoder.to(self.device)
         
-        # Create CrossAttentionParser
-        self.parser = CrossAttentionParser(
+        # Create MotionPrefixParser
+        self.parser = MotionPrefixParser(
             model=model,
             trajectory_encoder=encoder,
             tokenizer=self.tokenizer,
             encoder_dim=hidden_size,
-            cross_attn_every_n=self.config.get("cross_attn_every_n", 4),
-            cross_attn_num_heads=self.config.get("cross_attn_num_heads", 8),
-            cross_attn_dropout=self.config.get("cross_attn_dropout", 0.1),
             alignment_weight=self.config.get("alignment_weight", 0.1),
             alignment_dim=self.config.get("alignment_dim", 256),
             alignment_temperature=self.config.get("alignment_temperature", 0.07),
+            joint_loss_weight=self.config.get("joint_loss_weight", 0.5),
         )
         
-        # Load cross-attention weights (includes alignment heads)
-        xattn_path = self.checkpoint_path / "cross_attention.pt"
-        if xattn_path.exists():
-            xattn_data = torch.load(xattn_path, map_location=self.device)
-            self.parser.cross_attn_layers.load_state_dict(xattn_data["cross_attn_layers"])
-            self.parser.motion_norm.load_state_dict(xattn_data["motion_norm"])
-            if "motion_projection" in xattn_data and not isinstance(
-                self.parser.motion_projection, torch.nn.Identity
-            ):
-                self.parser.motion_projection.load_state_dict(xattn_data["motion_projection"])
-            # Load alignment heads if present
-            if "motion_align_head" in xattn_data:
-                self.parser.motion_align_head.load_state_dict(xattn_data["motion_align_head"])
-            if "program_align_head" in xattn_data:
-                self.parser.program_align_head.load_state_dict(xattn_data["program_align_head"])
-            if "logit_scale" in xattn_data:
-                self.parser.logit_scale.data = xattn_data["logit_scale"]
+        # Load parser weights (projection + alignment + joint heads)
+        parser_weights_path = self.checkpoint_path / "prefix_parser.pt"
+        if parser_weights_path.exists():
+            weights = torch.load(parser_weights_path, map_location=self.device)
+            self.parser.motion_projection.load_state_dict(weights["motion_projection"])
+            if "motion_align_head" in weights:
+                self.parser.motion_align_head.load_state_dict(weights["motion_align_head"])
+            if "program_align_head" in weights:
+                self.parser.program_align_head.load_state_dict(weights["program_align_head"])
+            if "logit_scale" in weights:
+                self.parser.logit_scale.data = weights["logit_scale"]
+            if "joint_head" in weights:
+                self.parser.joint_head.load_state_dict(weights["joint_head"])
         
         self.parser.eval()
         

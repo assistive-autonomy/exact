@@ -3,7 +3,7 @@ device: auto
 
 # Data (relative to project root)
 train_data: ../exact_data/train_diverse.h5
-eval_data: ../exact_data/eval.h5
+eval_data: ../exact_data/eval_mid.h5
 
 # Output
 output_dir: results/parser
@@ -27,32 +27,33 @@ max_frame: 1024
 
 # ========== ST-GCN ENCODER ==========
 # Motion encoder using Spatial-Temporal Graph Convolutional Networks
-# output_dim = 2048 = matches Qwen-3B hidden_size (no projection needed!)
+# output_dim = 2048 = matches Qwen-3B hidden_size
 motion_dim: 72  # 24 joints * 3 (x, y, z)
 graph_strategy: spatial
 
 stgcn_hidden_channels: 64
 stgcn_num_blocks: 4
-stgcn_num_temporal_tokens: 64  # Fine-grained temporal resolution
+stgcn_num_temporal_tokens: 16  # Coarser tokens (~64 frames each) — programs have few segments
 stgcn_temporal_kernel: 9
 stgcn_spatial_kernel: 3
 stgcn_dropout: 0.1
 
-# ========== PREFIX CONDITIONING ==========
-# Cross-attention layers inject motion info at every Nth decoder layer.
-# For Qwen2.5-3B (36 layers), every_n=4 gives 9 cross-attn layers.
-# Gated cross-attention (gate init=0) ensures stable training start.
-cross_attn_every_n: 4
-cross_attn_num_heads: 8
-cross_attn_dropout: 0.1
+# ========== CONDITIONING ==========
+# Motion tokens are projected and prepended as prefix to text embeddings.
+# The LLM's native self-attention handles motion-to-text conditioning.
 
-# ========== INFONCE ALIGNMENT ==========
-# Contrastive loss aligns motion encoder latent space with LLM program
-# embeddings. Matching (motion, program) pairs are pulled together.
-# Total loss = LM_loss + alignment_weight * InfoNCE_loss
+# ========== AUXILIARY LOSSES ==========
+# InfoNCE: contrastive loss aligns motion encoder with LLM program embeddings.
+# Joint BCE: per-temporal-token classification of which joints are active.
+# Total loss = LM_loss + alignment_weight * InfoNCE + joint_loss_weight * BCE
 alignment_weight: 0.1
 alignment_dim: 256
 alignment_temperature: 0.07
+
+# ========== JOINT-ACTIVITY AUXILIARY LOSS ==========
+# Per-temporal-token binary classification: which of 24 joints are active?
+# Directly supervises the encoder to preserve per-joint identity.
+joint_loss_weight: 0.5
 
 # ========== LORA CONFIG ==========
 # Reduced rank (16 vs 32) — 3B model needs less adaptation capacity
@@ -64,10 +65,10 @@ lora_dropout: 0.05
 num_train_epochs: 25
 per_device_train_batch_size: 16     # 3B model fits larger batch
 per_device_eval_batch_size: 16
-learning_rate: 3e-5                  # Slightly higher LR for smaller model
+learning_rate: 5e-5                  # Single LR for all components
 weight_decay: 0.01
 max_grad_norm: 1.0
-warmup_ratio: 0.1
+warmup_ratio: 0.15                   # Longer warmup for encoder stability
 lr_scheduler_type: cosine
 gradient_accumulation_steps: 2       # Effective batch = 32
 dataloader_num_workers: 8

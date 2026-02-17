@@ -93,4 +93,5 @@ class TrajectoryGenerationDataset(Dataset):
             "input_ids": encoded["input_ids"].squeeze(0),
             "attention_mask": encoded["attention_mask"].squeeze(0),
             "obs": obs,
+            "program": program,
         }

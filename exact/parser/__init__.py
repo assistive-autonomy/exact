@@ -1,6 +1,7 @@
-# Cross-attention motion parser
-from .parser import CrossAttentionParser, ParserOutput
-from .cross_attention import GatedCrossAttention
+"""Motion parser: ST-GCN prefix-conditioned LLM for motion-to-program translation."""
+
+from .parser import MotionPrefixParser, ParserOutput
+
 from exact.encoder import STGCNEncoder
 from .utils import (
     create_grammar_processor,
@@ -13,10 +14,8 @@ from .utils import (
 from .loader import load_parser, TrainedParser
 
 __all__ = [
-    # Cross-attention parser
-    "CrossAttentionParser",
+    "MotionPrefixParser",
     "ParserOutput",
-    "GatedCrossAttention",
     "STGCNEncoder",
     # Utilities
     "create_grammar_processor",

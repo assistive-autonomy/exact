@@ -1,7 +1,9 @@
 #!/usr/bin/env python
-"""Motion-conditioned Prefix Parser: training and evaluation.
+"""Motion Parser: training and evaluation.
 
 Architecture: ST-GCN motion prefix tokens + LoRA fine-tuned LLM.
+Motion tokens are prepended as prefix embeddings, and the LLM's native
+self-attention handles conditioning.
 """
 
 import json
@@ -34,7 +36,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from exact.data import TrajectoryGenerationDataset
 from exact.data.dataset import PROMPT_PREFIX
-from exact.parser import CrossAttentionParser
+from exact.data.utils import extract_joint_activity_labels
+from exact.parser import MotionPrefixParser
 from exact.parser.utils import create_grammar_processor
 from exact.encoder import STGCNEncoder
 
@@ -83,18 +86,47 @@ def get_model_hidden_size(model) -> int:
     raise AttributeError(f"Cannot find hidden_size in model config: {type(config)}")
 
 
-def get_collate_fn(tokenizer):
-    """Create a collate function for the dataloader."""
+def get_collate_fn(tokenizer, prompt_prefix: str = PROMPT_PREFIX, num_temporal_tokens: int = 16, max_frame: int = 1024):
+    """Create a collate function with proper label masking.
+
+    Labels are set to -100 for:
+        - Padding tokens (attention_mask == 0)
+        - Prompt prefix tokens ("Program: ")
+    Only actual program tokens + EOS contribute to the LM loss.
+
+    Also computes per-temporal-token joint activity labels for the
+    auxiliary joint classification loss.
+    """
+    # Pre-compute prompt prefix token count
+    prompt_token_ids = tokenizer(
+        prompt_prefix, add_special_tokens=False, return_tensors="pt"
+    )["input_ids"]
+    prompt_len = prompt_token_ids.shape[1]
 
     def collate_fn(batch):
         input_ids = torch.stack([x["input_ids"] for x in batch])
         attention_mask = torch.stack([x["attention_mask"] for x in batch])
         obs = torch.stack([x["obs"] for x in batch])
+
+        # Create labels with proper masking
+        labels = input_ids.clone()
+        labels[attention_mask == 0] = -100     # mask padding
+        labels[:, :prompt_len] = -100          # mask prompt prefix
+
+        # Extract joint activity labels from program strings
+        joint_activity_labels = torch.stack([
+            extract_joint_activity_labels(
+                x["program"], num_temporal_tokens, max_frame
+            )
+            for x in batch
+        ])
+
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "motion": obs,
-            "labels": input_ids.clone(),
+            "labels": labels,
+            "joint_activity_labels": joint_activity_labels,
         }
 
     return collate_fn
@@ -104,9 +136,9 @@ def get_collate_fn(tokenizer):
 
 
 class EncoderCheckpointCallback(TrainerCallback):
-    """Save encoder and cross-attention weights with each checkpoint."""
+    """Save encoder and projection weights with each checkpoint."""
 
-    def __init__(self, parser_model: CrossAttentionParser):
+    def __init__(self, parser_model):
         self.parser_model = parser_model
 
     def on_save(self, args, state, control, **kwargs):
@@ -121,7 +153,7 @@ class EncoderCheckpointCallback(TrainerCallback):
 class AlignmentLoggingCallback(TrainerCallback):
     """Log lm_loss and alignment_loss as separate wandb/log metrics."""
 
-    def __init__(self, parser_model: CrossAttentionParser):
+    def __init__(self, parser_model):
         self.parser_model = parser_model
         self._last_lm_loss = None
         self._last_alignment_loss = None
@@ -136,6 +168,8 @@ class AlignmentLoggingCallback(TrainerCallback):
         if hasattr(m, "_last_alignment_loss") and m._last_alignment_loss is not None:
             logs["train/alignment_loss"] = m._last_alignment_loss
             logs["train/logit_scale"] = m.logit_scale.exp().item()
+        if hasattr(m, "_last_joint_loss") and m._last_joint_loss is not None:
+            logs["train/joint_loss"] = m._last_joint_loss
 
 
 # ─── Evaluation ───────────────────────────────────────────────────────────────
@@ -161,7 +195,7 @@ def load_eval_samples(h5_path: str, n_samples: int = 8):
 
 @torch.no_grad()
 def evaluate_samples(
-    model: CrossAttentionParser,
+    model,
     tokenizer,
     samples: list,
     device: torch.device,
@@ -382,7 +416,7 @@ def print_eval_results(eval_results: dict):
 
 
 def load_checkpoint(checkpoint_dir: str, device: torch.device):
-    """Load trained CrossAttentionParser from checkpoint directory."""
+    """Load trained MotionPrefixParser from checkpoint directory."""
     import yaml
 
     # Find config.yaml (in checkpoint dir or parent)
@@ -425,7 +459,7 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
     )
     model_hidden_size = get_model_hidden_size(base_model)
 
-    # Load LoRA adapter - try lora_adapter folder first, then pytorch_model.bin
+    # Load LoRA adapter
     lora_path = os.path.join(checkpoint_dir, "lora_adapter")
     pytorch_model_path = os.path.join(checkpoint_dir, "pytorch_model.bin")
 
@@ -433,13 +467,12 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
         logger.info(f"Loading LoRA adapter from: {lora_path}")
         base_model = PeftModel.from_pretrained(base_model, lora_path)
     elif os.path.exists(pytorch_model_path):
-        # Load from Trainer checkpoint format - apply LoRA first then load weights
         logger.info(f"Loading from Trainer checkpoint: {pytorch_model_path}")
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             r=config.get("lora_r", 16),
             lora_alpha=config.get("lora_alpha", 32),
-            lora_dropout=0.0,  # No dropout at inference
+            lora_dropout=0.0,
             target_modules=list(
                 config.get(
                     "target_modules",
@@ -449,8 +482,6 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
             bias="none",
         )
         base_model = get_peft_model(base_model, lora_config)
-
-        # Load checkpoint state dict and filter for model weights
         checkpoint = torch.load(pytorch_model_path, map_location=device)
         model_state = {
             k.replace("model.", "", 1): v
@@ -474,7 +505,7 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
         hidden_channels=config.get("stgcn_hidden_channels", 64),
         output_dim=model_hidden_size,
         num_blocks=config.get("stgcn_num_blocks", 4),
-        num_temporal_tokens=config.get("stgcn_num_temporal_tokens", 64),
+        num_temporal_tokens=config.get("stgcn_num_temporal_tokens", 16),
         temporal_kernel_size=config.get("stgcn_temporal_kernel", 9),
         spatial_kernel_size=config.get("stgcn_spatial_kernel", 3),
         dropout=config.get("stgcn_dropout", 0.1),
@@ -484,86 +515,44 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
     trajectory_encoder.load_state_dict(torch.load(encoder_path, map_location=device))
     logger.info("Loaded ST-GCN encoder")
 
-    # Create CrossAttentionParser (injects cross-attention into LLM)
-    model = CrossAttentionParser(
+    # Create MotionPrefixParser
+    model = MotionPrefixParser(
         model=base_model,
         trajectory_encoder=trajectory_encoder,
         tokenizer=tokenizer,
         encoder_dim=model_hidden_size,
-        cross_attn_every_n=config.get("cross_attn_every_n", 4),
-        cross_attn_num_heads=config.get("cross_attn_num_heads", 8),
-        cross_attn_dropout=config.get("cross_attn_dropout", 0.1),
         alignment_weight=config.get("alignment_weight", 0.1),
         alignment_dim=config.get("alignment_dim", 256),
         alignment_temperature=config.get("alignment_temperature", 0.07),
+        joint_loss_weight=config.get("joint_loss_weight", 0.5),
     )
 
-    # Load cross-attention weights (includes alignment heads)
-    xattn_path = os.path.join(checkpoint_dir, "cross_attention.pt")
-    if os.path.exists(xattn_path):
-        logger.info(f"Loading cross-attention weights from: {xattn_path}")
-        xattn_data = torch.load(xattn_path, map_location=device)
-        model.cross_attn_layers.load_state_dict(xattn_data["cross_attn_layers"])
-        model.motion_norm.load_state_dict(xattn_data["motion_norm"])
-        if "motion_projection" in xattn_data and not isinstance(
-            model.motion_projection, torch.nn.Identity
-        ):
-            model.motion_projection.load_state_dict(xattn_data["motion_projection"])
-        # Load alignment heads if present
-        if "motion_align_head" in xattn_data:
-            model.motion_align_head.load_state_dict(xattn_data["motion_align_head"])
-        if "program_align_head" in xattn_data:
-            model.program_align_head.load_state_dict(xattn_data["program_align_head"])
-        if "logit_scale" in xattn_data:
-            model.logit_scale.data = xattn_data["logit_scale"]
+    # Load parser weights (projection + alignment + joint heads)
+    prefix_path = os.path.join(checkpoint_dir, "prefix_parser.pt")
+    if os.path.exists(prefix_path):
+        logger.info(f"Loading parser weights from: {prefix_path}")
+        prefix_data = torch.load(prefix_path, map_location=device)
+        model.motion_projection.load_state_dict(prefix_data["motion_projection"])
+        if "motion_align_head" in prefix_data:
+            model.motion_align_head.load_state_dict(prefix_data["motion_align_head"])
+        if "program_align_head" in prefix_data:
+            model.program_align_head.load_state_dict(prefix_data["program_align_head"])
+        if "logit_scale" in prefix_data:
+            model.logit_scale.data = prefix_data["logit_scale"]
+        if "joint_head" in prefix_data:
+            model.joint_head.load_state_dict(prefix_data["joint_head"])
     else:
-        # Try loading from pytorch_model.bin (Trainer checkpoint format)
-        if os.path.exists(pytorch_model_path):
-            checkpoint = torch.load(pytorch_model_path, map_location="cpu")
-            xattn_state = {
-                k.replace("cross_attn_layers.", ""): v
-                for k, v in checkpoint.items()
-                if k.startswith("cross_attn_layers.")
-            }
-            if xattn_state:
-                model.cross_attn_layers.load_state_dict(xattn_state)
-                logger.info("Loaded cross-attention from pytorch_model.bin")
-            norm_state = {
-                k.replace("motion_norm.", ""): v
-                for k, v in checkpoint.items()
-                if k.startswith("motion_norm.")
-            }
-            if norm_state:
-                model.motion_norm.load_state_dict(norm_state)
-            # Try alignment heads from checkpoint
-            for prefix in ("motion_align_head.", "program_align_head."):
-                head_state = {
-                    k.replace(prefix, ""): v
-                    for k, v in checkpoint.items()
-                    if k.startswith(prefix)
-                }
-                head_name = prefix.rstrip(".")
-                if head_state:
-                    getattr(model, head_name).load_state_dict(head_state)
-                    logger.info(f"Loaded {head_name} from pytorch_model.bin")
-            if "logit_scale" in checkpoint:
-                model.logit_scale.data = checkpoint["logit_scale"]
+        logger.warning(f"Parser weights not found at {prefix_path}")
 
-    # Move trainable components to correct device/dtype
-    for xattn in model.cross_attn_layers.values():
-        xattn.to(device=device, dtype=model_dtype)
-    model.motion_norm.to(device=device, dtype=model_dtype)
-    if not isinstance(model.motion_projection, torch.nn.Identity):
-        model.motion_projection.to(device=device, dtype=model_dtype)
+    # Move to correct device/dtype
+    model.motion_projection.to(device=device, dtype=model_dtype)
     model.motion_align_head.to(device=device, dtype=model_dtype)
     model.program_align_head.to(device=device, dtype=model_dtype)
+    model.joint_head.to(device=device, dtype=model_dtype)
     model.logit_scale.data = model.logit_scale.data.to(device=device)
 
     model.eval()
-    logger.info(
-        f"Loaded CrossAttentionParser "
-        f"(cross-attn at layers {model.cross_attn_layer_indices})"
-    )
+    logger.info("Loaded MotionPrefixParser")
 
     return model, tokenizer, config, model_dtype
 
@@ -574,7 +563,7 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Motion-conditioned Prefix Parser")
+    parser = argparse.ArgumentParser(description="Motion Parser")
     parser.add_argument(
         "--config", type=str, default="configs/parser.yaml", help="Config file"
     )
@@ -766,44 +755,39 @@ def main():
         f"{num_temporal_tokens} temporal tokens, {encoder_params:,} params"
     )
 
-    # Create CrossAttentionParser
-    model = CrossAttentionParser(
+    # Create MotionPrefixParser
+    model = MotionPrefixParser(
         model=base_model,
         trajectory_encoder=trajectory_encoder,
         tokenizer=tokenizer,
         encoder_dim=model_hidden_size,
-        cross_attn_every_n=cfg.get("cross_attn_every_n", 4),
-        cross_attn_num_heads=cfg.get("cross_attn_num_heads", 8),
-        cross_attn_dropout=cfg.get("cross_attn_dropout", 0.1),
         alignment_weight=cfg.get("alignment_weight", 0.1),
         alignment_dim=cfg.get("alignment_dim", 256),
         alignment_temperature=cfg.get("alignment_temperature", 0.07),
+        joint_loss_weight=cfg.get("joint_loss_weight", 0.5),
     )
 
-    # Move cross-attention modules to CUDA with bf16
-    model.motion_norm = model.motion_norm.to(device="cuda", dtype=model_dtype)
-    for xattn in model.cross_attn_layers.values():
-        xattn.to(device="cuda", dtype=model_dtype)
-    if not isinstance(model.motion_projection, torch.nn.Identity):
-        model.motion_projection = model.motion_projection.to(device="cuda", dtype=model_dtype)
-
-    # Move alignment heads to CUDA
+    # Move projection, alignment, and joint head modules to CUDA with bf16
+    model.motion_projection = model.motion_projection.to(device="cuda", dtype=model_dtype)
     model.motion_align_head = model.motion_align_head.to(device="cuda", dtype=model_dtype)
     model.program_align_head = model.program_align_head.to(device="cuda", dtype=model_dtype)
+    model.joint_head = model.joint_head.to(device="cuda", dtype=model_dtype)
     model.logit_scale.data = model.logit_scale.data.to(device="cuda")
 
-    cross_attn_params = sum(p.numel() for p in model.cross_attn_layers.parameters())
+    proj_params = sum(p.numel() for p in model.motion_projection.parameters())
     align_params = (
         sum(p.numel() for p in model.motion_align_head.parameters())
         + sum(p.numel() for p in model.program_align_head.parameters())
         + 1  # logit_scale
     )
-    proj_desc = "identity" if isinstance(model.motion_projection, torch.nn.Identity) else "linear"
+    joint_head_params = sum(p.numel() for p in model.joint_head.parameters())
     logger.info(
-        f"CrossAttentionParser: {len(model.cross_attn_layer_indices)} cross-attn layers "
-        f"at {model.cross_attn_layer_indices}, {cross_attn_params:,} cross-attn params, "
-        f"projection={proj_desc}, alignment_weight={model.alignment_weight}, "
-        f"{align_params:,} alignment params"
+        f"MotionPrefixParser: {num_temporal_tokens} motion prefix tokens, "
+        f"{proj_params:,} projection params, "
+        f"alignment_weight={model.alignment_weight}, "
+        f"{align_params:,} alignment params, "
+        f"joint_loss_weight={model.joint_loss_weight}, "
+        f"{joint_head_params:,} joint_head params"
     )
 
     # [4/4] Load datasets
@@ -902,7 +886,11 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        data_collator=get_collate_fn(tokenizer),
+        data_collator=get_collate_fn(
+            tokenizer,
+            num_temporal_tokens=num_temporal_tokens,
+            max_frame=cfg.get("max_frame", 1024),
+        ),
         callbacks=callbacks,
     )
 
@@ -917,7 +905,7 @@ def main():
     logger.info("Saving model...")
     trainer.save_model()
 
-    # Save encoder + cross-attention weights
+    # Save encoder + projection weights
     model.save_pretrained(str(output_dir))
 
     # Save LoRA adapter
