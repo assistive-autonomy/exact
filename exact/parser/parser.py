@@ -87,12 +87,24 @@ class MotionPrefixParser(nn.Module):
         self.encoder_dim = encoder_dim
 
         # Motion projection to LLM embedding space
-        # Even when dims match, we use a linear + LN to learn proper scaling
+        # Even when dims match, we use a linear + LN to learn proper scaling.
+        # NOTE: We add a learned scaling factor after LayerNorm to match the
+        # text embedding L2 norm (~1.0). LayerNorm produces unit-variance features,
+        # giving L2 norm ≈ sqrt(hidden_dim) ≈ 45 for dim=2048, which completely
+        # overwhelms the text embeddings at ~1.0 L2 norm.
         self.motion_projection = nn.Sequential(
             nn.Linear(encoder_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
+        )
+
+        # Learnable scale factor to match text embedding magnitude.
+        # Initialized to 1/sqrt(hidden_dim) so that after LayerNorm (which
+        # produces std≈1 → L2≈sqrt(d)), the resulting L2 norm ≈ 1.0,
+        # matching the LLM's native text embedding scale.
+        self._motion_scale = nn.Parameter(
+            torch.tensor(1.0 / (hidden_dim ** 0.5))
         )
 
         # ── InfoNCE alignment ───────────────────────────────────────────
@@ -167,9 +179,13 @@ class MotionPrefixParser(nn.Module):
         embed_layer = self.model.get_input_embeddings()
         return embed_layer(input_ids)
 
-    def _encode_motion(self, motion: torch.Tensor) -> torch.Tensor:
+    def _encode_motion_unscaled(self, motion: torch.Tensor) -> torch.Tensor:
         """
-        Encode motion to prefix token embeddings.
+        Encode motion and project to LLM embedding space (before scale).
+
+        Returns features BEFORE the learned scale factor is applied.
+        Used by auxiliary heads (joint head) that need full-magnitude gradients
+        to the encoder, and should not influence ``_motion_scale``.
 
         Args:
             motion: [B, T, 72] raw motion sequence
@@ -188,6 +204,21 @@ class MotionPrefixParser(nn.Module):
         motion_features = self.motion_projection(motion_features)
 
         return motion_features
+
+    def _encode_motion(self, motion: torch.Tensor) -> torch.Tensor:
+        """
+        Encode motion to prefix token embeddings (with scale normalization).
+
+        Applies the learned ``_motion_scale`` factor so that the resulting
+        embeddings have L2 norms matching the LLM's text embeddings (~1.0).
+
+        Args:
+            motion: [B, T, 72] raw motion sequence
+
+        Returns:
+            motion_features: [B, num_temporal_tokens, hidden_dim] (scaled)
+        """
+        return self._encode_motion_unscaled(motion) * self._motion_scale
 
     def _get_prompt_ids(self, batch_size: int, device: torch.device) -> torch.Tensor:
         """Get tokenized 'Program: ' prompt IDs for generation seeding."""
@@ -265,10 +296,14 @@ class MotionPrefixParser(nn.Module):
         """
         prefix_len = 0
         motion_features = None
+        motion_features_unscaled = None
 
         if motion is not None:
             # Encode motion → prefix embeddings
-            motion_features = self._encode_motion(motion)
+            # Get unscaled features for auxiliary heads (joint head)
+            # and scaled features for the LLM prefix
+            motion_features_unscaled = self._encode_motion_unscaled(motion)
+            motion_features = motion_features_unscaled * self._motion_scale
             prefix_len = motion_features.shape[1]
             B = motion_features.shape[0]
 
@@ -330,13 +365,15 @@ class MotionPrefixParser(nn.Module):
 
         # Compute joint-activity auxiliary loss during training
         if (
-            motion_features is not None
+            motion_features_unscaled is not None
             and joint_activity_labels is not None
             and self.joint_loss_weight > 0
             and self.training
         ):
-            # Predict active joints per temporal token from projected features
-            joint_logits = self.joint_head(motion_features)  # [B, T', 24]
+            # Predict active joints from PRE-SCALE projected features.
+            # Using unscaled features ensures full gradient magnitude to the
+            # encoder and avoids conflicting gradients on _motion_scale.
+            joint_logits = self.joint_head(motion_features_unscaled)  # [B, T', 24]
             joint_activity_labels = joint_activity_labels.to(
                 device=joint_logits.device, dtype=joint_logits.dtype
             )
@@ -461,6 +498,7 @@ class MotionPrefixParser(nn.Module):
             "program_align_head": self.program_align_head.state_dict(),
             "joint_head": self.joint_head.state_dict(),
             "logit_scale": self.logit_scale.data,
+            "motion_scale": self._motion_scale.data,
             "encoder_dim": self.encoder_dim,
             "hidden_dim": self.hidden_dim,
         }

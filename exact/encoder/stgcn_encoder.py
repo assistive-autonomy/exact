@@ -48,6 +48,7 @@ class STGCNEncoder(nn.Module):
         spatial_kernel_size: int = 3,
         dropout: float = 0.1,
         graph_strategy: str = "spatial",
+        joint_embedding: bool = False,
     ):
         super().__init__()
 
@@ -55,6 +56,7 @@ class STGCNEncoder(nn.Module):
         self.input_channels = input_channels
         self.output_dim = output_dim
         self.num_temporal_tokens = num_temporal_tokens
+        self.joint_embedding = joint_embedding
 
         # Build SMPL skeleton graph
         graph = Graph(strategy=graph_strategy, max_hop=1)
@@ -63,6 +65,17 @@ class STGCNEncoder(nn.Module):
 
         # Input projection
         self.input_bn = nn.BatchNorm2d(input_channels)
+
+        # ── Per-joint positional encoding ─────────────────────────────────
+        # After spatial graph convolutions, joint identity gets blurred.
+        # A learnable per-joint embedding is added after the first block so
+        # that the downstream blocks can maintain joint-specific features.
+        if joint_embedding:
+            self.joint_embed = nn.Parameter(
+                torch.randn(1, hidden_channels, 1, num_nodes) * 0.02
+            )
+        else:
+            self.joint_embed = None
 
         # ST-GCN blocks
         channels = [input_channels] + [hidden_channels] * num_blocks
@@ -122,8 +135,14 @@ class STGCNEncoder(nn.Module):
         x = self.input_bn(x)
 
         # ST-GCN processing
-        for block in self.blocks:
+        for i, block in enumerate(self.blocks):
             x = block(x, self.A)
+            # Inject per-joint positional encoding after the first block.
+            # At this point x is [B, hidden_channels, T, V] — adding the
+            # joint embedding injects a unique per-joint signal that survives
+            # the subsequent spatial mixing layers.
+            if i == 0 and self.joint_embed is not None:
+                x = x + self.joint_embed
 
         # Temporal pooling: [B, C, T, V] -> [B, C, num_temporal_tokens, V]
         x = self.temporal_pool(x)

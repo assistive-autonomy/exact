@@ -10,7 +10,8 @@ output_dir: results/parser
 
 # ========== MODEL ==========
 # Qwen2.5-Coder-3B: hidden_size=2048, 36 layers
-# Smaller model = faster iteration, matches ST-GCN output dim exactly
+# 3B is sufficient — the bottleneck is the encoder, not the decoder.
+# 7B showed identical edit distance (0.57) with 2x slower training.
 model_name: /pvc/Qwen/Qwen2.5-Coder-3B
 max_seq_length: 512
 load_in_4bit: false
@@ -31,12 +32,13 @@ max_frame: 1024
 motion_dim: 72  # 24 joints * 3 (x, y, z)
 graph_strategy: spatial
 
-stgcn_hidden_channels: 64
-stgcn_num_blocks: 4
-stgcn_num_temporal_tokens: 16  # Coarser tokens (~64 frames each) — programs have few segments
+stgcn_hidden_channels: 128  # 64→128: 2x channels preserves per-joint identity through graph mixing
+stgcn_num_blocks: 6          # 4→6: deeper = richer spatio-temporal features
+stgcn_num_temporal_tokens: 32  # 16→32: finer resolution (32 frames/token) for up to 9 segments
 stgcn_temporal_kernel: 9
 stgcn_spatial_kernel: 3
 stgcn_dropout: 0.1
+stgcn_joint_embedding: true  # Learnable per-joint positional encoding (24 × hidden_channels)
 
 # ========== CONDITIONING ==========
 # Motion tokens are projected and prepended as prefix to text embeddings.
@@ -53,7 +55,10 @@ alignment_temperature: 0.07
 # ========== JOINT-ACTIVITY AUXILIARY LOSS ==========
 # Per-temporal-token binary classification: which of 24 joints are active?
 # Directly supervises the encoder to preserve per-joint identity.
-joint_loss_weight: 0.5
+# Reduced from 0.5 → 0.2: at 0.5 the BCE gradient dominated the LM loss,
+# causing the encoder to optimise for joint classification rather than
+# program-useful representations.
+joint_loss_weight: 0.2
 
 # ========== LORA CONFIG ==========
 # Reduced rank (16 vs 32) — 3B model needs less adaptation capacity
@@ -65,7 +70,9 @@ lora_dropout: 0.05
 num_train_epochs: 25
 per_device_train_batch_size: 16     # 3B model fits larger batch
 per_device_eval_batch_size: 16
-learning_rate: 5e-5                  # Single LR for all components
+learning_rate: 5e-5                  # Base LR (used for LoRA + projection)
+encoder_lr: 1e-5                     # Lower LR for ST-GCN (trains from scratch)
+scale_lr: 1e-4                       # Faster adaptation for motion_scale
 weight_decay: 0.01
 max_grad_norm: 1.0
 warmup_ratio: 0.15                   # Longer warmup for encoder stability
@@ -89,6 +96,12 @@ metric_for_best_model: eval_loss
 
 # Early stopping
 early_stopping_patience: 5
+
+# Mid-training generation evaluation
+# Run generation-based eval every N steps to catch issues like
+# high eval_loss but 0% generation accuracy early.
+generation_eval_steps: 4000
+generation_eval_samples: 16
 
 # Final evaluation (generation with constrained decoding)
 eval_samples: 64

@@ -150,6 +150,91 @@ class EncoderCheckpointCallback(TrainerCallback):
             logger.debug(f"Saved encoder + projections to {checkpoint_dir}")
 
 
+class GenerationEvalCallback(TrainerCallback):
+    """Run generation-based evaluation periodically during training.
+
+    Unlike eval_loss (teacher-forced), this tests actual autoregressive
+    generation — the metric that matters for deployment.  It catches the
+    failure mode where eval_loss looks fine but generation is garbage.
+    """
+
+    def __init__(
+        self,
+        parser_model,
+        tokenizer,
+        eval_h5_path: str,
+        device: torch.device,
+        dtype: torch.dtype,
+        cfg: DictConfig,
+        every_n_steps: int = 4000,
+        n_samples: int = 16,
+    ):
+        self.parser_model = parser_model
+        self.tokenizer = tokenizer
+        self.eval_h5_path = eval_h5_path
+        self.device = device
+        self.dtype = dtype
+        self.cfg = cfg
+        self.every_n_steps = every_n_steps
+        self.n_samples = n_samples
+        self._eval_samples = None
+
+    def _get_eval_samples(self):
+        if self._eval_samples is None:
+            self._eval_samples = load_eval_samples(
+                self.eval_h5_path, n_samples=self.n_samples
+            )
+        return self._eval_samples
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if (
+            state.global_step > 0
+            and state.global_step % self.every_n_steps == 0
+        ):
+            logger.info(
+                f"[Step {state.global_step}] Running mid-training generation eval "
+                f"({self.n_samples} samples)..."
+            )
+            samples = self._get_eval_samples()
+            was_training = self.parser_model.training
+            try:
+                eval_results = evaluate_samples(
+                    self.parser_model,
+                    self.tokenizer,
+                    samples,
+                    self.device,
+                    self.dtype,
+                    max_new_tokens=self.cfg.get("generation_max_new_tokens", 256),
+                    num_retries=0,  # skip retries for speed
+                    generation_temperature=self.cfg.get("generation_temperature", 0.3),
+                    use_constrained_decoding=self.cfg.get(
+                        "use_constrained_decoding", True
+                    ),
+                    max_frame=self.cfg.get("max_frame", 1024),
+                )
+                logger.info(
+                    f"[Step {state.global_step}] Generation eval: "
+                    f"accuracy={eval_results['accuracy']:.1%}, "
+                    f"validity={eval_results['validity_rate']:.1%}, "
+                    f"edit_dist={eval_results.get('mean_normalized_edit_distance', 'N/A')}"
+                )
+                if WANDB_AVAILABLE and wandb.run is not None:
+                    log_data = {
+                        "gen_eval/accuracy": eval_results["accuracy"],
+                        "gen_eval/validity_rate": eval_results["validity_rate"],
+                    }
+                    if eval_results.get("mean_normalized_edit_distance") is not None:
+                        log_data["gen_eval/edit_distance"] = eval_results[
+                            "mean_normalized_edit_distance"
+                        ]
+                    wandb.log(log_data, step=state.global_step)
+            except Exception as e:
+                logger.warning(f"Mid-training generation eval failed: {e}")
+            finally:
+                if was_training:
+                    self.parser_model.train()
+
+
 class AlignmentLoggingCallback(TrainerCallback):
     """Log lm_loss and alignment_loss as separate wandb/log metrics."""
 
@@ -170,6 +255,9 @@ class AlignmentLoggingCallback(TrainerCallback):
             logs["train/logit_scale"] = m.logit_scale.exp().item()
         if hasattr(m, "_last_joint_loss") and m._last_joint_loss is not None:
             logs["train/joint_loss"] = m._last_joint_loss
+        # Track learned motion embedding scale
+        if hasattr(m, "_motion_scale"):
+            logs["train/motion_scale"] = m._motion_scale.item()
 
 
 # ─── Evaluation ───────────────────────────────────────────────────────────────
@@ -510,6 +598,7 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
         spatial_kernel_size=config.get("stgcn_spatial_kernel", 3),
         dropout=config.get("stgcn_dropout", 0.1),
         graph_strategy=config.get("graph_strategy", "spatial"),
+        joint_embedding=config.get("stgcn_joint_embedding", False),
     ).to(device)
 
     trajectory_encoder.load_state_dict(torch.load(encoder_path, map_location=device))
@@ -541,6 +630,8 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
             model.logit_scale.data = prefix_data["logit_scale"]
         if "joint_head" in prefix_data:
             model.joint_head.load_state_dict(prefix_data["joint_head"])
+        if "motion_scale" in prefix_data:
+            model._motion_scale.data = prefix_data["motion_scale"]
     else:
         logger.warning(f"Parser weights not found at {prefix_path}")
 
@@ -550,6 +641,7 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
     model.program_align_head.to(device=device, dtype=model_dtype)
     model.joint_head.to(device=device, dtype=model_dtype)
     model.logit_scale.data = model.logit_scale.data.to(device=device)
+    model._motion_scale.data = model._motion_scale.data.to(device=device)
 
     model.eval()
     logger.info("Loaded MotionPrefixParser")
@@ -747,6 +839,7 @@ def main():
         spatial_kernel_size=cfg.get("stgcn_spatial_kernel", 3),
         dropout=cfg.get("stgcn_dropout", 0.1),
         graph_strategy=cfg.get("graph_strategy", "spatial"),
+        joint_embedding=cfg.get("stgcn_joint_embedding", False),
     ).to(device="cuda")  # Keep float32 for BatchNorm stability
 
     encoder_params = sum(p.numel() for p in trajectory_encoder.parameters())
@@ -773,6 +866,7 @@ def main():
     model.program_align_head = model.program_align_head.to(device="cuda", dtype=model_dtype)
     model.joint_head = model.joint_head.to(device="cuda", dtype=model_dtype)
     model.logit_scale.data = model.logit_scale.data.to(device="cuda")
+    model._motion_scale.data = model._motion_scale.data.to(device="cuda")
 
     proj_params = sum(p.numel() for p in model.motion_projection.parameters())
     align_params = (
@@ -820,6 +914,56 @@ def main():
             )
         else:
             logger.info(f"Loaded {len(eval_dataset)} evaluation samples")
+
+    # ── Build optimizer with differential learning rates ────────────────────
+    # The encoder trains from scratch and needs a lower LR to avoid
+    # over-shooting.  LoRA / projection layers need the base LR.
+    # _motion_scale gets a slightly higher LR so it can adapt quickly.
+    encoder_lr = cfg.get("encoder_lr", cfg.learning_rate * 0.2)  # default: 1e-5
+    projection_lr = cfg.get("projection_lr", cfg.learning_rate)    # default: 5e-5
+    scale_lr = cfg.get("scale_lr", cfg.learning_rate * 2)          # default: 1e-4
+
+    # Group parameters
+    encoder_params_list = list(model.trajectory_encoder.parameters())
+    projection_params_list = list(model.motion_projection.parameters())
+    align_params_list = (
+        list(model.motion_align_head.parameters())
+        + list(model.program_align_head.parameters())
+        + [model.logit_scale]
+    )
+    joint_params_list = list(model.joint_head.parameters())
+    scale_params_list = [model._motion_scale]
+
+    # All other params (LoRA weights) get the base LR
+    special_param_ids = set(
+        id(p)
+        for p in (
+            encoder_params_list
+            + projection_params_list
+            + align_params_list
+            + joint_params_list
+            + scale_params_list
+        )
+    )
+    lora_params_list = [
+        p for p in model.parameters() if p.requires_grad and id(p) not in special_param_ids
+    ]
+
+    optimizer_grouped_parameters = [
+        {"params": encoder_params_list, "lr": encoder_lr, "weight_decay": cfg.weight_decay},
+        {"params": projection_params_list, "lr": projection_lr, "weight_decay": cfg.weight_decay},
+        {"params": align_params_list, "lr": projection_lr, "weight_decay": 0.0},
+        {"params": joint_params_list, "lr": projection_lr, "weight_decay": cfg.weight_decay},
+        {"params": scale_params_list, "lr": scale_lr, "weight_decay": 0.0},
+        {"params": lora_params_list, "lr": cfg.learning_rate, "weight_decay": cfg.weight_decay},
+    ]
+
+    custom_optimizer = torch.optim.AdamW(optimizer_grouped_parameters, betas=(0.9, 0.999), eps=1e-8)
+
+    logger.info(
+        f"Differential LR — encoder: {encoder_lr:.1e}, projection: {projection_lr:.1e}, "
+        f"scale: {scale_lr:.1e}, LoRA: {cfg.learning_rate:.1e}"
+    )
 
     # ── Training arguments ──────────────────────────────────────────────────
 
@@ -879,7 +1023,50 @@ def main():
     callbacks.append(EncoderCheckpointCallback(model))
     callbacks.append(AlignmentLoggingCallback(model))
 
+    # Mid-training generation-based evaluation
+    gen_eval_steps = cfg.get("generation_eval_steps", 0)
+    gen_eval_samples = cfg.get("generation_eval_samples", 16)
+    if gen_eval_steps > 0 and cfg.eval_data and os.path.exists(cfg.eval_data):
+        callbacks.append(
+            GenerationEvalCallback(
+                parser_model=model,
+                tokenizer=tokenizer,
+                eval_h5_path=cfg.eval_data,
+                device=device,
+                dtype=model_dtype,
+                cfg=cfg,
+                every_n_steps=gen_eval_steps,
+                n_samples=gen_eval_samples,
+            )
+        )
+        logger.info(
+            f"Generation eval enabled every {gen_eval_steps} steps "
+            f"({gen_eval_samples} samples)"
+        )
+
     # ── Train ───────────────────────────────────────────────────────────────
+
+    # ── Scheduler (cosine with warmup, matched to custom optimizer) ──────
+    from transformers import get_scheduler
+
+    total_train_steps = (
+        len(train_dataset)
+        // (cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps)
+        * cfg.num_train_epochs
+    )
+    warmup_steps = (
+        int(total_train_steps * cfg.warmup_ratio)
+        if cfg.get("warmup_ratio", 0) > 0
+        else cfg.get("warmup_steps", 0)
+    )
+    custom_scheduler = get_scheduler(
+        cfg.get("lr_scheduler_type", "cosine"),
+        optimizer=custom_optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_train_steps,
+    )
+    logger.info(f"Scheduler: {cfg.get('lr_scheduler_type', 'cosine')}, "
+                f"warmup={warmup_steps}, total={total_train_steps}")
 
     trainer = Trainer(
         model=model,
@@ -892,6 +1079,7 @@ def main():
             max_frame=cfg.get("max_frame", 1024),
         ),
         callbacks=callbacks,
+        optimizers=(custom_optimizer, custom_scheduler),
     )
 
     if resume_from_checkpoint:
