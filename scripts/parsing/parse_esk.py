@@ -92,8 +92,8 @@ def parse_args():
         "--label-type",
         type=str,
         default="verbs",
-        choices=["verbs", "nouns", "activity"],
-        help="Type of labels to use",
+        choices=["verbs", "nouns", "activity", "actions"],
+        help="Type of labels to use (actions for humanact12)",
     )
     parser.add_argument(
         "--output",
@@ -128,7 +128,7 @@ def load_split_file(split_path: str) -> dict[str, list[str]]:
     Returns:
         Dict with 'train' and 'test' keys containing video names
     """
-    splits = {"train": [], "test": []}
+    splits = {"train": [], "test": [], "val": []}
     current_section = None
     
     with open(split_path, "r") as f:
@@ -282,10 +282,14 @@ def main():
         "verbs": "D2A_converted_label_verbs",
         "nouns": "D2A_converted_label_nouns",
         "activity": "D2A_converted_label_activity",
+        "actions": "D2A_converted_label_actions",
     }
     pose_dir = esk_path / "D2A_converted_pose_smpl"
     label_dir = esk_path / label_type_map[args.label_type]
-    split_file = esk_path / "traintest_split.txt"
+    # Auto-detect split file (trainvaltest_split.txt for humanact12, traintest_split.txt for esk)
+    split_file = esk_path / "trainvaltest_split.txt"
+    if not split_file.exists():
+        split_file = esk_path / "traintest_split.txt"
     
     # Check paths exist
     if not esk_path.exists():
@@ -308,7 +312,7 @@ def main():
     elif args.split == "test":
         videos = splits["test"]
     else:
-        videos = splits["train"] + splits["test"]
+        videos = splits["train"] + splits.get("val", []) + splits["test"]
     
     # Subsample if requested
     if args.train_fraction < 1.0 and args.split in ["train", "all"]:

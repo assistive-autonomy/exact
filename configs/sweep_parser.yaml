@@ -1,0 +1,113 @@
+# ============================================================================
+# W&B Sweep Configuration for Motion Parser Hyperparameter Optimization
+# ============================================================================
+# Usage:
+#   1. Create sweep:   wandb sweep configs/sweep_parser.yaml
+#   2. Launch agents:  uv run scripts/parsing/sweep_parser.py --sweep-id <SWEEP_ID> --count 50 --agents 4
+#
+# Or use the all-in-one launcher:
+#   uv run scripts/parsing/sweep_parser.py --create --count 50 --agents 4
+# ============================================================================
+
+program: scripts/parsing/sweep_parser.py
+method: bayes          # Bayesian optimization (smarter than random/grid)
+name: parser_hparam_sweep
+
+metric:
+  name: eval_loss_best
+  goal: minimize
+
+# Early termination: kill bad runs quickly to save GPU hours
+early_terminate:
+  type: hyperband
+  min_iter: 3          # minimum epochs before termination
+  eta: 3               # aggressiveness (3 = standard)
+  s: 2                 # number of brackets
+
+parameters:
+  # ────────────────────────────────────────────────────────────
+  # ST-GCN Architecture
+  # ────────────────────────────────────────────────────────────
+  stgcn_hidden_channels:
+    values: [64, 128, 256]
+
+  stgcn_num_blocks:
+    values: [4, 6, 8]
+
+  stgcn_num_temporal_tokens:
+    values: [16, 32, 48, 64]
+
+  stgcn_temporal_kernel:
+    values: [5, 7, 9, 11]
+
+  stgcn_dropout:
+    distribution: uniform
+    min: 0.0
+    max: 0.3
+
+  stgcn_joint_embedding:
+    values: [true, false]
+
+  # ────────────────────────────────────────────────────────────
+  # Alignment / Auxiliary Losses
+  # ────────────────────────────────────────────────────────────
+  alignment_weight:
+    distribution: log_uniform_values
+    min: 0.01
+    max: 1.0
+
+  alignment_dim:
+    values: [128, 256, 512]
+
+  alignment_temperature:
+    distribution: log_uniform_values
+    min: 0.03
+    max: 0.2
+
+  joint_loss_weight:
+    distribution: uniform
+    min: 0.0
+    max: 0.5
+
+  # ────────────────────────────────────────────────────────────
+  # LoRA Parameters
+  # ────────────────────────────────────────────────────────────
+  lora_r:
+    values: [8, 16, 32]
+
+  lora_alpha:
+    values: [16, 32, 64]
+
+  lora_dropout:
+    distribution: uniform
+    min: 0.0
+    max: 0.15
+
+  # ────────────────────────────────────────────────────────────
+  # Training Parameters
+  # ────────────────────────────────────────────────────────────
+  per_device_train_batch_size:
+    values: [8, 16, 32]
+
+  learning_rate:
+    distribution: log_uniform_values
+    min: 1e-5
+    max: 3e-4
+
+  encoder_lr:
+    distribution: log_uniform_values
+    min: 1e-6
+    max: 5e-5
+
+  warmup_ratio:
+    distribution: uniform
+    min: 0.05
+    max: 0.25
+
+  weight_decay:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 0.1
+
+  gradient_accumulation_steps:
+    values: [1, 2, 4]

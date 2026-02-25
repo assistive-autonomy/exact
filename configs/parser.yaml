@@ -3,7 +3,7 @@ device: auto
 
 # Data (relative to project root)
 train_data: ../exact_data/train_diverse.h5
-eval_data: ../exact_data/eval_mid.h5
+eval_data: ../exact_data/eval.h5
 
 # Output
 output_dir: results/parser
@@ -24,6 +24,7 @@ generation_retry_top_p: 0.9
 generation_temperature: 0.3
 use_constrained_decoding: true
 log_generation_attempts: false
+skip_post_training_eval: true
 max_frame: 1024
 
 # ========== ST-GCN ENCODER ==========
@@ -32,12 +33,12 @@ max_frame: 1024
 motion_dim: 72  # 24 joints * 3 (x, y, z)
 graph_strategy: spatial
 
-stgcn_hidden_channels: 128  # 64→128: 2x channels preserves per-joint identity through graph mixing
-stgcn_num_blocks: 6          # 4→6: deeper = richer spatio-temporal features
-stgcn_num_temporal_tokens: 32  # 16→32: finer resolution (32 frames/token) for up to 9 segments
-stgcn_temporal_kernel: 9
+stgcn_hidden_channels: 256  # 64→128: 2x channels preserves per-joint identity through graph mixing
+stgcn_num_blocks: 8          # 4→6: deeper = richer spatio-temporal features
+stgcn_num_temporal_tokens: 48  # 16→32: finer resolution (32 frames/token) for up to 9 segments
+stgcn_temporal_kernel: 7
 stgcn_spatial_kernel: 3
-stgcn_dropout: 0.1
+stgcn_dropout: 0.25
 stgcn_joint_embedding: true  # Learnable per-joint positional encoding (24 × hidden_channels)
 
 # ========== CONDITIONING ==========
@@ -48,9 +49,9 @@ stgcn_joint_embedding: true  # Learnable per-joint positional encoding (24 × hi
 # InfoNCE: contrastive loss aligns motion encoder with LLM program embeddings.
 # Joint BCE: per-temporal-token classification of which joints are active.
 # Total loss = LM_loss + alignment_weight * InfoNCE + joint_loss_weight * BCE
-alignment_weight: 0.1
-alignment_dim: 256
-alignment_temperature: 0.07
+alignment_weight: 0.23
+alignment_dim: 512
+alignment_temperature: 0.19
 
 # ========== JOINT-ACTIVITY AUXILIARY LOSS ==========
 # Per-temporal-token binary classification: which of 24 joints are active?
@@ -58,24 +59,24 @@ alignment_temperature: 0.07
 # Reduced from 0.5 → 0.2: at 0.5 the BCE gradient dominated the LM loss,
 # causing the encoder to optimise for joint classification rather than
 # program-useful representations.
-joint_loss_weight: 0.2
+joint_loss_weight: 0.17
 
 # ========== LORA CONFIG ==========
 # Reduced rank (16 vs 32) — 3B model needs less adaptation capacity
-lora_r: 16
+lora_r: 8
 lora_alpha: 32
-lora_dropout: 0.05
+lora_dropout: 0.024
 
 # ========== TRAINING HYPERPARAMETERS ==========
 num_train_epochs: 25
 per_device_train_batch_size: 16     # 3B model fits larger batch
 per_device_eval_batch_size: 16
-learning_rate: 5e-5                  # Base LR (used for LoRA + projection)
-encoder_lr: 1e-5                     # Lower LR for ST-GCN (trains from scratch)
+learning_rate: 0.00014                  # Base LR (used for LoRA + projection)
+encoder_lr: 1.6e-06                     # Lower LR for ST-GCN (trains from scratch)
 scale_lr: 1e-4                       # Faster adaptation for motion_scale
-weight_decay: 0.01
+weight_decay: 0.0075
 max_grad_norm: 1.0
-warmup_ratio: 0.15                   # Longer warmup for encoder stability
+warmup_ratio: 0.17                   # Longer warmup for encoder stability
 lr_scheduler_type: cosine
 gradient_accumulation_steps: 2       # Effective batch = 32
 dataloader_num_workers: 8
@@ -96,6 +97,11 @@ metric_for_best_model: eval_loss
 
 # Early stopping
 early_stopping_patience: 5
+
+# Sweep-specific: fraction of training data to use (0.1 = 10%)
+# Only used by sweep_parser.py — train_parser.py always uses full data.
+sweep_train_fraction: 0.1
+sweep_max_epochs: 10
 
 # Mid-training generation evaluation
 # Run generation-based eval every N steps to catch issues like

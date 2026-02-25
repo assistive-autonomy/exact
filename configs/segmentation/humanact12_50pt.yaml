@@ -32,7 +32,7 @@ data:
 training:
   lr: 0.001
   device: auto
-  num_epochs: 50
+  num_epochs: 30
   to_ram: false
   batch_size: 32  # Reduced from 64 to lower memory usage
   normalize: true

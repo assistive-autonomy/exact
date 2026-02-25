@@ -1102,41 +1102,46 @@ def main():
 
     # ── Post-training evaluation ────────────────────────────────────────────
 
-    logger.info("Running sample evaluation...")
-    eval_samples = load_eval_samples(
-        cfg.eval_data, n_samples=cfg.get("eval_samples", 8)
-    )
+    if cfg.get("skip_post_training_eval", False):
+        logger.info("Skipping post-training generation evaluation (skip_post_training_eval=true)")
+    else:
+        logger.info("Running sample evaluation...")
+        eval_samples = load_eval_samples(
+            cfg.eval_data, n_samples=cfg.get("eval_samples", 8)
+        )
 
-    model.to(device)
-    eval_results = evaluate_samples(
-        model,
-        tokenizer,
-        eval_samples,
-        device,
-        model_dtype,
-        max_new_tokens=cfg.get("generation_max_new_tokens", 256),
-        num_retries=cfg.get("generation_retries", 2),
-        retry_temperature=cfg.get("generation_retry_temperature", 0.5),
-        retry_top_p=cfg.get("generation_retry_top_p", 0.9),
-        generation_temperature=cfg.get("generation_temperature", 0.3),
-        use_constrained_decoding=cfg.get("use_constrained_decoding", True),
-        log_attempts=cfg.get("log_generation_attempts", False),
-        max_frame=cfg.get("max_frame", 1024),
-    )
-    print_eval_results(eval_results)
+        model.to(device)
+        eval_results = evaluate_samples(
+            model,
+            tokenizer,
+            eval_samples,
+            device,
+            model_dtype,
+            max_new_tokens=cfg.get("generation_max_new_tokens", 256),
+            num_retries=cfg.get("generation_retries", 2),
+            retry_temperature=cfg.get("generation_retry_temperature", 0.5),
+            retry_top_p=cfg.get("generation_retry_top_p", 0.9),
+            generation_temperature=cfg.get("generation_temperature", 0.3),
+            use_constrained_decoding=cfg.get("use_constrained_decoding", True),
+            log_attempts=cfg.get("log_generation_attempts", False),
+            max_frame=cfg.get("max_frame", 1024),
+        )
+        print_eval_results(eval_results)
 
-    # Save results
-    with open(output_dir / "eval_results.json", "w") as f:
-        json.dump(eval_results, f, indent=2)
+        # Save results
+        with open(output_dir / "eval_results.json", "w") as f:
+            json.dump(eval_results, f, indent=2)
+
+        if use_wandb:
+            log_samples_to_wandb(eval_results)
+            wandb.summary["final_accuracy"] = eval_results["accuracy"]
+            wandb.summary["final_validity_rate"] = eval_results["validity_rate"]
+            if eval_results.get("mean_normalized_edit_distance") is not None:
+                wandb.summary["final_mean_edit_distance"] = eval_results[
+                    "mean_normalized_edit_distance"
+                ]
 
     if use_wandb:
-        log_samples_to_wandb(eval_results)
-        wandb.summary["final_accuracy"] = eval_results["accuracy"]
-        wandb.summary["final_validity_rate"] = eval_results["validity_rate"]
-        if eval_results.get("mean_normalized_edit_distance") is not None:
-            wandb.summary["final_mean_edit_distance"] = eval_results[
-                "mean_normalized_edit_distance"
-            ]
         wandb.finish()
 
     logger.success(f"Training complete! Results saved to: {output_dir}")

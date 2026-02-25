@@ -1,6 +1,6 @@
 """Data module for loading motion-program pairs."""
 
-from .dataset import TrajectoryGenerationDataset
+from .dataset import TrajectoryGenerationDataset, load_motion_data, load_motion_data_partial, preload_h5_to_cache, copy_cache_to_local
 from .env import (
     HumEnv,
     extract_joint_positions,
@@ -32,6 +32,10 @@ from .esk import (
 
 __all__ = [
     "TrajectoryGenerationDataset",
+    "load_motion_data",
+    "load_motion_data_partial",
+    "preload_h5_to_cache",
+    "copy_cache_to_local",
     "HumEnv",
     "extract_joint_positions",
     "JOINT_POS_DIM",
