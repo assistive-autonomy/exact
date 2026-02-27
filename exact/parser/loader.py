@@ -50,7 +50,7 @@ class TrainedParser:
         self,
         checkpoint_path: str,
         device: str = "auto",
-        use_grammar_constraint: bool = True,
+        use_grammar_constraint: bool = False,
         max_new_tokens: int = 256,
     ):
         """Load a trained parser from checkpoint.
@@ -105,9 +105,10 @@ class TrainedParser:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
         # Load base model
+        self.model_dtype = torch.bfloat16 if self.config.get("bf16", True) else torch.float32
         base_model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16 if self.config.get("bf16", True) else torch.float32,
+            torch_dtype=self.model_dtype,
             device_map=self.device,
         )
         
@@ -138,6 +139,7 @@ class TrainedParser:
             spatial_kernel_size=self.config.get("stgcn_spatial_kernel", 3),
             dropout=self.config.get("stgcn_dropout", 0.1),
             graph_strategy=self.config.get("graph_strategy", "spatial"),
+            joint_embedding=self.config.get("stgcn_joint_embedding", False),
         )
         
         # Load encoder weights
@@ -175,6 +177,7 @@ class TrainedParser:
             if "joint_head" in weights:
                 self.parser.joint_head.load_state_dict(weights["joint_head"])
         
+        self.parser.to(self.device)
         self.parser.eval()
         
         # Create grammar processor if needed
@@ -234,16 +237,60 @@ class TrainedParser:
         
         return program
     
+    @torch.no_grad()
     def parse_batch(self, motions: list[np.ndarray]) -> list[str]:
-        """Parse multiple motion sequences.
+        """Parse multiple motion sequences in a single batched forward pass.
+        
+        Pads variable-length motions to the longest in the batch,
+        runs encoder + LLM generation once, then decodes each.
         
         Args:
-            motions: List of motion sequences
+            motions: List of motion sequences, each (seq_len_i, motion_dim)
             
         Returns:
             List of program strings
         """
-        return [self.parse(m) for m in motions]
+        if len(motions) == 0:
+            return []
+        if len(motions) == 1:
+            return [self.parse(motions[0])]
+        
+        from exact.parser.utils import post_process_program
+        from exact.data.dataset import PROMPT_PREFIX
+        
+        # Pad motions to max length in batch
+        max_len = max(m.shape[0] for m in motions)
+        motion_dim = motions[0].shape[1]
+        B = len(motions)
+        
+        padded = np.zeros((B, max_len, motion_dim), dtype=np.float32)
+        for i, m in enumerate(motions):
+            padded[i, :m.shape[0]] = m
+        
+        motion_tensor = torch.tensor(padded, dtype=torch.float32, device=self.device)
+        
+        # Batched generation
+        generated_ids = self.parser.generate(
+            motion=motion_tensor,
+            max_new_tokens=self.max_new_tokens,
+            do_sample=False,
+            temperature=None,
+            top_p=None,
+            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+            grammar_processor=self.grammar_processor,
+        )
+        
+        # Decode each sequence
+        programs = []
+        for i in range(B):
+            raw_program = self.tokenizer.decode(generated_ids[i], skip_special_tokens=True).strip()
+            if raw_program.startswith(PROMPT_PREFIX):
+                raw_program = raw_program[len(PROMPT_PREFIX):]
+            program, _ = post_process_program(raw_program, repair=True)
+            programs.append(program)
+        
+        return programs
 
 
 def load_parser(

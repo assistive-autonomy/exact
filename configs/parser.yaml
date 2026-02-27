@@ -3,7 +3,7 @@ device: auto
 
 # Data (relative to project root)
 train_data: ../exact_data/train_diverse.h5
-eval_data: ../exact_data/eval.h5
+eval_data: ../exact_data/eval_mid.h5
 
 # Output
 output_dir: results/parser
@@ -49,34 +49,34 @@ stgcn_joint_embedding: true  # Learnable per-joint positional encoding (24 × hi
 # InfoNCE: contrastive loss aligns motion encoder with LLM program embeddings.
 # Joint BCE: per-temporal-token classification of which joints are active.
 # Total loss = LM_loss + alignment_weight * InfoNCE + joint_loss_weight * BCE
-alignment_weight: 0.23
-alignment_dim: 512
-alignment_temperature: 0.19
+alignment_weight: 0.1
+alignment_dim: 256
+alignment_temperature: 0.07
 
 # ========== JOINT-ACTIVITY AUXILIARY LOSS ==========
 # Per-temporal-token binary classification: which of 24 joints are active?
 # Directly supervises the encoder to preserve per-joint identity.
-# Reduced from 0.5 → 0.2: at 0.5 the BCE gradient dominated the LM loss,
-# causing the encoder to optimise for joint classification rather than
-# program-useful representations.
-joint_loss_weight: 0.17
+# Reverted to 0.5: direct encoder supervision is critical to prevent
+# representation collapse.  At joint_loss≈0.38 and lm_loss≈0.40 the effective
+# gradient (0.5*0.38=0.19) is healthy relative to the LM loss.
+joint_loss_weight: 0.5
 
 # ========== LORA CONFIG ==========
 # Reduced rank (16 vs 32) — 3B model needs less adaptation capacity
-lora_r: 8
+lora_r: 16
 lora_alpha: 32
-lora_dropout: 0.024
+lora_dropout: 0.05
 
 # ========== TRAINING HYPERPARAMETERS ==========
 num_train_epochs: 25
 per_device_train_batch_size: 16     # 3B model fits larger batch
 per_device_eval_batch_size: 16
-learning_rate: 0.00014                  # Base LR (used for LoRA + projection)
-encoder_lr: 1.6e-06                     # Lower LR for ST-GCN (trains from scratch)
+learning_rate: 0.0001                   # Base LR (used for LoRA + projection)
+encoder_lr: 5.0e-06                     # 3x higher: encoder needs faster convergence
 scale_lr: 1e-4                       # Faster adaptation for motion_scale
 weight_decay: 0.0075
 max_grad_norm: 1.0
-warmup_ratio: 0.17                   # Longer warmup for encoder stability
+warmup_ratio: 0.1                    # Shorter warmup, more training at full LR
 lr_scheduler_type: cosine
 gradient_accumulation_steps: 2       # Effective batch = 32
 dataloader_num_workers: 8

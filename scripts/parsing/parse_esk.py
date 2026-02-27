@@ -116,8 +116,8 @@ def parse_args():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=1,
-        help="Batch size for parsing (if parser supports batching)",
+        default=8,
+        help="Batch size for parsing (higher = faster, uses more GPU memory)",
     )
     return parser.parse_args()
 
@@ -268,8 +268,8 @@ def validate_program(program: str) -> bool:
 def main():
     args = parse_args()
     
-    # Resolve paths - relative paths are relative to workspace root (parent of scripts/)
-    workspace_root = Path(__file__).parent.parent
+    # Resolve paths - relative paths are relative to workspace root (grandparent of scripts/parsing/)
+    workspace_root = Path(__file__).parent.parent.parent
     if args.esk_path.startswith("..") or args.esk_path.startswith("."):
         esk_path = (workspace_root / args.esk_path).resolve()
     else:
@@ -352,6 +352,9 @@ def main():
     programs_by_activity: dict[str, list[dict]] = {}
     parse_stats = {"total": 0, "valid": 0, "invalid": 0}
     
+    batch_size = args.batch_size
+    logger.info(f"Parsing with batch_size={batch_size}")
+    
     for activity_name in tqdm(activity_names, desc="Activities"):
         segments = all_segments_by_activity.get(activity_name, [])
         
@@ -362,32 +365,33 @@ def main():
         
         programs_by_activity[activity_name] = []
         
-        for seg in tqdm(segments, desc=f"  {activity_name}", leave=False):
-            poses = seg["poses"]
+        # Process in batches
+        for batch_start in tqdm(range(0, len(segments), batch_size), desc=f"  {activity_name}", leave=False):
+            batch_segs = segments[batch_start:batch_start + batch_size]
+            batch_poses = [seg["poses"] for seg in batch_segs]
             
-            # Parse motion to program
             try:
-                program = parser.parse(poses)
+                batch_programs = parser.parse_batch(batch_poses)
             except Exception as e:
-                logger.warning(f"Parse error for {seg['video']}[{seg['start']}:{seg['end']}]: {e}")
-                parse_stats["invalid"] += 1
+                logger.warning(f"Batch parse error: {e}")
+                parse_stats["invalid"] += len(batch_segs)
                 continue
             
-            parse_stats["total"] += 1
-            
-            # Validate program
-            if validate_program(program):
-                parse_stats["valid"] += 1
-                programs_by_activity[activity_name].append({
-                    "program": program,
-                    "video": seg["video"],
-                    "start": seg["start"],
-                    "end": seg["end"],
-                    "duration": seg["end"] - seg["start"],
-                })
-            else:
-                parse_stats["invalid"] += 1
-                logger.debug(f"Invalid program: {program[:50]}...")
+            for seg, program in zip(batch_segs, batch_programs):
+                parse_stats["total"] += 1
+                
+                if validate_program(program):
+                    parse_stats["valid"] += 1
+                    programs_by_activity[activity_name].append({
+                        "program": program,
+                        "video": seg["video"],
+                        "start": seg["start"],
+                        "end": seg["end"],
+                        "duration": seg["end"] - seg["start"],
+                    })
+                else:
+                    parse_stats["invalid"] += 1
+                    logger.debug(f"Invalid program: {program[:50]}...")
     
     # Log stats
     logger.info(f"Parsing complete:")

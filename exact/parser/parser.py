@@ -262,7 +262,10 @@ class MotionPrefixParser(nn.Module):
         program_embed = F.normalize(self.program_align_head(program_pooled), dim=-1)
 
         # Compute scaled cosine similarity matrix [B, B]
-        logit_scale = self.logit_scale.exp().clamp(max=100.0)
+        # Tight clamp (~1/0.07 ≈ 14.3) prevents logit_scale runaway that
+        # collapses the contrastive loss to zero (observed in previous runs
+        # where scale grew to 24.8+, killing alignment gradients).
+        logit_scale = self.logit_scale.exp().clamp(max=14.3)
         logits = logit_scale * motion_embed @ program_embed.t()
 
         # Symmetric cross-entropy (motion→program + program→motion)
@@ -441,6 +444,8 @@ class MotionPrefixParser(nn.Module):
         prompt_embeds = self._get_input_embeddings(prompt_ids)
 
         # Combined embeddings: [motion_prefix, prompt_text]
+        # Cast motion_features to match prompt_embeds dtype (e.g. bfloat16)
+        motion_features = motion_features.to(dtype=prompt_embeds.dtype)
         inputs_embeds = torch.cat([motion_features, prompt_embeds], dim=1)
 
         # Create dummy input_ids for generate() sequence tracking

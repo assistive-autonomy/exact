@@ -30,7 +30,7 @@ if [[ -n "${CHECKPOINT:-}" ]]; then
     BEST_CHECKPOINT="$CHECKPOINT"
 else
     echo "============================================"
-    echo "Step 1/5: Training parser on train_diverse.h5"
+    echo "Step 1/7: Training parser on train_diverse.h5"
     echo "============================================"
 
     TRAIN_CMD="uv run scripts/parsing/train_parser.py --config $CONFIG"
@@ -68,7 +68,7 @@ fi
 
 echo ""
 echo "============================================"
-echo "Step 2/5: Parsing ESK dataset"
+echo "Step 2/7: Parsing ESK dataset (verbs)"
 echo "============================================"
 
 uv run scripts/parsing/parse_esk.py \
@@ -76,13 +76,29 @@ uv run scripts/parsing/parse_esk.py \
     --esk-path "$ESK_PATH" \
     --split train \
     --label-type verbs \
-    --output "$ESK_PATH/programs_train.json"
+    --batch-size "${BATCH_SIZE:-8}" \
+    --output "$ESK_PATH/programs_verbs_train.json"
 
-echo "  ESK programs saved to: $ESK_PATH/programs_train.json"
+echo "  ESK verbs programs saved to: $ESK_PATH/programs_verbs_train.json"
 
 echo ""
 echo "============================================"
-echo "Step 3/5: Parsing HumanAct12 dataset"
+echo "Step 3/7: Parsing ESK dataset (activities)"
+echo "============================================"
+
+uv run scripts/parsing/parse_esk.py \
+    --parser-checkpoint "$BEST_CHECKPOINT" \
+    --esk-path "$ESK_PATH" \
+    --split train \
+    --label-type activity \
+    --batch-size "${BATCH_SIZE:-8}" \
+    --output "$ESK_PATH/programs_activity_train.json"
+
+echo "  ESK activity programs saved to: $ESK_PATH/programs_activity_train.json"
+
+echo ""
+echo "============================================"
+echo "Step 4/7: Parsing HumanAct12 dataset"
 echo "============================================"
 
 uv run scripts/parsing/parse_esk.py \
@@ -90,25 +106,38 @@ uv run scripts/parsing/parse_esk.py \
     --esk-path "$HUMANACT12_PATH" \
     --split train \
     --label-type actions \
+    --batch-size "${BATCH_SIZE:-8}" \
     --output "$HUMANACT12_PATH/programs_train.json"
 
 echo "  HumanAct12 programs saved to: $HUMANACT12_PATH/programs_train.json"
 
 echo ""
 echo "============================================"
-echo "Step 4/5: Building executable models (ESK)"
+echo "Step 5/7: Building executable models (ESK verbs)"
 echo "============================================"
 
 uv run scripts/parsing/build_models.py \
-    --programs "$ESK_PATH/programs_train.json" \
-    --output "$ESK_PATH/models.json" \
+    --programs "$ESK_PATH/programs_verbs_train.json" \
+    --output "$ESK_PATH/models_verbs.json" \
     --validate
 
-echo "  ESK models saved to: $ESK_PATH/models.json"
+echo "  ESK verbs models saved to: $ESK_PATH/models_verbs.json"
 
 echo ""
 echo "============================================"
-echo "Step 5/5: Building executable models (HumanAct12)"
+echo "Step 6/7: Building executable models (ESK activities)"
+echo "============================================"
+
+uv run scripts/parsing/build_models.py \
+    --programs "$ESK_PATH/programs_activity_train.json" \
+    --output "$ESK_PATH/models_activity.json" \
+    --validate
+
+echo "  ESK activity models saved to: $ESK_PATH/models_activity.json"
+
+echo ""
+echo "============================================"
+echo "Step 7/7: Building executable models (HumanAct12)"
 echo "============================================"
 
 uv run scripts/parsing/build_models.py \
@@ -124,11 +153,13 @@ echo "ALL DONE"
 echo "============================================"
 echo ""
 echo "Outputs:"
-echo "  Parser checkpoint: $BEST_CHECKPOINT"
-echo "  ESK programs:      $ESK_PATH/programs_train.json"
-echo "  ESK models:        $ESK_PATH/models.json"
-echo "  HA12 programs:     $HUMANACT12_PATH/programs_train.json"
-echo "  HA12 models:       $HUMANACT12_PATH/models.json"
+echo "  Parser checkpoint:     $BEST_CHECKPOINT"
+echo "  ESK verbs programs:    $ESK_PATH/programs_verbs_train.json"
+echo "  ESK verbs models:      $ESK_PATH/models_verbs.json"
+echo "  ESK activity programs: $ESK_PATH/programs_activity_train.json"
+echo "  ESK activity models:   $ESK_PATH/models_activity.json"
+echo "  HA12 programs:         $HUMANACT12_PATH/programs_train.json"
+echo "  HA12 models:           $HUMANACT12_PATH/models.json"
 echo ""
 echo "Next steps:"
 echo "  - Data augmentation:   uv run scripts/parsing/augment_data.py --models <models.json>"
