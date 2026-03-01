@@ -11,7 +11,7 @@ into a single reward function using the formula:
 This is a "soft OR" - if any program gives high reward, the combined reward
 is high. This enables:
 - Data augmentation for activity segmentation
-- Compositional generalization for activity assessment
+- Compositional generalization for anomaly detection
 """
 
 from __future__ import annotations
@@ -450,7 +450,7 @@ class ActivityModelCollection:
     """Collection of ExecutableActivityModels for multiple activities.
     
     This class manages a set of activity models, one per activity class.
-    Useful for segmentation and assessment tasks where you need to
+    Useful for segmentation and anomaly detection tasks where you need to
     evaluate against multiple activity types.
     
     Attributes:

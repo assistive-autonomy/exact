@@ -4,7 +4,7 @@
 This script loads parsed programs (from parse_esk.py) and builds an
 ActivityModelCollection that can be used for:
 - Data augmentation (generate trajectories using BehaviourModel)
-- Activity assessment (compare test programs to activity models)
+- Anomaly detection (compare test programs to activity models)
 
 The collection is saved as a JSON file with the following structure:
     {

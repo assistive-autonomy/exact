@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Assessment using Executable Activity Models with Program Edit Distance.
+"""Anomaly Detection using Executable Activity Models with Program Edit Distance.
 
 This script evaluates activity separability using edit distance between
 programs parsed from motion data. It supports both fine-grained (verbs)
@@ -19,12 +19,12 @@ Workflow:
 
 Usage:
     # Using pre-parsed programs (fast)
-    uv run scripts/tasks/assessment_exec.py \
+    uv run scripts/tasks/anomaly_detection_exec.py \
         --train-programs /pvc/esk/programs_train.json \
         --label-type verbs
 
     # Parse on the fly (slower, uses LLM)
-    uv run scripts/tasks/assessment_exec.py \
+    uv run scripts/tasks/anomaly_detection_exec.py \
         --parser-checkpoint results/parser/20260122_225017 \
         --label-type activity
 """
@@ -63,7 +63,7 @@ WANDB_ENTITY = "assistive-autonomy"
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Assessment using Executable Activity Models"
+        description="Anomaly Detection using Executable Activity Models"
     )
     
     # Data sources
@@ -127,7 +127,7 @@ def parse_args():
         "--output-dir",
         type=str,
         default=None,
-        help="Output directory (default: results/assessment_exec/<label_type>_<timestamp>)",
+        help="Output directory (default: results/anomaly_detection_exec/<label_type>_<timestamp>)",
     )
     
     # Wandb
@@ -328,11 +328,11 @@ def main():
     if args.output_dir:
         output_dir = Path(args.output_dir)
     else:
-        output_dir = Path(f"results/assessment_exec/{args.label_type}_{timestamp}")
+        output_dir = Path(f"results/anomaly_detection_exec/{args.label_type}_{timestamp}")
     output_dir.mkdir(parents=True, exist_ok=True)
     
     logger.info("=" * 60)
-    logger.info("Executable Activity Model Assessment")
+    logger.info("Executable Activity Model Anomaly Detection")
     logger.info("=" * 60)
     logger.info(f"Label type: {args.label_type}")
     logger.info(f"Train budget: {args.train_budget} programs/activity")
@@ -561,7 +561,7 @@ def main():
         wandb.finish()
         logger.info("Logged results to wandb")
     
-    logger.success(f"Assessment complete! Results saved to {output_dir}")
+    logger.success(f"Anomaly detection complete! Results saved to {output_dir}")
     return 0
 
 

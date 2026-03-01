@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Activity Assessment using STG-NF normalizing flows.
+"""Anomaly Detection using STG-NF normalizing flows.
 
 This script performs full evaluation of STG-NF models for activity recognition:
 - Trains N models (one per target activity)
@@ -7,7 +7,7 @@ This script performs full evaluation of STG-NF models for activity recognition:
 - Generates separability matrix showing how well each model distinguishes activities
 - Reports per-activity AUC and separation metrics
 
-For hyperparameter tuning, use tune_assessment.py instead which is faster
+For hyperparameter tuning, use tune_anomaly_detection.py instead which is faster
 and reports mean_auc for sweep optimization.
 """
 
@@ -29,7 +29,8 @@ from tqdm import tqdm
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from exact.anomaly import STG_NF, Graph, Trainer
+from exact.anomaly import STG_NF, AnomalyTrainer as Trainer
+from exact.encoder.utils import Graph
 from exact.data.esk import get_esk_dataloaders, get_unique_activities
 
 import wandb
@@ -422,9 +423,9 @@ def print_aggregated_results(aggregated: dict):
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Activity Assessment")
+    parser = argparse.ArgumentParser(description="Anomaly Detection")
     parser.add_argument(
-        "--config", type=str, default="configs/assessment.yaml", help="Config file"
+        "--config", type=str, default="configs/anomaly_detection.yaml", help="Config file"
     )
     parser.add_argument(
         "--list-activities", action="store_true", help="List available activities"
@@ -439,7 +440,7 @@ def main():
     parser.add_argument(
         "--aggregate-output",
         type=str,
-        default="results/assessment/aggregated",
+        default="results/anomaly_detection/aggregated",
         help="Output directory for aggregated results",
     )
     parser.add_argument("overrides", nargs="*", help="Config overrides (key=value)")
@@ -525,7 +526,7 @@ def main():
             mode=cfg.wandb_mode,
         )
 
-    logger.info("Activity Assessment - STG-NF")
+    logger.info("Anomaly Detection - STG-NF")
     logger.info(f"Label type: {cfg.data.label_type}")
     logger.info(f"Target activities: {target_activities}")
     logger.info(f"Number of models to train: {n_models}")
@@ -576,7 +577,6 @@ def main():
         pose_shape = (3, cfg.data.seg_len, 24)  # (C, T, V) for SMPL
 
         graph = Graph(
-            layout="smpl",
             strategy=cfg.model.adj_strategy,
             max_hop=1,
         )

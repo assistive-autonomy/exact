@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""Quick Assessment using pre-parsed programs.
+"""Quick Anomaly Detection using pre-parsed programs.
 
-This script runs assessment using already-parsed programs from programs_train.json,
+This script runs anomaly detection using already-parsed programs from programs_train.json,
 avoiding the slow LLM inference step. It splits the programs into train/test 
 and computes the separability matrix.
 """
@@ -67,10 +67,10 @@ def plot_separability_matrix(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Quick Assessment using pre-parsed programs")
+    parser = argparse.ArgumentParser(description="Quick Anomaly Detection using pre-parsed programs")
     parser.add_argument("--programs", type=str, default="/pvc/esk/programs_train.json",
                        help="Path to programs JSON")
-    parser.add_argument("--output-dir", type=str, default="results/assessment_quick",
+    parser.add_argument("--output-dir", type=str, default="results/anomaly_detection_quick",
                        help="Output directory")
     parser.add_argument("--train-programs", type=int, default=20,
                        help="Number of programs per activity for model")
@@ -86,7 +86,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     logger.info("=" * 60)
-    logger.info("Quick Assessment using Pre-Parsed Programs")
+    logger.info("Quick Anomaly Detection using Pre-Parsed Programs")
     logger.info("=" * 60)
     
     # Load programs
@@ -166,7 +166,7 @@ def main():
         title="Program Edit Distance Separability (Pre-parsed)"
     )
     
-    logger.success(f"Assessment complete! Results saved to {output_dir}")
+    logger.success(f"Anomaly detection complete! Results saved to {output_dir}")
     
     return 0
 

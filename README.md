@@ -6,7 +6,7 @@
 ExAct learns executable activity models from motion data. The pipeline:
 1. **Parser**: Encodes motion sequences into symbolic programs using a motion-conditioned LLM
 2. **Executable Models**: Combines programs per activity using disjunctive logic
-3. **Applications**: Data augmentation for segmentation, program-based activity assessment
+3. **Applications**: Data augmentation for segmentation, program-based anomaly detection
 
 ## Architecture
 
@@ -106,24 +106,24 @@ uv run scripts/parsing/build_models.py \
 | `--program-budget` | None | Select N diverse programs per activity |
 | `--max-programs` | None | Random sample limit (faster than budget) |
 
-#### Step 3: Run Assessment
+#### Step 3: Run Anomaly Detection
 
 Evaluate activity separability using program edit distance:
 
-**Quick Assessment** (uses pre-parsed programs, no LLM inference needed):
+**Quick Anomaly Detection** (uses pre-parsed programs, no LLM inference needed):
 
 ```bash
-uv run scripts/tasks/assessment_quick.py \
+uv run scripts/tasks/anomaly_detection_quick.py \
     --programs /pvc/esk/programs_train.json \
-    --output-dir results/assessment_quick \
+    --output-dir results/anomaly_detection_quick \
     --train-programs 15 \
     --test-programs 10
 ```
 
-**Full Assessment** (parses test data with LLM):
+**Full Anomaly Detection** (parses test data with LLM):
 
 ```bash
-uv run scripts/tasks/assessment_edit_dist.py \
+uv run scripts/tasks/anomaly_detection_edit_dist.py \
     --load-models /pvc/esk/models.json \
     --parser-checkpoint results/parser/20260122_225017 \
     --max-train-programs 50 \
@@ -157,7 +157,7 @@ uv run scripts/tasks/segmentation.py project.data_path=/pvc/esk/augmented
 
 ## Latest Results
 
-### Program Edit Distance Assessment (ESK Verbs)
+### Program Edit Distance Anomaly Detection (ESK Verbs)
 
 **Overall Metrics:**
 | Metric | Value |
@@ -320,10 +320,10 @@ uv run scripts/esk2dlc.py --esk-path /path/to/raw/esk --output-path /pvc/esk
 | `scripts/parsing/parse_esk.py` | Parse ESK motion → programs | `--parser-checkpoint`, `--label-type`, `--split` |
 | `scripts/parsing/build_models.py` | Build ActivityModelCollection | `--programs`, `--program-budget` |
 | `scripts/parsing/augment_data.py` | Generate augmented training data | `--load-models`, `--num-samples` |
-| `scripts/tasks/assessment_exec.py` | Executable model assessment (wandb) | `--train-programs`, `--label-type` |
-| `scripts/tasks/assessment_quick.py` | Quick assessment (pre-parsed) | `--programs`, `--train-programs` |
-| `scripts/tasks/assessment_edit_dist.py` | Full assessment (with parsing) | `--load-models`, `--parser-checkpoint` |
-| `scripts/tasks/assessment.py` | Flow-based assessment (baseline) | config overrides |
+| `scripts/tasks/anomaly_detection_exec.py` | Executable model anomaly detection (wandb) | `--train-programs`, `--label-type` |
+| `scripts/tasks/anomaly_detection_quick.py` | Quick anomaly detection (pre-parsed) | `--programs`, `--train-programs` |
+| `scripts/tasks/anomaly_detection_edit_dist.py` | Full anomaly detection (with parsing) | `--load-models`, `--parser-checkpoint` |
+| `scripts/tasks/anomaly_detection.py` | Flow-based anomaly detection (baseline) | config overrides |
 | `scripts/tasks/segmentation.py` | Temporal action segmentation | `train_fraction`, `project.data_path` |
 | `scripts/data/generate_data.py` | Generate synthetic training data | `--name`, `--num-samples` |
 | `scripts/data/generate_diverse_data.sh` | Generate diverse training data | `[output_dir]`, `[total_samples]` |
@@ -336,7 +336,7 @@ uv run scripts/esk2dlc.py --esk-path /path/to/raw/esk --output-path /pvc/esk
 |--------|-------------|
 | `configs/parser.yaml` | Motion-conditioned parser training |
 | `configs/segmentation.yaml` | Activity segmentation (DLC2Action) |
-| `configs/assessment.yaml` | Activity assessment (STG-NF baseline) |
+| `configs/anomaly_detection.yaml` | Anomaly detection (STG-NF baseline) |
 | `configs/sweeps/*.yaml` | Hyperparameter sweep configs for wandb |
 
 ---
@@ -360,10 +360,10 @@ scripts/
 │   ├── augment_data.py       # Data augmentation
 │   └── retrieval_baseline.py # Encoder retrieval baseline
 ├── tasks/
-│   ├── assessment_quick.py   # Quick assessment (pre-parsed)
-│   ├── assessment_edit_dist.py  # Full assessment
-│   ├── assessment_exec.py    # Executable model assessment (wandb)
-│   ├── assessment.py         # Flow-based assessment (baseline)
+│   ├── anomaly_detection_quick.py   # Quick anomaly detection (pre-parsed)
+│   ├── anomaly_detection_edit_dist.py  # Full anomaly detection
+│   ├── anomaly_detection_exec.py    # Executable model anomaly detection (wandb)
+│   ├── anomaly_detection.py         # Flow-based anomaly detection (baseline)
 │   └── segmentation.py       # Action segmentation
 └── data/
     ├── generate_data.py      # Synthetic data generation
@@ -373,7 +373,7 @@ scripts/
 configs/
 ├── parser.yaml           # Parser training config
 ├── segmentation.yaml     # Segmentation config
-├── assessment.yaml       # Assessment config
+├── anomaly_detection.yaml       # Anomaly detection config
 └── sweeps/               # Hyperparameter sweep configs
 ```
 
@@ -393,8 +393,8 @@ uv run scripts/parsing/parse_esk.py --parser-checkpoint results/parser/<checkpoi
 # 3. Build executable models
 uv run scripts/parsing/build_models.py --programs /pvc/esk/programs_train.json --program-budget 100
 
-# 4. Run assessment
-uv run scripts/tasks/assessment_quick.py --programs /pvc/esk/programs_train.json
+# 4. Run anomaly detection
+uv run scripts/tasks/anomaly_detection_quick.py --programs /pvc/esk/programs_train.json
 
 # 5. (Optional) Generate augmented data and run segmentation
 uv run scripts/parsing/augment_data.py --load-models /pvc/esk/models.json --num-samples 5000

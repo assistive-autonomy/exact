@@ -1,0 +1,54 @@
+experiment:
+  name: null
+  seed: 42
+  device: auto
+
+data:
+  esk_dir: ../humanact12
+  label_type: actions
+  target_activities:
+    - drink
+    - jump
+    - run
+    - throw
+    - walk
+  seg_len: 48
+  seg_stride: 12
+  normalize: true
+
+model:
+  hidden_channels: 32
+  K: 4
+  L: 2
+  temporal_kernel: 5
+  adj_strategy: uniform
+  learn_prior: false
+  R: 6
+  permutation: invconv
+
+training:
+  epochs: 50
+  batch_size: 128
+  lr: 3.3e-04
+  lr_decay: 0.96
+  weight_decay: 6e-06
+  grad_clip: 100.0
+  num_workers: 4
+  log_interval: 100
+
+evaluation:
+  enabled: true
+  save_predictions: true
+
+output:
+  dir: results/anomaly_detection
+  save_checkpoints: true
+  checkpoint_interval: 1
+
+checkpoint:
+  path: null
+  eval_only: false
+
+wandb_project: exact
+wandb_entity: assistive-autonomy
+wandb_mode: online

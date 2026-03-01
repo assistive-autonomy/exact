@@ -15,7 +15,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from exact.encoder import SMPL_KEYPOINTS
 
-LabelType = Literal["activity", "verbs", "nouns"]
+LabelType = Literal["activity", "verbs", "nouns", "actions"]
 
 
 def load_train_test_split(split_file: Path) -> tuple[list[str], list[str]]:
@@ -138,7 +138,10 @@ class ESKPoseDataset(Dataset):
 
         self.pose_dir = self.esk_dir / "D2A_converted_pose_smpl"
         self.label_dir = self.esk_dir / f"D2A_converted_label_{label_type}"
-        self.split_file = self.esk_dir / "traintest_split.txt"
+        # Prefer trainvaltest_split.txt (has val section), fall back to traintest_split.txt
+        self.split_file = self.esk_dir / "trainvaltest_split.txt"
+        if not self.split_file.exists():
+            self.split_file = self.esk_dir / "traintest_split.txt"
 
         train_videos, test_videos = load_train_test_split(self.split_file)
         self.video_ids = train_videos if split == "train" else test_videos

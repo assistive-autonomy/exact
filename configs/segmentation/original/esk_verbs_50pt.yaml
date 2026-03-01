@@ -1,10 +1,10 @@
 project:
-  project_name: esk_activities_50pt
+  project_name: esk_verbs_50pt
   projects_path: dlc2a_benchmark
   data_type: dlc_track
   annotation_type: dlc
   data_path: ../esk/D2A_converted_pose_smpl
-  annotation_path: ../esk/D2A_converted_label_activity
+  annotation_path: ../esk/D2A_converted_label_verbs
 
 general:
   model_name: c2f_tcn
@@ -32,7 +32,7 @@ data:
 training:
   lr: 0.001
   device: auto
-  num_epochs: 50
+  num_epochs: 30
   to_ram: false
   batch_size: 32  # Reduced from 64 to lower memory usage
   normalize: true
@@ -63,16 +63,13 @@ features:
   zone_distances: null
   area_vertices: null
 
-augmentations:
-  use_default_augmentations: true
-  augmentations: null
 
 model:
   num_f_maps: 128
   feature_dim: null
 
-hyperparameter_search_epochs: 10
-hyperparameter_search_trials: 20
+hyperparameter_search_epochs: 5
+hyperparameter_search_trials: 10
 hyperparameter_search_metric: f1
 num_seeds: 3
 models: [ms_tcn3, c2f_tcn, edtcn, c2f_transformer]
@@ -100,4 +97,4 @@ hyperparameter_search_space:
     choices: [1024] 
 
 output_dir: results/segmentation
-results_table_path: results_activities_50.csv
+results_table_path: results_verbs_50.csv

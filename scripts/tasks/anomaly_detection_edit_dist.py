@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Activity Assessment using Program Edit Distance.
+"""Anomaly Detection using Program Edit Distance.
 
 This script evaluates activity separability using unordered tree edit distance (UTED)
 between activity motion programs. Unlike the flow-based approach that operates on 
@@ -347,11 +347,11 @@ def plot_separation_summary(
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(description="Activity Assessment using Program Edit Distance")
-    parser.add_argument("--config", type=str, default="configs/assessment.yaml",
+    parser = argparse.ArgumentParser(description="Anomaly Detection using Program Edit Distance")
+    parser.add_argument("--config", type=str, default="configs/anomaly_detection.yaml",
                        help="Path to config file")
     parser.add_argument("--output-dir", type=str, default=None,
-                       help="Output directory (default: results/assessment_edit_dist/<timestamp>)")
+                       help="Output directory (default: results/anomaly_detection_edit_dist/<timestamp>)")
     parser.add_argument("--max-train-programs", type=int, default=50,
                        help="Maximum programs per activity for training model")
     parser.add_argument("--max-test-programs", type=int, default=50,
@@ -372,11 +372,11 @@ def main():
     # Setup
     set_seed(args.seed)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(args.output_dir or f"results/assessment_edit_dist/{timestamp}")
+    output_dir = Path(args.output_dir or f"results/anomaly_detection_edit_dist/{timestamp}")
     output_dir.mkdir(parents=True, exist_ok=True)
     
     logger.info("=" * 60)
-    logger.info("Activity Assessment using Program Edit Distance")
+    logger.info("Anomaly Detection using Program Edit Distance")
     logger.info("=" * 60)
     logger.info(f"Output directory: {output_dir}")
     logger.info(f"Value tolerance: {VALUE_TOLERANCE}")
@@ -389,7 +389,11 @@ def main():
     label_type = cfg.data.get("label_type", "verbs")
     label_dir = str(esk_dir / f"D2A_converted_label_{label_type}")
     pose_dir = str(esk_dir / "D2A_converted_pose_smpl")
-    split_path = str(esk_dir / "traintest_split.txt")
+    # Prefer trainvaltest_split.txt, fall back to traintest_split.txt
+    split_path = esk_dir / "trainvaltest_split.txt"
+    if not split_path.exists():
+        split_path = esk_dir / "traintest_split.txt"
+    split_path = str(split_path)
     
     logger.info(f"Label type: {label_type}")
     logger.info(f"Label dir: {label_dir}")
@@ -541,7 +545,7 @@ def main():
     # Plot summary
     plot_separation_summary(metrics, str(output_dir / "separation_summary.png"))
     
-    logger.success(f"Assessment complete! Results saved to {output_dir}")
+    logger.success(f"Anomaly detection complete! Results saved to {output_dir}")
     
     return metrics
 

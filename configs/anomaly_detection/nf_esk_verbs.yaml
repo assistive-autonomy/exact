@@ -1,24 +1,17 @@
-# Activity Assessment Configuration (STG-NF)
-
 experiment:
   name: null
   seed: 42
   device: auto
 
 data:
-  esk_dir: /pvc/esk
+  esk_dir: ../esk
   label_type: verbs
   target_activities:
-    - Cut
-    - Pour
-    - Stir
-    - Wash
-    - Grab
-    - Open
-    - Peel
-    - Grate
-    - Carry
     - Add
+    - Cut
+    - Move
+    - Stir
+    - Carry
   seg_len: 48
   seg_stride: 12
   normalize: true
@@ -36,7 +29,7 @@ model:
 training:
   epochs: 50
   batch_size: 128
-  lr: 33e-04
+  lr: 3.3e-04
   lr_decay: 0.96
   weight_decay: 6e-06
   grad_clip: 100.0
@@ -48,7 +41,7 @@ evaluation:
   save_predictions: true
 
 output:
-  dir: results/assessment
+  dir: results/anomaly_detection
   save_checkpoints: true
   checkpoint_interval: 1
 
