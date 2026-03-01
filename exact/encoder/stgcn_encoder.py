@@ -10,6 +10,60 @@ import torch.nn as nn
 
 from exact.encoder.utils import Graph, STGCNBlock
 
+
+class MotionNormalizer(nn.Module):
+    """
+    Per-feature running normalization for raw motion input.
+
+    Unlike BatchNorm, this module ALWAYS normalizes using running statistics
+    (both in train and eval mode), eliminating the distribution mismatch that
+    occurs when BatchNorm switches from batch stats (train) to running stats
+    (eval) on out-of-distribution data.
+
+    During training, running mean/var are updated via exponential moving average.
+    During eval, the stored statistics are used without updates.
+
+    Args:
+        num_features: Number of input features (e.g., 72 for 24 joints × 3 coords)
+        momentum: EMA momentum for running stats updates (default: 0.1)
+        eps: Small constant for numerical stability
+    """
+
+    def __init__(self, num_features: int, momentum: float = 0.1, eps: float = 1e-5):
+        super().__init__()
+        self.num_features = num_features
+        self.momentum = momentum
+        self.eps = eps
+        self.register_buffer("running_mean", torch.zeros(num_features))
+        self.register_buffer("running_var", torch.ones(num_features))
+        self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.long))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize input using running statistics.
+
+        Args:
+            x: Input tensor of shape [..., num_features] (e.g. [B, T, 72])
+        Returns:
+            Normalized tensor of same shape
+        """
+        if self.training:
+            with torch.no_grad():
+                flat = x.reshape(-1, x.shape[-1]).float()
+                batch_mean = flat.mean(dim=0)
+                batch_var = flat.var(dim=0, unbiased=False)
+
+                self.num_batches_tracked += 1
+                if self.num_batches_tracked == 1:
+                    self.running_mean.copy_(batch_mean)
+                    self.running_var.copy_(batch_var)
+                else:
+                    self.running_mean.lerp_(batch_mean, self.momentum)
+                    self.running_var.lerp_(batch_var, self.momentum)
+
+        # Always normalize with running stats (identical behavior train & eval)
+        return (x - self.running_mean) / (self.running_var.sqrt() + self.eps)
+
 class STGCNEncoder(nn.Module):
     """
     ST-GCN based trajectory encoder for SMPL skeletal motion encoding.
@@ -63,8 +117,11 @@ class STGCNEncoder(nn.Module):
         A = torch.tensor(graph.A, dtype=torch.float32, requires_grad=False)
         self.register_buffer("A", A)
 
-        # Input projection
-        self.input_bn = nn.BatchNorm2d(input_channels)
+        # Per-feature normalization (always uses running stats — no train/eval gap)
+        self.motion_normalizer = MotionNormalizer(num_nodes * input_channels)
+
+        # Input projection (InstanceNorm: no running stats, immune to train/eval mismatch)
+        self.input_bn = nn.InstanceNorm2d(input_channels, affine=True)
 
         # ── Per-joint positional encoding ─────────────────────────────────
         # After spatial graph convolutions, joint identity gets blurred.
@@ -118,7 +175,7 @@ class STGCNEncoder(nn.Module):
             embeddings: [batch_size, num_temporal_tokens, output_dim]
                        Multiple embeddings preserving temporal structure
         """
-        # Compute in float32 for BatchNorm numerical stability
+        # Compute in float32 for numerical stability
         motion = motion.float()
         
         batch_size, seq_len, features = motion.shape
@@ -126,6 +183,9 @@ class STGCNEncoder(nn.Module):
             f"Expected {self.num_nodes * self.input_channels} features, "
             f"got {features}"
         )
+
+        # Per-feature normalization (running mean/std, identical train & eval)
+        motion = self.motion_normalizer(motion)
 
         # Reshape to ST-GCN format: [B, C, T, V]
         x = motion.view(batch_size, seq_len, self.num_nodes, self.input_channels)

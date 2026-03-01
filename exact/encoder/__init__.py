@@ -7,7 +7,7 @@ from exact.encoder.utils import (
     CENTER_JOINT,
     AdjacencyStrategy,
 )
-from exact.encoder.stgcn_encoder import STGCNEncoder
+from exact.encoder.stgcn_encoder import STGCNEncoder, MotionNormalizer
 
 __all__ = [
     "Graph",
@@ -18,4 +18,5 @@ __all__ = [
     "STGCNBlock",
     "AdjacencyStrategy",
     "STGCNEncoder",
+    "MotionNormalizer",
 ]

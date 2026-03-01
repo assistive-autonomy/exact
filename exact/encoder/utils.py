@@ -240,7 +240,7 @@ class STGCNBlock(nn.Module):
         self.gcn = GraphConv(in_channels, out_channels, s_kernel, t_kernel_size=1)
 
         self.tcn = nn.Sequential(
-            nn.BatchNorm2d(out_channels),
+            nn.InstanceNorm2d(out_channels, affine=True),
             nn.ReLU(inplace=True),
             nn.Conv2d(
                 out_channels,
@@ -249,7 +249,7 @@ class STGCNBlock(nn.Module):
                 (stride, 1),
                 (t_kernel // 2, 0),
             ),
-            nn.BatchNorm2d(out_channels),
+            nn.InstanceNorm2d(out_channels, affine=True),
         )
 
         if not residual:
@@ -259,7 +259,7 @@ class STGCNBlock(nn.Module):
         else:
             self.residual = nn.Sequential(
                 nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=(stride, 1)),
-                nn.BatchNorm2d(out_channels),
+                nn.InstanceNorm2d(out_channels, affine=True),
             )
 
         self.relu = nn.ReLU(inplace=True)
