@@ -45,7 +45,7 @@ if [[ $# -gt 0 ]]; then
     esac
 else
     # Default: run all
-    run_esk_verbs
+    # run_esk_verbs
     run_esk_activities
     run_humanact12
 fi
