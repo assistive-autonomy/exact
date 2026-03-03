@@ -118,7 +118,7 @@ class ProgramTransformer(Transformer):
         return (str(joint), str(axis), float(value))
 
     def motion(self, children):
-        # children: [INT, INT, sensor tuples...]
+        # children: [FRAME, FRAME, sensor tuples...]
         start, end, *sensors = children
         reward_fns = [make_base_reward(j, a, v) for j, a, v in sensors]
         return MotionReward(int(start), int(end), SensorReward(reward_fns))

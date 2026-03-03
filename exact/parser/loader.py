@@ -51,7 +51,11 @@ class TrainedParser:
         checkpoint_path: str,
         device: str = "auto",
         use_grammar_constraint: bool = False,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 512,
+        temperature: float = 0.3,
+        top_p: float = 0.95,
+        num_retries: int = 2,
+        retry_temperature: float = 0.5,
     ):
         """Load a trained parser from checkpoint.
         
@@ -67,6 +71,10 @@ class TrainedParser:
         self.checkpoint_path = Path(checkpoint_path)
         self.max_new_tokens = max_new_tokens
         self.use_grammar_constraint = use_grammar_constraint
+        self.temperature = temperature
+        self.top_p = top_p
+        self.num_retries = num_retries
+        self.retry_temperature = retry_temperature
         
         # Determine device
         if device == "auto":
@@ -160,7 +168,6 @@ class TrainedParser:
             alignment_weight=self.config.get("alignment_weight", 0.1),
             alignment_dim=self.config.get("alignment_dim", 256),
             alignment_temperature=self.config.get("alignment_temperature", 0.07),
-            joint_loss_weight=self.config.get("joint_loss_weight", 0.5),
         )
         
         # Load parser weights (projection + alignment + joint heads)
@@ -174,8 +181,6 @@ class TrainedParser:
                 self.parser.program_align_head.load_state_dict(weights["program_align_head"])
             if "logit_scale" in weights:
                 self.parser.logit_scale.data = weights["logit_scale"]
-            if "joint_head" in weights:
-                self.parser.joint_head.load_state_dict(weights["joint_head"])
         
         self.parser.to(self.device)
         self.parser.eval()
@@ -197,99 +202,160 @@ class TrainedParser:
             return config.hidden_size
         raise AttributeError(f"Cannot find hidden_size in model config")
     
-    @torch.no_grad()
-    def parse(self, motion: np.ndarray) -> str:
-        """Parse a motion sequence into a program.
-        
+    def _pad_and_generate(
+        self,
+        motions: list[np.ndarray],
+        temperature: float,
+        do_sample: bool = True,
+    ) -> list[tuple[str, bool]]:
+        """Pad motions, run batched generation, decode and post-process.
+
+        When grammar constraints are active, generation is done one sample at a
+        time because SynCode's internal state tracks a fixed batch dimension
+        set at init.  Without grammar constraints, the full batch is
+        processed in a single call for maximum throughput.
+
         Args:
-            motion: Motion sequence of shape (seq_len, motion_dim)
-            
+            motions: List of motion arrays (seq_len_i, motion_dim)
+            temperature: Sampling temperature (0 for greedy)
+            do_sample: Whether to sample
+
         Returns:
-            Program string
+            List of (program_string, is_valid) tuples
         """
         from exact.parser.utils import post_process_program
-        
-        # Prepare input
-        motion_tensor = torch.tensor(motion, dtype=torch.float32)
-        if motion_tensor.dim() == 2:
-            motion_tensor = motion_tensor.unsqueeze(0)  # Add batch dim
-        motion_tensor = motion_tensor.to(self.device)
-        
-        # Generate
+        from exact.data.dataset import PROMPT_PREFIX
+
+        if not motions:
+            return []
+
+        # Grammar-constrained generation uses the same batch path as
+        # unconstrained — ExActGrammarProcessor handles any batch size.
+        # (The per-sample loop was only needed for SynCode's fixed
+        # num_samples parameter.)
+
+        # Full-batch generation
+        # Always pad to 1024 frames to match training distribution.
+        # Training data is always exactly 1024 frames; short ESK segments
+        # (median ~26 frames for verbs) produce wildly different encoder
+        # activations when padded to batch-max (~50 frames), causing mode
+        # collapse into degenerate single-segment programs.
+        TRAIN_SEQ_LEN = 1024
+        max_len = max(max(m.shape[0] for m in motions), TRAIN_SEQ_LEN)
+        motion_dim = motions[0].shape[1]
+        B = len(motions)
+
+        padded = np.zeros((B, max_len, motion_dim), dtype=np.float32)
+        for i, m in enumerate(motions):
+            padded[i, : m.shape[0]] = m
+
+        motion_tensor = torch.tensor(padded, dtype=torch.float32, device=self.device)
+
         generated_ids = self.parser.generate(
             motion=motion_tensor,
             max_new_tokens=self.max_new_tokens,
-            do_sample=False,
-            temperature=None,
-            top_p=None,
+            do_sample=do_sample and temperature > 0,
+            temperature=temperature if (do_sample and temperature > 0) else None,
+            top_p=self.top_p if (do_sample and temperature > 0) else None,
             pad_token_id=self.tokenizer.pad_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
             grammar_processor=self.grammar_processor,
         )
-        
-        # Decode and post-process
-        from exact.data.dataset import PROMPT_PREFIX
-        raw_program = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
-        # Strip prompt prefix if present
-        if raw_program.startswith(PROMPT_PREFIX):
-            raw_program = raw_program[len(PROMPT_PREFIX):]
-        program, _ = post_process_program(raw_program, repair=True)
-        
+
+        results: list[tuple[str, bool]] = []
+        for i in range(B):
+            raw = self.tokenizer.decode(
+                generated_ids[i], skip_special_tokens=True
+            ).strip()
+            if raw.startswith(PROMPT_PREFIX):
+                raw = raw[len(PROMPT_PREFIX) :]
+            program, is_valid = post_process_program(raw, repair=True)
+            results.append((program, is_valid))
+
+        return results
+
+    @torch.no_grad()
+    def parse(self, motion: np.ndarray) -> str:
+        """Parse a single motion sequence into a program.
+
+        Uses sampling with batched retries at increasing temperature to
+        maximize the chance of producing a valid program.
+
+        Args:
+            motion: Motion sequence of shape (seq_len, motion_dim)
+
+        Returns:
+            Program string
+        """
+        results = self._pad_and_generate(
+            [motion], temperature=self.temperature, do_sample=True
+        )
+        program, is_valid = results[0]
+        if is_valid:
+            return program
+
+        # Retry with increasing temperature
+        for retry in range(self.num_retries):
+            temp = self.retry_temperature + retry * 0.2
+            results = self._pad_and_generate(
+                [motion], temperature=temp, do_sample=True
+            )
+            program, is_valid = results[0]
+            if is_valid:
+                return program
+
         return program
-    
+
     @torch.no_grad()
     def parse_batch(self, motions: list[np.ndarray]) -> list[str]:
-        """Parse multiple motion sequences in a single batched forward pass.
-        
-        Pads variable-length motions to the longest in the batch,
-        runs encoder + LLM generation once, then decodes each.
-        
+        """Parse multiple motion sequences with batched retries.
+
+        Strategy:
+          1. Run all motions through batched generation at base temperature.
+          2. Collect indices of invalid programs.
+          3. Re-run *only* the failures as a new batch at higher temperature.
+          4. Repeat for ``num_retries`` rounds (temp increases each round).
+
+        This keeps GPU utilization high by always doing batched inference
+        instead of falling back to single-sample retries.
+
         Args:
             motions: List of motion sequences, each (seq_len_i, motion_dim)
-            
+
         Returns:
-            List of program strings
+            List of program strings (one per input motion)
         """
         if len(motions) == 0:
             return []
         if len(motions) == 1:
             return [self.parse(motions[0])]
-        
-        from exact.parser.utils import post_process_program
-        from exact.data.dataset import PROMPT_PREFIX
-        
-        # Pad motions to max length in batch
-        max_len = max(m.shape[0] for m in motions)
-        motion_dim = motions[0].shape[1]
-        B = len(motions)
-        
-        padded = np.zeros((B, max_len, motion_dim), dtype=np.float32)
-        for i, m in enumerate(motions):
-            padded[i, :m.shape[0]] = m
-        
-        motion_tensor = torch.tensor(padded, dtype=torch.float32, device=self.device)
-        
-        # Batched generation
-        generated_ids = self.parser.generate(
-            motion=motion_tensor,
-            max_new_tokens=self.max_new_tokens,
-            do_sample=False,
-            temperature=None,
-            top_p=None,
-            pad_token_id=self.tokenizer.pad_token_id,
-            eos_token_id=self.tokenizer.eos_token_id,
-            grammar_processor=self.grammar_processor,
+
+        # --- First pass at base temperature ---
+        results = self._pad_and_generate(
+            motions, temperature=self.temperature, do_sample=True
         )
-        
-        # Decode each sequence
-        programs = []
-        for i in range(B):
-            raw_program = self.tokenizer.decode(generated_ids[i], skip_special_tokens=True).strip()
-            if raw_program.startswith(PROMPT_PREFIX):
-                raw_program = raw_program[len(PROMPT_PREFIX):]
-            program, _ = post_process_program(raw_program, repair=True)
-            programs.append(program)
-        
+
+        programs: list[str] = [r[0] for r in results]
+        invalid_mask: list[bool] = [not r[1] for r in results]
+
+        # --- Batched retries at increasing temperature ---
+        for retry in range(self.num_retries):
+            retry_indices = [i for i, inv in enumerate(invalid_mask) if inv]
+            if not retry_indices:
+                break  # All valid
+
+            temp = self.retry_temperature + retry * 0.2
+            retry_motions = [motions[i] for i in retry_indices]
+
+            retry_results = self._pad_and_generate(
+                retry_motions, temperature=temp, do_sample=True
+            )
+
+            for idx, (prog, is_valid) in zip(retry_indices, retry_results):
+                if is_valid:
+                    programs[idx] = prog
+                    invalid_mask[idx] = False
+
         return programs
 
 

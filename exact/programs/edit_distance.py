@@ -80,14 +80,13 @@ def _tree_to_nodes_adj(tree: Union[Tree, Token], nodes: list, adj: list, parent_
     
     if isinstance(tree, Token):
         # Terminal node - use token type and normalized value
-        if tree.type == "VALUE":
+        if tree.type in ("VALUE", "NUMBER"):
             label = _normalize_value(float(tree.value))
-        elif tree.type == "INT":
-            # Skip interval values - we don't want to penalize different timings
-            # Return -1 to indicate this node should be skipped
+        elif tree.type in ("INT", "FRAME"):
+            # Skip frame indices — we don't penalize different timings
             return -1
         else:
-            # JOINT, AXIS - use value directly
+            # JOINT, AXIS — use value directly
             label = tree.value
     else:
         # Non-terminal - use rule name
@@ -141,20 +140,22 @@ def _build_simplified_tree(tree: Union[Tree, Token], nodes: list, adj: list, par
         nodes: List to append node labels to
         adj: List to append adjacency lists to
         parent_idx: Index of parent node
-        in_sensor: Whether we're inside a sensor node (NUMBER should be kept)
+        in_sensor: Whether we're inside a sensor node (VALUE should be kept)
     
     Returns:
         Index of created node, or None if skipped
     """
     if isinstance(tree, Token):
+        # Skip frame indices (NUMBER tokens outside sensors, or FRAME/INT)
+        if tree.type in ("FRAME", "INT"):
+            return None
         if tree.type == "NUMBER" and not in_sensor:
-            # Skip interval values (NUMBER tokens outside of sensor)
             return None
         
         # Create node for token
         node_idx = len(nodes)
         
-        if tree.type == "NUMBER":
+        if tree.type in ("VALUE", "NUMBER"):
             # This is a sensor value - normalize it
             label = _normalize_value(float(tree.value))
         else:

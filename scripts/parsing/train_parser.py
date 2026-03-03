@@ -36,7 +36,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from exact.data import TrajectoryGenerationDataset
 from exact.data.dataset import PROMPT_PREFIX
-from exact.data.utils import extract_joint_activity_labels
 from exact.parser import MotionPrefixParser
 from exact.parser.utils import create_grammar_processor
 from exact.encoder import STGCNEncoder
@@ -76,6 +75,18 @@ def get_device(device_str: str) -> torch.device:
     return torch.device(device_str)
 
 
+def set_tf32(enabled: bool = True):
+    """Enable TF32 for float32 matmuls and convolutions (A100/H100/H200).
+    
+    ~2x throughput for the float32 ST-GCN encoder with negligible precision loss.
+    """
+    if enabled and torch.cuda.is_available():
+        torch.set_float32_matmul_precision('high')
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True  # Auto-tune conv algorithms
+        logger.info("TF32 enabled for float32 matmuls and cuDNN (benchmark=True)")
+
+
 def get_model_hidden_size(model) -> int:
     """Get hidden size from model config."""
     config = model.config
@@ -86,16 +97,13 @@ def get_model_hidden_size(model) -> int:
     raise AttributeError(f"Cannot find hidden_size in model config: {type(config)}")
 
 
-def get_collate_fn(tokenizer, prompt_prefix: str = PROMPT_PREFIX, num_temporal_tokens: int = 16, max_frame: int = 1024):
+def get_collate_fn(tokenizer, prompt_prefix: str = PROMPT_PREFIX, max_frame: int = 1024):
     """Create a collate function with proper label masking.
 
     Labels are set to -100 for:
         - Padding tokens (attention_mask == 0)
         - Prompt prefix tokens ("Program: ")
     Only actual program tokens + EOS contribute to the LM loss.
-
-    Also computes per-temporal-token joint activity labels for the
-    auxiliary joint classification loss.
     """
     # Pre-compute prompt prefix token count
     prompt_token_ids = tokenizer(
@@ -113,20 +121,11 @@ def get_collate_fn(tokenizer, prompt_prefix: str = PROMPT_PREFIX, num_temporal_t
         labels[attention_mask == 0] = -100     # mask padding
         labels[:, :prompt_len] = -100          # mask prompt prefix
 
-        # Extract joint activity labels from program strings
-        joint_activity_labels = torch.stack([
-            extract_joint_activity_labels(
-                x["program"], num_temporal_tokens, max_frame
-            )
-            for x in batch
-        ])
-
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "motion": obs,
             "labels": labels,
-            "joint_activity_labels": joint_activity_labels,
         }
 
     return collate_fn
@@ -142,6 +141,8 @@ class EncoderCheckpointCallback(TrainerCallback):
         self.parser_model = parser_model
 
     def on_save(self, args, state, control, **kwargs):
+        if not state.is_world_process_zero:
+            return
         checkpoint_dir = os.path.join(
             args.output_dir, f"checkpoint-{state.global_step}"
         )
@@ -187,6 +188,8 @@ class GenerationEvalCallback(TrainerCallback):
         return self._eval_samples
 
     def on_step_end(self, args, state, control, **kwargs):
+        if not state.is_world_process_zero:
+            return
         if (
             state.global_step > 0
             and state.global_step % self.every_n_steps == 0
@@ -253,8 +256,6 @@ class AlignmentLoggingCallback(TrainerCallback):
         if hasattr(m, "_last_alignment_loss") and m._last_alignment_loss is not None:
             logs["train/alignment_loss"] = m._last_alignment_loss
             logs["train/logit_scale"] = m.logit_scale.exp().item()
-        if hasattr(m, "_last_joint_loss") and m._last_joint_loss is not None:
-            logs["train/joint_loss"] = m._last_joint_loss
         # Track learned motion embedding scale
         if hasattr(m, "_motion_scale"):
             logs["train/motion_scale"] = m._motion_scale.item()
@@ -613,10 +614,9 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
         alignment_weight=config.get("alignment_weight", 0.1),
         alignment_dim=config.get("alignment_dim", 256),
         alignment_temperature=config.get("alignment_temperature", 0.07),
-        joint_loss_weight=config.get("joint_loss_weight", 0.5),
     )
 
-    # Load parser weights (projection + alignment + joint heads)
+    # Load parser weights (projection + alignment heads)
     prefix_path = os.path.join(checkpoint_dir, "prefix_parser.pt")
     if os.path.exists(prefix_path):
         logger.info(f"Loading parser weights from: {prefix_path}")
@@ -628,8 +628,6 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
             model.program_align_head.load_state_dict(prefix_data["program_align_head"])
         if "logit_scale" in prefix_data:
             model.logit_scale.data = prefix_data["logit_scale"]
-        if "joint_head" in prefix_data:
-            model.joint_head.load_state_dict(prefix_data["joint_head"])
         if "motion_scale" in prefix_data:
             model._motion_scale.data = prefix_data["motion_scale"]
     else:
@@ -639,7 +637,6 @@ def load_checkpoint(checkpoint_dir: str, device: torch.device):
     model.motion_projection.to(device=device, dtype=model_dtype)
     model.motion_align_head.to(device=device, dtype=model_dtype)
     model.program_align_head.to(device=device, dtype=model_dtype)
-    model.joint_head.to(device=device, dtype=model_dtype)
     model.logit_scale.data = model.logit_scale.data.to(device=device)
     model._motion_scale.data = model._motion_scale.data.to(device=device)
 
@@ -677,9 +674,18 @@ def main():
     # Load config
     cfg = load_config(args.config, args.overrides)
 
-    device = get_device(cfg.get("device", "auto"))
+    # Multi-GPU: use LOCAL_RANK for per-process device placement (set by torchrun)
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(device)
+    else:
+        device = torch.device("cpu")
+    is_main_process = local_rank == 0
     model_dtype = torch.bfloat16
     set_seed(cfg.seed)
+    set_tf32(cfg.get("tf32", False))
 
     # Handle resume vs new run
     resume_from_checkpoint = None
@@ -708,14 +714,24 @@ def main():
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = Path(cfg.get("output_dir", "results/parser")) / timestamp
-        output_dir.mkdir(parents=True, exist_ok=True)
-        OmegaConf.save(cfg, output_dir / "config.yaml")
+        if is_main_process:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            OmegaConf.save(cfg, output_dir / "config.yaml")
+        # Ensure all ranks wait for rank 0 to create the directory
+        if world_size > 1:
+            import torch.distributed as dist
+            if dist.is_initialized():
+                dist.barrier()
+            else:
+                # Not yet initialized — directory will exist by the time Trainer needs it
+                pass
+        output_dir.mkdir(parents=True, exist_ok=True)  # no-op on rank 0, creates on others if needed
 
     run_name = output_dir.name
 
-    # Initialize wandb
+    # Initialize wandb (rank 0 only — Trainer handles per-rank logging)
     use_wandb = cfg.get("wandb_mode", "disabled") != "disabled" and WANDB_AVAILABLE
-    if use_wandb:
+    if use_wandb and is_main_process:
         wandb_id_file = output_dir / "wandb_run_id.txt"
         wandb_resume = None
         wandb_id = None
@@ -798,10 +814,12 @@ def main():
     base_model = AutoModelForCausalLM.from_pretrained(
         cfg.model_name,
         torch_dtype=None if load_in_4bit else torch.bfloat16,
-        device_map="auto",
-        low_cpu_mem_usage=not load_in_4bit,
+        device_map={"":  local_rank} if load_in_4bit else None,
+        low_cpu_mem_usage=True,
         quantization_config=quant_config,
     )
+    if not load_in_4bit:
+        base_model = base_model.to(device)
     model_hidden_size = get_model_hidden_size(base_model)
     logger.info(f"Model: {cfg.model_name}, hidden_size: {model_hidden_size}")
 
@@ -840,7 +858,7 @@ def main():
         dropout=cfg.get("stgcn_dropout", 0.1),
         graph_strategy=cfg.get("graph_strategy", "spatial"),
         joint_embedding=cfg.get("stgcn_joint_embedding", False),
-    ).to(device="cuda")  # Keep float32 for BatchNorm stability
+    ).to(device=device)  # Keep float32 for BatchNorm stability
 
     encoder_params = sum(p.numel() for p in trajectory_encoder.parameters())
     logger.info(
@@ -857,16 +875,14 @@ def main():
         alignment_weight=cfg.get("alignment_weight", 0.1),
         alignment_dim=cfg.get("alignment_dim", 256),
         alignment_temperature=cfg.get("alignment_temperature", 0.07),
-        joint_loss_weight=cfg.get("joint_loss_weight", 0.5),
     )
 
-    # Move projection, alignment, and joint head modules to CUDA with bf16
-    model.motion_projection = model.motion_projection.to(device="cuda", dtype=model_dtype)
-    model.motion_align_head = model.motion_align_head.to(device="cuda", dtype=model_dtype)
-    model.program_align_head = model.program_align_head.to(device="cuda", dtype=model_dtype)
-    model.joint_head = model.joint_head.to(device="cuda", dtype=model_dtype)
-    model.logit_scale.data = model.logit_scale.data.to(device="cuda")
-    model._motion_scale.data = model._motion_scale.data.to(device="cuda")
+    # Move projection and alignment modules to local GPU with bf16
+    model.motion_projection = model.motion_projection.to(device=device, dtype=model_dtype)
+    model.motion_align_head = model.motion_align_head.to(device=device, dtype=model_dtype)
+    model.program_align_head = model.program_align_head.to(device=device, dtype=model_dtype)
+    model.logit_scale.data = model.logit_scale.data.to(device=device)
+    model._motion_scale.data = model._motion_scale.data.to(device=device)
 
     proj_params = sum(p.numel() for p in model.motion_projection.parameters())
     align_params = (
@@ -874,14 +890,11 @@ def main():
         + sum(p.numel() for p in model.program_align_head.parameters())
         + 1  # logit_scale
     )
-    joint_head_params = sum(p.numel() for p in model.joint_head.parameters())
     logger.info(
         f"MotionPrefixParser: {num_temporal_tokens} motion prefix tokens, "
         f"{proj_params:,} projection params, "
         f"alignment_weight={model.alignment_weight}, "
-        f"{align_params:,} alignment params, "
-        f"joint_loss_weight={model.joint_loss_weight}, "
-        f"{joint_head_params:,} joint_head params"
+        f"{align_params:,} alignment params"
     )
 
     # [4/4] Load datasets
@@ -893,6 +906,9 @@ def main():
         path=cfg.train_data,
         tokenizer=tokenizer,
         max_seq_length=cfg.max_seq_length,
+        augment_crop_prob=cfg.get("augment_crop_prob", 0.0),
+        augment_min_segments=cfg.get("augment_min_segments", 1),
+        augment_min_crop_frames=cfg.get("augment_min_crop_frames", 32),
     )
     logger.info(f"Loaded {len(train_dataset)} training samples")
 
@@ -902,7 +918,9 @@ def main():
             path=cfg.eval_data,
             tokenizer=tokenizer,
             max_seq_length=cfg.max_seq_length,
+            augment_crop_prob=0.0,  # No augmentation for eval
         )
+        eval_dataset.training_mode = False  # Ensure no augmentation at eval
         max_eval_samples = cfg.get("max_eval_samples_training", None)
         if max_eval_samples and len(eval_dataset) > max_eval_samples:
             import random
@@ -931,7 +949,6 @@ def main():
         + list(model.program_align_head.parameters())
         + [model.logit_scale]
     )
-    joint_params_list = list(model.joint_head.parameters())
     scale_params_list = [model._motion_scale]
 
     # All other params (LoRA weights) get the base LR
@@ -941,7 +958,6 @@ def main():
             encoder_params_list
             + projection_params_list
             + align_params_list
-            + joint_params_list
             + scale_params_list
         )
     )
@@ -953,7 +969,6 @@ def main():
         {"params": encoder_params_list, "lr": encoder_lr, "weight_decay": cfg.weight_decay},
         {"params": projection_params_list, "lr": projection_lr, "weight_decay": cfg.weight_decay},
         {"params": align_params_list, "lr": projection_lr, "weight_decay": 0.0},
-        {"params": joint_params_list, "lr": projection_lr, "weight_decay": cfg.weight_decay},
         {"params": scale_params_list, "lr": scale_lr, "weight_decay": 0.0},
         {"params": lora_params_list, "lr": cfg.learning_rate, "weight_decay": cfg.weight_decay},
     ]
@@ -1001,13 +1016,15 @@ def main():
         greater_is_better=False,
         dataloader_num_workers=cfg.dataloader_num_workers,
         dataloader_pin_memory=device.type == "cuda",
+        dataloader_persistent_workers=cfg.get("dataloader_persistent_workers", False) and cfg.dataloader_num_workers > 0,
         dataloader_prefetch_factor=cfg.get("dataloader_prefetch_factor", 2),
-        report_to="wandb" if use_wandb else "none",
+        report_to="wandb" if (use_wandb and is_main_process) else "none",
         seed=cfg.seed,
         remove_unused_columns=False,
         save_safetensors=False,
         bf16=cfg.get("bf16", True),
         gradient_checkpointing=cfg.get("gradient_checkpointing", False),
+        ddp_find_unused_parameters=False,
     )
 
     # ── Callbacks ───────────────────────────────────────────────────────────
@@ -1051,7 +1068,7 @@ def main():
 
     total_train_steps = (
         len(train_dataset)
-        // (cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps)
+        // (cfg.per_device_train_batch_size * cfg.gradient_accumulation_steps * world_size)
         * cfg.num_train_epochs
     )
     warmup_steps = (
@@ -1075,7 +1092,6 @@ def main():
         eval_dataset=eval_dataset,
         data_collator=get_collate_fn(
             tokenizer,
-            num_temporal_tokens=num_temporal_tokens,
             max_frame=cfg.get("max_frame", 1024),
         ),
         callbacks=callbacks,
@@ -1088,63 +1104,79 @@ def main():
         logger.info("Starting training...")
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
-    # ── Save ────────────────────────────────────────────────────────────────
+    # ── Save (rank 0 only, while DDP is still active) ─────────────────────
 
-    logger.info("Saving model...")
-    trainer.save_model()
+    if is_main_process:
+        logger.info("Saving model...")
+        trainer.save_model()
 
-    # Save encoder + projection weights
-    model.save_pretrained(str(output_dir))
+        # Save encoder + projection weights
+        model.save_pretrained(str(output_dir))
 
-    # Save LoRA adapter
-    base_model.save_pretrained(output_dir / "lora_adapter")
-    tokenizer.save_pretrained(output_dir / "lora_adapter")
+        # Save LoRA adapter
+        base_model.save_pretrained(output_dir / "lora_adapter")
+        tokenizer.save_pretrained(output_dir / "lora_adapter")
 
-    # ── Post-training evaluation ────────────────────────────────────────────
+    # ── Tear down DDP before long-running single-process eval ─────────────
+    # Without this, non-main ranks wait at the barrier while rank 0 runs
+    # generation evaluation, causing NCCL watchdog timeouts (SIGABRT).
+    if world_size > 1:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            dist.barrier()           # sync so all ranks finish saving
+            dist.destroy_process_group()
+            logger.info("Distributed process group destroyed.")
 
-    if cfg.get("skip_post_training_eval", False):
-        logger.info("Skipping post-training generation evaluation (skip_post_training_eval=true)")
-    else:
-        logger.info("Running sample evaluation...")
-        eval_samples = load_eval_samples(
-            cfg.eval_data, n_samples=cfg.get("eval_samples", 8)
-        )
+    # ── Post-training evaluation (rank 0 only, single-process) ────────────
 
-        model.to(device)
-        eval_results = evaluate_samples(
-            model,
-            tokenizer,
-            eval_samples,
-            device,
-            model_dtype,
-            max_new_tokens=cfg.get("generation_max_new_tokens", 256),
-            num_retries=cfg.get("generation_retries", 2),
-            retry_temperature=cfg.get("generation_retry_temperature", 0.5),
-            retry_top_p=cfg.get("generation_retry_top_p", 0.9),
-            generation_temperature=cfg.get("generation_temperature", 0.3),
-            use_constrained_decoding=cfg.get("use_constrained_decoding", True),
-            log_attempts=cfg.get("log_generation_attempts", False),
-            max_frame=cfg.get("max_frame", 1024),
-        )
-        print_eval_results(eval_results)
+    if is_main_process:
+        if cfg.get("skip_post_training_eval", False):
+            logger.info("Skipping post-training generation evaluation (skip_post_training_eval=true)")
+        else:
+            logger.info("Running sample evaluation...")
+            eval_samples = load_eval_samples(
+                cfg.eval_data, n_samples=cfg.get("eval_samples", 8)
+            )
 
-        # Save results
-        with open(output_dir / "eval_results.json", "w") as f:
-            json.dump(eval_results, f, indent=2)
+            # Unwrap DDP wrapper if present so generation works single-process
+            if hasattr(model, "module"):
+                model = model.module
+
+            model.to(device)
+            eval_results = evaluate_samples(
+                model,
+                tokenizer,
+                eval_samples,
+                device,
+                model_dtype,
+                max_new_tokens=cfg.get("generation_max_new_tokens", 256),
+                num_retries=cfg.get("generation_retries", 2),
+                retry_temperature=cfg.get("generation_retry_temperature", 0.5),
+                retry_top_p=cfg.get("generation_retry_top_p", 0.9),
+                generation_temperature=cfg.get("generation_temperature", 0.3),
+                use_constrained_decoding=cfg.get("use_constrained_decoding", True),
+                log_attempts=cfg.get("log_generation_attempts", False),
+                max_frame=cfg.get("max_frame", 1024),
+            )
+            print_eval_results(eval_results)
+
+            # Save results
+            with open(output_dir / "eval_results.json", "w") as f:
+                json.dump(eval_results, f, indent=2)
+
+            if use_wandb:
+                log_samples_to_wandb(eval_results)
+                wandb.summary["final_accuracy"] = eval_results["accuracy"]
+                wandb.summary["final_validity_rate"] = eval_results["validity_rate"]
+                if eval_results.get("mean_normalized_edit_distance") is not None:
+                    wandb.summary["final_mean_edit_distance"] = eval_results[
+                        "mean_normalized_edit_distance"
+                    ]
 
         if use_wandb:
-            log_samples_to_wandb(eval_results)
-            wandb.summary["final_accuracy"] = eval_results["accuracy"]
-            wandb.summary["final_validity_rate"] = eval_results["validity_rate"]
-            if eval_results.get("mean_normalized_edit_distance") is not None:
-                wandb.summary["final_mean_edit_distance"] = eval_results[
-                    "mean_normalized_edit_distance"
-                ]
+            wandb.finish()
 
-    if use_wandb:
-        wandb.finish()
-
-    logger.success(f"Training complete! Results saved to: {output_dir}")
+        logger.success(f"Training complete! Results saved to: {output_dir}")
 
 
 if __name__ == "__main__":

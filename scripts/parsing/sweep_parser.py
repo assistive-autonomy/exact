@@ -76,7 +76,6 @@ SWEEP_PARAM_KEYS = [
     "alignment_weight",
     "alignment_dim",
     "alignment_temperature",
-    "joint_loss_weight",
     # LoRA
     "lora_r",
     "lora_alpha",
@@ -284,14 +283,12 @@ def train_sweep():
         alignment_weight=cfg.get("alignment_weight", 0.1),
         alignment_dim=cfg.get("alignment_dim", 256),
         alignment_temperature=cfg.get("alignment_temperature", 0.07),
-        joint_loss_weight=cfg.get("joint_loss_weight", 0.2),
     )
 
     # Move heads to CUDA with bf16
     model.motion_projection = model.motion_projection.to(device="cuda", dtype=model_dtype)
     model.motion_align_head = model.motion_align_head.to(device="cuda", dtype=model_dtype)
     model.program_align_head = model.program_align_head.to(device="cuda", dtype=model_dtype)
-    model.joint_head = model.joint_head.to(device="cuda", dtype=model_dtype)
     model.logit_scale.data = model.logit_scale.data.to(device="cuda")
     model._motion_scale.data = model._motion_scale.data.to(device="cuda")
 
@@ -347,7 +344,6 @@ def train_sweep():
         + list(model.program_align_head.parameters())
         + [model.logit_scale]
     )
-    joint_params_list = list(model.joint_head.parameters())
     scale_params_list = [model._motion_scale]
 
     special_param_ids = set(
@@ -356,7 +352,6 @@ def train_sweep():
             encoder_params_list
             + projection_params_list
             + align_params_list
-            + joint_params_list
             + scale_params_list
         )
     )
@@ -368,7 +363,6 @@ def train_sweep():
         {"params": encoder_params_list, "lr": encoder_lr, "weight_decay": cfg.weight_decay},
         {"params": projection_params_list, "lr": projection_lr, "weight_decay": cfg.weight_decay},
         {"params": align_params_list, "lr": projection_lr, "weight_decay": 0.0},
-        {"params": joint_params_list, "lr": projection_lr, "weight_decay": cfg.weight_decay},
         {"params": scale_params_list, "lr": scale_lr, "weight_decay": 0.0},
         {"params": lora_params_list, "lr": cfg.learning_rate, "weight_decay": cfg.weight_decay},
     ]
@@ -464,7 +458,6 @@ def train_sweep():
         eval_dataset=eval_dataset,
         data_collator=get_collate_fn(
             tokenizer,
-            num_temporal_tokens=num_temporal_tokens,
             max_frame=cfg.get("max_frame", 1024),
         ),
         callbacks=callbacks,

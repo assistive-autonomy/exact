@@ -47,19 +47,10 @@ stgcn_joint_embedding: true  # Learnable per-joint positional encoding (24 × hi
 
 # ========== AUXILIARY LOSSES ==========
 # InfoNCE: contrastive loss aligns motion encoder with LLM program embeddings.
-# Joint BCE: per-temporal-token classification of which joints are active.
-# Total loss = LM_loss + alignment_weight * InfoNCE + joint_loss_weight * BCE
+# Total loss = LM_loss + alignment_weight * InfoNCE
 alignment_weight: 0.23
 alignment_dim: 512
 alignment_temperature: 0.19
-
-# ========== JOINT-ACTIVITY AUXILIARY LOSS ==========
-# Per-temporal-token binary classification: which of 24 joints are active?
-# Directly supervises the encoder to preserve per-joint identity.
-# Reduced from 0.5: at 0.5 the joint gradient (0.5*0.38=0.19) competed with
-# the LM loss and dominated encoder updates.  At 0.17 the joint signal is
-# still meaningful but the encoder is primarily driven by the LM objective.
-joint_loss_weight: 0.17
 
 # ========== LORA CONFIG ==========
 # Reduced rank (16 vs 32) — 3B model needs less adaptation capacity
@@ -69,8 +60,8 @@ lora_dropout: 0.05
 
 # ========== TRAINING HYPERPARAMETERS ==========
 num_train_epochs: 25
-per_device_train_batch_size: 16     # 3B model fits larger batch
-per_device_eval_batch_size: 16
+per_device_train_batch_size: 64      # H200-144GB × 4 GPUs: batch 64/GPU, 256 effective with DDP
+per_device_eval_batch_size: 64
 learning_rate: 0.0001                   # Base LR (used for LoRA + projection)
 encoder_lr: 1.6e-06                     # Lower to prevent encoder from dominating early
 scale_lr: 1e-4                       # Faster adaptation for motion_scale
@@ -78,12 +69,14 @@ weight_decay: 0.0075
 max_grad_norm: 1.0
 warmup_ratio: 0.17                   # Longer warmup for stable early training
 lr_scheduler_type: cosine
-gradient_accumulation_steps: 2       # Effective batch = 32
-dataloader_num_workers: 8
+gradient_accumulation_steps: 1       # No accumulation needed — H200 144GB has ample headroom
+dataloader_num_workers: 16           # 16 workers × 4 GPUs = 64 total (of 188 vCPUs); avoids oversubscription
+dataloader_persistent_workers: true  # Avoid worker restart overhead between epochs
 logging_steps: 100
 bf16: true
+tf32: true                           # TF32 for float32 ops (ST-GCN encoder) — ~2× throughput
 dataloader_prefetch_factor: 4
-gradient_checkpointing: true
+gradient_checkpointing: true           # Required: 3B×batch64×seq528×36 layers activations exceed 140GB without it
 eval_strategy: steps
 eval_steps: 2000
 max_eval_samples_training: 100
@@ -110,7 +103,7 @@ generation_eval_steps: 4000
 generation_eval_samples: 16
 
 # Final evaluation (generation with constrained decoding)
-eval_samples: 64
+eval_samples: 8
 
 # Wandb
 report_to: wandb

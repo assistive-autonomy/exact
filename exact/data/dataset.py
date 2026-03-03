@@ -1,4 +1,6 @@
 import hashlib
+import random
+import re
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -13,6 +15,107 @@ from transformers import PreTrainedTokenizer
 # The motion prefix tokens are prepended before the text by the model,
 # so the text input starts with the prompt and ends with the program.
 PROMPT_PREFIX = "Program: "
+
+
+# ── Variable-length crop augmentation ─────────────────────────────────────────
+# Regex to parse a single program segment: [start,end]sensors
+_SEGMENT_RE = re.compile(r"\[(\d+),(\d+)\]([^\[;]+)")
+
+
+def parse_program_segments(program: str) -> list[tuple[int, int, str]]:
+    """Parse a program string into (start_frame, end_frame, sensors) triples.
+
+    Example::
+
+        >>> parse_program_segments("[0,130]chest.z(0.5);[130,260]rwrist.z(1.4)")
+        [(0, 130, 'chest.z(0.5)'), (130, 260, 'rwrist.z(1.4)')]
+    """
+    segments: list[tuple[int, int, str]] = []
+    for m in _SEGMENT_RE.finditer(program):
+        segments.append((int(m.group(1)), int(m.group(2)), m.group(3).strip()))
+    return segments
+
+
+def crop_program_and_motion(
+    program: str,
+    obs: torch.Tensor,
+    rng: random.Random,
+    min_segments: int = 1,
+    min_crop_frames: int = 32,
+) -> tuple[str, torch.Tensor]:
+    """Crop a contiguous subset of program segments and corresponding motion.
+
+    This augmentation:
+      1. Parses ``program`` to find temporal segment boundaries.
+      2. Picks a random *contiguous* window of segments (never cuts within
+         a segment — respects program boundaries exactly).
+      3. Slices the corresponding frames from ``obs``.
+      4. Renumbers segment frame indices to start from 0.
+      5. Zero-pads the cropped motion back to the original length so that
+         the collate function (``torch.stack``) and encoder see a
+         fixed-size tensor (e.g. 1024 frames).
+
+    This teaches the encoder that "real motion in frames 0–N then zeros"
+    should produce a program whose frame numbers go up to N, **not** 1024.
+    At inference time (where short ESK/HA12 segments are also padded to
+    1024), the encoder now outputs representations the LLM can correctly
+    decode into appropriately-ranged programs.
+
+    Args:
+        program: Full program string (e.g. ``"[0,130]...;[130,260]..."``)
+        obs: Motion tensor of shape ``(T, 72)``
+        rng: Seeded ``random.Random`` instance for reproducibility
+        min_segments: Minimum number of segments to keep (default 1)
+        min_crop_frames: Skip augmentation if the crop would be shorter
+            than this many frames (avoids degenerate tiny snippets)
+
+    Returns:
+        ``(new_program, new_obs)`` where ``new_obs.shape == obs.shape``
+        (zero-padded) and ``new_program`` has renumbered frame indices.
+    """
+    segments = parse_program_segments(program)
+    if len(segments) <= 1:
+        # Single-segment programs cannot be cropped further
+        return program, obs
+
+    num_segments = len(segments)
+
+    # Pick how many contiguous segments to keep
+    keep_count = rng.randint(min_segments, num_segments - 1)
+    # Where to start the window (ensure at least 1 segment cropped)
+    max_start = num_segments - keep_count
+    start_idx = rng.randint(0, max_start)
+
+    selected = segments[start_idx : start_idx + keep_count]
+
+    # Frame range for cropped motion
+    frame_start = selected[0][0]
+    frame_end = selected[-1][1]
+    crop_len = frame_end - frame_start
+
+    # Skip if the crop is too short to be useful
+    if crop_len < min_crop_frames:
+        return program, obs
+
+    # Crop the motion (clone to avoid mutating the original)
+    T_orig = obs.shape[0]
+    frame_end_clamped = min(frame_end, T_orig)
+    cropped = obs[frame_start:frame_end_clamped].clone()
+
+    # Renumber segment frames to start at 0
+    new_parts: list[str] = []
+    for seg_start, seg_end, sensors in selected:
+        new_parts.append(f"[{seg_start - frame_start},{seg_end - frame_start}]{sensors}")
+    new_program = ";".join(new_parts)
+
+    # Zero-pad back to original length
+    if cropped.shape[0] < T_orig:
+        padding = torch.zeros(
+            T_orig - cropped.shape[0], obs.shape[1], dtype=obs.dtype
+        )
+        cropped = torch.cat([cropped, padding], dim=0)
+
+    return new_program, cropped
 
 
 def _cache_path_for(h5_path: str) -> Path:
@@ -265,6 +368,9 @@ class TrajectoryGenerationDataset(Dataset):
         *,
         programs: Optional[List[str]] = None,
         obs: Optional[List[torch.Tensor]] = None,
+        augment_crop_prob: float = 0.0,
+        augment_min_segments: int = 1,
+        augment_min_crop_frames: int = 32,
     ):
         """Initialize dataset from HDF5 file.
 
@@ -275,12 +381,24 @@ class TrajectoryGenerationDataset(Dataset):
             prompt_prefix: Text prefix before the program (e.g. "Program: ")
             programs: Pre-loaded program strings (skip I/O if provided with obs)
             obs: Pre-loaded motion tensors  (skip I/O if provided with programs)
+            augment_crop_prob: Probability of applying variable-length crop
+                augmentation per sample (0.0 = disabled, 0.5 = 50% of samples).
+                When applied, a random contiguous subset of program segments
+                is selected and the motion is cropped + zero-padded accordingly.
+                This teaches the encoder to handle variable-length inputs.
+            augment_min_segments: Minimum number of segments to keep when
+                cropping (default 1).
+            augment_min_crop_frames: Skip cropping if result would be shorter
+                than this many frames (default 32).
         """
         self.path = path
         self.tokenizer = tokenizer
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.max_seq_length = max_seq_length
         self.prompt_prefix = prompt_prefix
+        self.augment_crop_prob = augment_crop_prob
+        self.augment_min_segments = augment_min_segments
+        self.augment_min_crop_frames = augment_min_crop_frames
 
         if programs is not None and obs is not None:
             # Use pre-loaded data (zero I/O)
@@ -291,11 +409,25 @@ class TrajectoryGenerationDataset(Dataset):
             # Load from disk (with .pt cache acceleration)
             self.programs, self.obs = load_motion_data(path)
 
+        # Training mode flag: augmentations are only applied when True.
+        # Set to True by default; callers (e.g. eval datasets) can set False.
+        self.training_mode = True
+
+        if self.augment_crop_prob > 0:
+            # Count how many multi-segment programs can benefit from cropping
+            n_multi = sum(1 for p in self.programs if ";" in p)
+            logger.info(
+                f"Variable-length crop augmentation enabled: "
+                f"prob={self.augment_crop_prob}, min_segs={self.augment_min_segments}, "
+                f"min_frames={self.augment_min_crop_frames}, "
+                f"eligible={n_multi}/{len(self.programs)} multi-segment programs"
+            )
+
     def __len__(self) -> int:
         return len(self.programs)
 
     def __getitem__(self, idx: int) -> dict:
-        """Get a single sample.
+        """Get a single sample, optionally with variable-length crop augmentation.
 
         Args:
             idx: Sample index
@@ -308,6 +440,24 @@ class TrajectoryGenerationDataset(Dataset):
         """
         program = self.programs[idx]
         obs = self.obs[idx]
+
+        # ── Variable-length crop augmentation ─────────────────────────────
+        # Randomly crop a contiguous subset of program segments and the
+        # corresponding motion frames.  The cropped motion is zero-padded
+        # back to the original length (e.g. 1024) and the program frame
+        # numbers are renumbered from 0.  This teaches the encoder to
+        # handle variable-length inputs at inference time.
+        if self.augment_crop_prob > 0 and self.training_mode:
+            # Use a worker-safe random instance seeded per-call
+            rng = random.Random()
+            if rng.random() < self.augment_crop_prob:
+                program, obs = crop_program_and_motion(
+                    program,
+                    obs,
+                    rng=rng,
+                    min_segments=self.augment_min_segments,
+                    min_crop_frames=self.augment_min_crop_frames,
+                )
 
         # Format: "Program: [0,512]head.y(1.5)*...<eos>"
         text = self.prompt_prefix + program + self.tokenizer.eos_token

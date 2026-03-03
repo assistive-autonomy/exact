@@ -3,6 +3,11 @@
 # Train parser on train_diverse.h5, then parse ESK + HumanAct12 datasets,
 # then build executable activity models for both.
 #
+# Optimized for multi-GPU (2× H200) and high CPU count (188 vCPUs):
+#   - Training uses DDP via torchrun across all GPUs
+#   - Parsing steps run in parallel on separate GPUs
+#   - Build-models steps run in parallel (CPU-only)
+#
 # Usage:
 #   bash scripts/train_and_parse.sh
 #
@@ -16,12 +21,28 @@ set -euo pipefail
 
 cd /pvc/exact
 
+# ─── Hardware detection ─────────────────────────────────────────────────────
+NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
+NUM_CPUS=$(nproc)
+echo "Detected ${NUM_GPUS} GPUs, ${NUM_CPUS} CPUs"
+
 # ─── Configuration ──────────────────────────────────────────────────────────
-CONFIG="configs/parser.yaml"
+CONFIG="configs/parser/parser.yaml"
 ESK_PATH="../esk"
 HUMANACT12_PATH="../humanact12"
 
-# ─── Step 1: Train the parser ──────────────────────────────────────────────
+# Performance: set CPU threading for data loading & NCCL tuning
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
+export NCCL_P2P_LEVEL=NVL         # Use NVLink for inter-GPU P2P if available
+export NCCL_ASYNC_ERROR_HANDLING=1 # Graceful NCCL error reporting
+export TOKENIZERS_PARALLELISM=false
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce CUDA memory fragmentation
+
+# Parsing batch size — H200 144GB can handle large batches for inference
+BATCH_SIZE="${BATCH_SIZE:-256}"
+
+# ─── Step 1: Train the parser (multi-GPU DDP) ──────────────────────────────
 if [[ -n "${CHECKPOINT:-}" ]]; then
     echo "============================================"
     echo "SKIPPING TRAINING — using existing checkpoint"
@@ -30,17 +51,25 @@ if [[ -n "${CHECKPOINT:-}" ]]; then
     BEST_CHECKPOINT="$CHECKPOINT"
 else
     echo "============================================"
-    echo "Step 1/7: Training parser on train_diverse.h5"
+    echo "Step 1/3: Training parser on train_diverse.h5 (${NUM_GPUS} GPUs, DDP)"
     echo "============================================"
 
-    TRAIN_CMD="uv run scripts/parsing/train_parser.py --config $CONFIG"
+    TRAIN_ARGS="--config $CONFIG"
 
     if [[ -n "${RESUME_DIR:-}" ]]; then
         echo "  Resuming from: $RESUME_DIR"
-        TRAIN_CMD="$TRAIN_CMD --resume $RESUME_DIR"
+        TRAIN_ARGS="$TRAIN_ARGS --resume $RESUME_DIR"
     fi
 
-    $TRAIN_CMD
+    # Use torchrun for multi-GPU DDP training when >1 GPU available
+    if [[ "$NUM_GPUS" -gt 1 ]]; then
+        uv run torchrun \
+            --nproc_per_node="$NUM_GPUS" \
+            --master_port="${MASTER_PORT:-29500}" \
+            scripts/parsing/train_parser.py $TRAIN_ARGS
+    else
+        uv run scripts/parsing/train_parser.py $TRAIN_ARGS
+    fi
 
     # Find the output directory (most recent in results/parser/)
     OUTPUT_DIR=$(ls -dt results/parser/2* 2>/dev/null | head -1)
@@ -50,9 +79,6 @@ else
     fi
     echo "  Training output: $OUTPUT_DIR"
 
-    # Find the best checkpoint
-    # The trainer with load_best_model_at_end saves the best model directly
-    # in the output directory, so we use that.
     BEST_CHECKPOINT="$OUTPUT_DIR"
 
     # Verify checkpoint files exist
@@ -68,84 +94,91 @@ fi
 
 echo ""
 echo "============================================"
-echo "Step 2/7: Parsing ESK dataset (verbs)"
+echo "Step 2/3: Parsing all datasets in parallel (${NUM_GPUS} GPUs)"
 echo "============================================"
 
-uv run scripts/parsing/parse_esk.py \
+# Run parsing jobs in parallel across GPUs.
+# Each job gets its own GPU via CUDA_VISIBLE_DEVICES.
+PARSE_PIDS=()
+
+echo "  [GPU 0] Parsing ESK verbs..."
+CUDA_VISIBLE_DEVICES=0 uv run scripts/parsing/parse_esk.py \
     --parser-checkpoint "$BEST_CHECKPOINT" \
     --esk-path "$ESK_PATH" \
     --split train \
     --label-type verbs \
-    --batch-size "${BATCH_SIZE:-8}" \
-    --output "$ESK_PATH/programs_verbs_train.json"
+    --batch-size "$BATCH_SIZE" \
+    --output "$ESK_PATH/programs_verbs_train.json" &
+PARSE_PIDS+=($!)
 
-echo "  ESK verbs programs saved to: $ESK_PATH/programs_verbs_train.json"
-
-echo ""
-echo "============================================"
-echo "Step 3/7: Parsing ESK dataset (activities)"
-echo "============================================"
-
-uv run scripts/parsing/parse_esk.py \
+echo "  [GPU $((NUM_GPUS > 1 ? 1 : 0))] Parsing ESK activities..."
+CUDA_VISIBLE_DEVICES=$((NUM_GPUS > 1 ? 1 : 0)) uv run scripts/parsing/parse_esk.py \
     --parser-checkpoint "$BEST_CHECKPOINT" \
     --esk-path "$ESK_PATH" \
     --split train \
     --label-type activity \
-    --batch-size "${BATCH_SIZE:-8}" \
-    --output "$ESK_PATH/programs_activity_train.json"
+    --batch-size "$BATCH_SIZE" \
+    --output "$ESK_PATH/programs_activity_train.json" &
+PARSE_PIDS+=($!)
 
-echo "  ESK activity programs saved to: $ESK_PATH/programs_activity_train.json"
+# Wait for one GPU to free up, then launch HumanAct12 parsing
+wait "${PARSE_PIDS[0]}" || { echo "ERROR: ESK verbs parsing failed"; exit 1; }
+echo "  ESK verbs done → [GPU 0] Parsing HumanAct12..."
 
-echo ""
-echo "============================================"
-echo "Step 4/7: Parsing HumanAct12 dataset"
-echo "============================================"
-
-uv run scripts/parsing/parse_esk.py \
+CUDA_VISIBLE_DEVICES=0 uv run scripts/parsing/parse_esk.py \
     --parser-checkpoint "$BEST_CHECKPOINT" \
     --esk-path "$HUMANACT12_PATH" \
     --split train \
     --label-type actions \
-    --batch-size "${BATCH_SIZE:-8}" \
-    --output "$HUMANACT12_PATH/programs_train.json"
+    --batch-size "$BATCH_SIZE" \
+    --output "$HUMANACT12_PATH/programs_train.json" &
+PARSE_PIDS+=($!)
 
-echo "  HumanAct12 programs saved to: $HUMANACT12_PATH/programs_train.json"
+# Wait for remaining parse jobs
+wait "${PARSE_PIDS[1]}" || { echo "ERROR: ESK activities parsing failed"; exit 1; }
+echo "  ESK activities done."
+wait "${PARSE_PIDS[2]}" || { echo "ERROR: HumanAct12 parsing failed"; exit 1; }
+echo "  HumanAct12 done."
+
+echo "  All parsing complete."
+echo "    ESK verbs:      $ESK_PATH/programs_verbs_train.json"
+echo "    ESK activities:  $ESK_PATH/programs_activity_train.json"
+echo "    HumanAct12:      $HUMANACT12_PATH/programs_train.json"
 
 echo ""
 echo "============================================"
-echo "Step 5/7: Building executable models (ESK verbs)"
+echo "Step 3/3: Building executable models in parallel (CPU, ${NUM_CPUS} cores)"
 echo "============================================"
+
+# Build-models is CPU-only — run all 3 concurrently
+BUILD_PIDS=()
 
 uv run scripts/parsing/build_models.py \
     --programs "$ESK_PATH/programs_verbs_train.json" \
     --output "$ESK_PATH/models_verbs.json" \
-    --validate
-
-echo "  ESK verbs models saved to: $ESK_PATH/models_verbs.json"
-
-echo ""
-echo "============================================"
-echo "Step 6/7: Building executable models (ESK activities)"
-echo "============================================"
+    --validate &
+BUILD_PIDS+=($!)
 
 uv run scripts/parsing/build_models.py \
     --programs "$ESK_PATH/programs_activity_train.json" \
     --output "$ESK_PATH/models_activity.json" \
-    --validate
-
-echo "  ESK activity models saved to: $ESK_PATH/models_activity.json"
-
-echo ""
-echo "============================================"
-echo "Step 7/7: Building executable models (HumanAct12)"
-echo "============================================"
+    --validate &
+BUILD_PIDS+=($!)
 
 uv run scripts/parsing/build_models.py \
     --programs "$HUMANACT12_PATH/programs_train.json" \
     --output "$HUMANACT12_PATH/models.json" \
-    --validate
+    --validate &
+BUILD_PIDS+=($!)
 
-echo "  HumanAct12 models saved to: $HUMANACT12_PATH/models.json"
+# Wait for all build jobs
+FAIL=0
+for i in "${!BUILD_PIDS[@]}"; do
+    wait "${BUILD_PIDS[$i]}" || { echo "ERROR: build_models job $i failed"; FAIL=1; }
+done
+[[ "$FAIL" -eq 0 ]] || exit 1
+
+echo "  All models built."
 
 echo ""
 echo "============================================"

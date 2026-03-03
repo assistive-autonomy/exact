@@ -249,7 +249,14 @@ def create_parser(checkpoint_path: str | None = None, use_mock: bool = False):
     
     from exact.parser import load_parser
     logger.info(f"Loading trained parser from: {checkpoint_path}")
-    return load_parser(checkpoint_path=checkpoint_path)
+    return load_parser(
+        checkpoint_path=checkpoint_path,
+        use_grammar_constraint=True,   # Grammar-constrained decoding (whitespace-safe)
+        temperature=0.4,               # [v3] 0.3→0.4: higher temp avoids mode collapse on short segments
+        top_p=0.92,                    # [v3] 0.95→0.92: slightly tighter nucleus for quality
+        num_retries=5,                 # [v3] 2→5: more retries for multi-segment program recovery
+        retry_temperature=0.7,         # [v3] 0.5→0.7: higher retry temp for diverse exploration
+    )
 
 
 def validate_program(program: str) -> bool:

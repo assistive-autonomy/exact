@@ -11,8 +11,6 @@ Architecture:
 Auxiliary losses:
     - InfoNCE contrastive loss aligns motion encoder latent space with
       LLM program embedding space.
-    - Joint-activity BCE loss supervises the encoder to preserve per-joint
-      identity in each temporal token.
 """
 
 import os
@@ -26,7 +24,6 @@ from transformers import PreTrainedTokenizer
 from transformers.modeling_outputs import ModelOutput
 
 from exact.data.dataset import PROMPT_PREFIX
-from exact.data.utils import NUM_PROGRAM_JOINTS
 from exact.encoder import STGCNEncoder
 
 
@@ -38,7 +35,6 @@ class ParserOutput(ModelOutput):
     logits: Optional[torch.Tensor] = None
     lm_loss: Optional[torch.Tensor] = None
     alignment_loss: Optional[torch.Tensor] = None
-    joint_loss: Optional[torch.Tensor] = None
 
 
 class MotionPrefixParser(nn.Module):
@@ -61,7 +57,6 @@ class MotionPrefixParser(nn.Module):
         alignment_weight: Weight for InfoNCE loss (0 to disable)
         alignment_dim: Shared latent space dimension for alignment
         alignment_temperature: InfoNCE temperature
-        joint_loss_weight: Weight for joint-activity auxiliary BCE loss (0 to disable)
     """
 
     def __init__(
@@ -73,7 +68,6 @@ class MotionPrefixParser(nn.Module):
         alignment_weight: float = 0.1,
         alignment_dim: int = 256,
         alignment_temperature: float = 0.07,
-        joint_loss_weight: float = 0.5,
     ):
         super().__init__()
 
@@ -128,17 +122,6 @@ class MotionPrefixParser(nn.Module):
             torch.tensor(1.0 / alignment_temperature).log()
         )
 
-        # ── Joint-activity auxiliary head ────────────────────────────────
-        # Predicts which of 24 joints are active per temporal token.
-        # Applied to projected motion features BEFORE they enter the LLM,
-        # so gradients flow directly to the encoder + projection.
-        self.joint_loss_weight = joint_loss_weight
-        self.joint_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 4),
-            nn.GELU(),
-            nn.Linear(hidden_dim // 4, NUM_PROGRAM_JOINTS),
-        )
-
         # Cache prompt info
         self._prompt_prefix = PROMPT_PREFIX
         self._prompt_ids = None
@@ -179,32 +162,6 @@ class MotionPrefixParser(nn.Module):
         embed_layer = self.model.get_input_embeddings()
         return embed_layer(input_ids)
 
-    def _encode_motion_unscaled(self, motion: torch.Tensor) -> torch.Tensor:
-        """
-        Encode motion and project to LLM embedding space (before scale).
-
-        Returns features BEFORE the learned scale factor is applied.
-        Used by auxiliary heads (joint head) that need full-magnitude gradients
-        to the encoder, and should not influence ``_motion_scale``.
-
-        Args:
-            motion: [B, T, 72] raw motion sequence
-
-        Returns:
-            motion_features: [B, num_temporal_tokens, hidden_dim]
-        """
-        # ST-GCN encoding (float32 for BatchNorm stability)
-        motion_features = self.trajectory_encoder(motion)
-
-        # Cast to projection dtype and project to LLM embedding space
-        proj_param = next(self.motion_projection.parameters())
-        target_dtype = proj_param.dtype
-        target_device = proj_param.device
-        motion_features = motion_features.to(device=target_device, dtype=target_dtype)
-        motion_features = self.motion_projection(motion_features)
-
-        return motion_features
-
     def _encode_motion(self, motion: torch.Tensor) -> torch.Tensor:
         """
         Encode motion to prefix token embeddings (with scale normalization).
@@ -218,7 +175,17 @@ class MotionPrefixParser(nn.Module):
         Returns:
             motion_features: [B, num_temporal_tokens, hidden_dim] (scaled)
         """
-        return self._encode_motion_unscaled(motion) * self._motion_scale
+        # ST-GCN encoding (float32 for BatchNorm stability)
+        motion_features = self.trajectory_encoder(motion)
+
+        # Cast to projection dtype and project to LLM embedding space
+        proj_param = next(self.motion_projection.parameters())
+        target_dtype = proj_param.dtype
+        target_device = proj_param.device
+        motion_features = motion_features.to(device=target_device, dtype=target_dtype)
+        motion_features = self.motion_projection(motion_features)
+
+        return motion_features * self._motion_scale
 
     def _get_prompt_ids(self, batch_size: int, device: torch.device) -> torch.Tensor:
         """Get tokenized 'Program: ' prompt IDs for generation seeding."""
@@ -281,7 +248,6 @@ class MotionPrefixParser(nn.Module):
         attention_mask: torch.Tensor,
         motion: torch.Tensor = None,
         labels: torch.Tensor = None,
-        joint_activity_labels: torch.Tensor = None,
         **kwargs,
     ) -> ParserOutput:
         """
@@ -299,14 +265,10 @@ class MotionPrefixParser(nn.Module):
         """
         prefix_len = 0
         motion_features = None
-        motion_features_unscaled = None
 
         if motion is not None:
             # Encode motion → prefix embeddings
-            # Get unscaled features for auxiliary heads (joint head)
-            # and scaled features for the LLM prefix
-            motion_features_unscaled = self._encode_motion_unscaled(motion)
-            motion_features = motion_features_unscaled * self._motion_scale
+            motion_features = self._encode_motion(motion)
             prefix_len = motion_features.shape[1]
             B = motion_features.shape[0]
 
@@ -350,7 +312,6 @@ class MotionPrefixParser(nn.Module):
         lm_loss = outputs.loss
         total_loss = lm_loss
         alignment_loss = None
-        joint_loss = None
 
         # Compute InfoNCE alignment loss during training
         if (
@@ -366,32 +327,10 @@ class MotionPrefixParser(nn.Module):
             )
             total_loss = total_loss + self.alignment_weight * alignment_loss
 
-        # Compute joint-activity auxiliary loss during training
-        if (
-            motion_features_unscaled is not None
-            and joint_activity_labels is not None
-            and self.joint_loss_weight > 0
-            and self.training
-        ):
-            # Predict active joints from PRE-SCALE projected features.
-            # Using unscaled features ensures full gradient magnitude to the
-            # encoder and avoids conflicting gradients on _motion_scale.
-            joint_logits = self.joint_head(motion_features_unscaled)  # [B, T', 24]
-            joint_activity_labels = joint_activity_labels.to(
-                device=joint_logits.device, dtype=joint_logits.dtype
-            )
-            joint_loss = F.binary_cross_entropy_with_logits(
-                joint_logits, joint_activity_labels
-            )
-            total_loss = total_loss + self.joint_loss_weight * joint_loss
-
         # Store loss breakdown for logging callback
         self._last_lm_loss = lm_loss.item() if lm_loss is not None else None
         self._last_alignment_loss = (
             alignment_loss.item() if alignment_loss is not None else None
-        )
-        self._last_joint_loss = (
-            joint_loss.item() if joint_loss is not None else None
         )
 
         return ParserOutput(
@@ -399,7 +338,6 @@ class MotionPrefixParser(nn.Module):
             logits=outputs.logits,
             lm_loss=lm_loss,
             alignment_loss=alignment_loss,
-            joint_loss=joint_loss,
         )
 
     @torch.no_grad()
@@ -496,12 +434,11 @@ class MotionPrefixParser(nn.Module):
             os.path.join(save_directory, "trajectory_encoder.pt"),
         )
 
-        # Save motion projection + alignment heads + joint head
+        # Save motion projection + alignment heads
         save_dict = {
             "motion_projection": self.motion_projection.state_dict(),
             "motion_align_head": self.motion_align_head.state_dict(),
             "program_align_head": self.program_align_head.state_dict(),
-            "joint_head": self.joint_head.state_dict(),
             "logit_scale": self.logit_scale.data,
             "motion_scale": self._motion_scale.data,
             "encoder_dim": self.encoder_dim,

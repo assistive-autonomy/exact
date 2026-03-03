@@ -17,9 +17,26 @@ set -euo pipefail
 cd /pvc/exact
 
 # ─── Configuration ──────────────────────────────────────────────────────────
-CONFIG="configs/parser.yaml"
+CONFIG="configs/parser/parser.yaml"
 ESK_PATH="../esk"
 HUMANACT12_PATH="../humanact12"
+
+# ─── Multi-GPU / performance environment ────────────────────────────────────
+NUM_GPUS=$(uv run python -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo "1")
+echo "Detected $NUM_GPUS GPU(s)"
+
+# NCCL optimizations for multi-GPU
+export NCCL_P2P_LEVEL=NVL              # Use NVLink for peer-to-peer if available
+export NCCL_IB_DISABLE=0               # Enable InfiniBand (if present)
+export CUDA_DEVICE_MAX_CONNECTIONS=1    # Overlap compute and communication
+
+# Prevent CPU thread oversubscription: each DataLoader worker + CUDA runtime
+# spawns threads; cap OMP to avoid 188 vCPUs × N_workers contention.
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
+
+# Reduce CUDA memory fragmentation (recommended by PyTorch for large models)
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ─── Step 1: Train the parser ──────────────────────────────────────────────
 if [[ -n "${CHECKPOINT:-}" ]]; then
@@ -31,9 +48,14 @@ if [[ -n "${CHECKPOINT:-}" ]]; then
 else
     echo "============================================"
     echo "Step 1/7: Training parser on train_diverse.h5"
+    echo "  GPUs: $NUM_GPUS"
     echo "============================================"
 
-    TRAIN_CMD="uv run scripts/parsing/train_parser.py --config $CONFIG"
+    if [[ "$NUM_GPUS" -gt 1 ]]; then
+        TRAIN_CMD="uv run torchrun --standalone --nproc_per_node=$NUM_GPUS scripts/parsing/train_parser.py --config $CONFIG"
+    else
+        TRAIN_CMD="uv run scripts/parsing/train_parser.py --config $CONFIG"
+    fi
 
     if [[ -n "${RESUME_DIR:-}" ]]; then
         echo "  Resuming from: $RESUME_DIR"

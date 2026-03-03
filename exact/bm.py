@@ -1,4 +1,5 @@
 from typing import TYPE_CHECKING, Optional
+import os
 
 import h5py
 import numpy as np
@@ -23,10 +24,12 @@ class BehaviourModel:
         model_name: str = "facebook/metamotivo-M-1",
         batch_size: int = 256,
         device: str = "cpu",
+        relabel_workers: int | None = None,
     ):
         self.model_name = model_name
         self.batch_size = batch_size
         self.device = device
+        self.relabel_workers = relabel_workers if relabel_workers is not None else 8
 
         self.model = FBcprModel.from_pretrained(model_name)
         self.model.to(device)
@@ -51,10 +54,11 @@ class BehaviourModel:
             qvel=batch["qvel"].cpu(),
             action=batch["action"].cpu(),
             reward_fn=reward_fn,
-            max_workers=8,
+            max_workers=self.relabel_workers,
         )
         rewards = torch.tensor(rewards, device=self.device, dtype=torch.float32)
-        return self.model.reward_wr_inference(batch["next_observation"], rewards)
+        z = self.model.reward_wr_inference(batch["next_observation"], rewards)
+        return z.squeeze()  # ensure 1D [z_dim]
 
     def act(self, obs: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         """Get action from observation and latent z."""
@@ -97,9 +101,135 @@ class BehaviourModel:
             
             def compute(self, model, data):
                 return self._reward_fn(model, data)
+            
+            def __call__(self, model, qpos, qvel, ctrl):
+                import mujoco
+                data = mujoco.MjData(model)
+                data.qpos[:] = qpos.detach().cpu().numpy()
+                data.qvel[:] = qvel.detach().cpu().numpy()
+                data.ctrl[:] = ctrl.detach().cpu().numpy()
+                mujoco.mj_forward(model, data)
+                result = self.compute(model, data)
+                return torch.as_tensor(result, device=qpos.device, dtype=qpos.dtype)
         
         wrapper = ExecutableRewardWrapper(reward_fn)
         return self.z_from_reward(env, wrapper)
+
+    def precompute_z_cache(
+        self,
+        env: HumEnv,
+        executable_model: "ExecutableActivityModel",
+        num_steps: int,
+        n_variants: int = 1,
+    ) -> dict[int, list[torch.Tensor]]:
+        """Pre-compute z vectors for all unique timesteps of an activity model.
+
+        Instead of computing z on-the-fly for every (trajectory, timestep) pair,
+        this pre-computes z once per unique normalized timestep. This reduces
+        expensive relabel() calls from N_trajectories * N_unique_timesteps to
+        just N_unique_timesteps * n_variants.
+
+        Args:
+            env: HumEnv environment for reward relabeling
+            executable_model: The activity model to compute z for
+            num_steps: Number of trajectory steps (determines unique timesteps)
+            n_variants: Number of z variants per timestep for diversity
+
+        Returns:
+            Dict mapping normalized_t -> list of z tensors (one per variant)
+        """
+        z_cache: dict[int, list[torch.Tensor]] = {}
+        for step in range(num_steps):
+            normalized_t = int(step * executable_model.eval_timesteps / num_steps)
+            if normalized_t not in z_cache:
+                variants = []
+                for _ in range(n_variants):
+                    z = self.z_from_executable_model(
+                        env, executable_model, normalized_t
+                    )
+                    variants.append(z)
+                z_cache[normalized_t] = variants
+        return z_cache
+
+    def generate_trajectories_batched(
+        self,
+        envs: list[HumEnv],
+        executable_model: "ExecutableActivityModel",
+        num_steps: int,
+        z_cache: dict[int, list[torch.Tensor]],
+        z_offset: int = 0,
+    ) -> list[dict]:
+        """Generate K trajectories simultaneously with batched GPU inference.
+
+        Runs K environments in parallel, batching their observations for a
+        single GPU forward pass per timestep.  z vectors are taken from a
+        pre-computed cache (see :meth:`precompute_z_cache`) and cycled across
+        environments for diversity.
+
+        Args:
+            envs: List of K HumEnv environments
+            executable_model: Activity model (only used for eval_timesteps)
+            num_steps: Number of steps per trajectory
+            z_cache: Pre-computed z vectors from precompute_z_cache()
+            z_offset: Offset into z variants for diversity across batches
+
+        Returns:
+            List of K result dicts, each with ``observations`` (num_steps, obs_dim)
+            and ``actions`` (num_steps, act_dim).
+        """
+        K = len(envs)
+        if K == 0:
+            return []
+
+        # Reset all envs and collect initial observations
+        obs_np = np.stack([env.reset()[0] for env in envs])  # (K, obs_dim)
+        obs_batch = torch.tensor(obs_np, device=self.device, dtype=torch.float32)
+
+        obs_frames: list[np.ndarray] = [obs_np.copy()]
+        act_frames: list[np.ndarray] = []
+
+        for step in range(num_steps):
+            normalized_t = int(step * executable_model.eval_timesteps / num_steps)
+            variants = z_cache[normalized_t]
+            n_variants = len(variants)
+
+            # Build z batch – cycle through variants for diversity
+            z_tensors = [
+                variants[(z_offset + i) % n_variants] for i in range(K)
+            ]
+            z_batch = torch.stack(z_tensors)  # (K, z_dim)
+
+            # Batched action inference on GPU
+            with torch.no_grad():
+                actions_batch = self.act(obs_batch, z_batch)  # (K, act_dim)
+            actions_np = actions_batch.cpu().numpy()
+            act_frames.append(actions_np)
+
+            # Step all environments
+            next_obs_list: list[np.ndarray] = []
+            for i in range(K):
+                next_obs, _, done, truncated, _ = envs[i].step(actions_np[i])
+                if done or truncated:
+                    next_obs, _ = envs[i].reset()
+                next_obs_list.append(next_obs)
+
+            obs_np = np.stack(next_obs_list)
+            obs_batch = torch.tensor(
+                obs_np, device=self.device, dtype=torch.float32
+            )
+            obs_frames.append(obs_np)
+
+        # Stack: (num_steps+1, K, obs_dim) and (num_steps, K, act_dim)
+        obs_array = np.stack(obs_frames[:-1])  # exclude final obs
+        act_array = np.stack(act_frames)
+
+        return [
+            {
+                "observations": obs_array[:, i],  # (num_steps, obs_dim)
+                "actions": act_array[:, i],        # (num_steps, act_dim)
+            }
+            for i in range(K)
+        ]
 
     def generate_trajectory(
         self,

@@ -173,7 +173,7 @@ class TestExtractValidPrefix:
 
 
 class TestNumberTerminal:
-    """Tests for unified NUMBER terminal (replaces old INT/VALUE tests)."""
+    """Tests for FRAME/VALUE terminals (frame indices are integers, sensor values are floats)."""
 
     def test_zero_in_brackets(self):
         """Test that [0,X] parses correctly."""
@@ -202,3 +202,11 @@ class TestNumberTerminal:
     def test_simple_integer_value(self):
         """Test that simple integer like head.y(1) parses correctly."""
         assert validate_program("[0,30]head.y(1)") is True
+
+    def test_float_frame_rejected(self):
+        """Frame indices must be non-negative integers, not floats."""
+        assert validate_program("[0.5,30]head.y(1)") is False
+
+    def test_negative_frame_rejected(self):
+        """Frame indices must be non-negative integers."""
+        assert validate_program("[-1,30]head.y(1)") is False
