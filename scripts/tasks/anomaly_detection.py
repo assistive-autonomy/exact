@@ -157,6 +157,22 @@ def evaluate_by_activity(
         except ValueError:
             results["auc_target_vs_others"] = 0.5
 
+        # Compute exact pairwise AUROC: model i vs each individual activity j
+        # Off-diagonal only: skip self-comparison (target vs target = 0.5 by definition)
+        target_arr = np.array(all_target_scores)
+        auc_pairwise = {}
+        for activity, scores in activity_scores.items():
+            if activity == target_activity:
+                continue  # diagonal handled by auc_target_vs_others
+            other_arr = np.array(scores)
+            combined = np.concatenate([target_arr, other_arr])
+            labels = np.array([1] * len(target_arr) + [0] * len(other_arr))
+            try:
+                auc_pairwise[activity] = float(roc_auc_score(labels, combined))
+            except ValueError:
+                auc_pairwise[activity] = 0.5
+        results["auc_pairwise"] = auc_pairwise
+
     # Log to wandb
     if use_wandb:
         wandb_metrics = {
@@ -260,9 +276,14 @@ def aggregate_results(results_dirs: list[Path]) -> dict:
         if "separation" in r["results"]:
             separation_vector[row_idx] = r["results"]["separation"]
 
-        # Fill AUC (target vs others is aggregate, compute pairwise from scores)
+        # Fill AUC: off-diagonal from exact pairwise, diagonal from overall AUC
+        if "auc_pairwise" in r["results"]:
+            for activity, auc_val in r["results"]["auc_pairwise"].items():
+                if activity in activity_to_idx:
+                    col_idx = activity_to_idx[activity]
+                    auc_matrix[row_idx, col_idx] = auc_val
         if "auc_target_vs_others" in r["results"]:
-            # Diagonal represents overall AUC
+            # Diagonal = AUROC of model i vs all other activities pooled
             auc_matrix[row_idx, row_idx] = r["results"]["auc_target_vs_others"]
 
     return {
