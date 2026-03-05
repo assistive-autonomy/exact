@@ -19,11 +19,11 @@
 # run segmentation directly:
 #
 #   # On the segmentation machine:
-#   cp ../esk_synthetic/D2A_converted_pose_smpl/*       ../esk/D2A_converted_pose_smpl/
-#   cp ../esk_synthetic/D2A_converted_label_activity/*   ../esk/D2A_converted_label_activity/
-#   cp ../esk_synthetic/D2A_converted_label_verbs/*      ../esk/D2A_converted_label_verbs/
-#   cp ../humanact12_synthetic/D2A_converted_pose_smpl/* ../humanact12/D2A_converted_pose_smpl/
-#   cp ../humanact12_synthetic/D2A_converted_label_actions/* ../humanact12/D2A_converted_label_actions/
+#   cp ../esk_synthetic/D2A_converted_pose_smpl/*       ../exact_data/benchmarks/esk/D2A_converted_pose_smpl/
+#   cp ../esk_synthetic/D2A_converted_label_activity/*   ../exact_data/benchmarks/esk/D2A_converted_label_activity/
+#   cp ../esk_synthetic/D2A_converted_label_verbs/*      ../exact_data/benchmarks/esk/D2A_converted_label_verbs/
+#   cp ../humanact12_synthetic/D2A_converted_pose_smpl/* ../exact_data/benchmarks/humanact12/D2A_converted_pose_smpl/
+#   cp ../humanact12_synthetic/D2A_converted_label_actions/* ../exact_data/benchmarks/humanact12/D2A_converted_label_actions/
 #
 #   uv run scripts/tasks/segmentation.py --config-name segmentation/augmented/<config>
 #
@@ -38,9 +38,9 @@
 #
 # Prerequisites:
 #   - Executable models already built (from scripts/train_and_parse.sh):
-#       ../esk/models_activity.json
-#       ../esk/models_verbs.json
-#       ../humanact12/models.json
+#       ../exact_data/models/models_activity.json
+#       ../exact_data/models/models_verbs.json
+#       ../exact_data/models/models_humanact12.json
 #
 # Usage:
 #   bash scripts/tasks/run_exact_segmentation.sh
@@ -61,10 +61,12 @@ NUM_CPUS=$(nproc)
 echo "Detected ${NUM_GPUS} GPUs, ${NUM_CPUS} CPUs"
 
 # ─── Configuration ──────────────────────────────────────────────────────────
-ESK_PATH="../esk"
-HA12_PATH="../humanact12"
+ESK_PATH="../exact_data/benchmarks/esk"
+HA12_PATH="../exact_data/benchmarks/humanact12"
 ESK_SYNTH_PATH="../esk_synthetic"
 HA12_SYNTH_PATH="../humanact12_synthetic"
+PROGRAMS_DIR="../exact_data/programs/parsed"
+MODELS_DIR="../exact_data/models"
 
 TRAJECTORY_LENGTH="${TRAJECTORY_LENGTH:-100}"
 SEED="${SEED:-42}"
@@ -188,22 +190,22 @@ echo ""
 for dataset in $DATASETS; do
     case "$dataset" in
         esk_activities)
-            models_json="$ESK_PATH/models_activity.json"
-            programs_json="$ESK_PATH/programs_activity_train.json"
+            models_json="$MODELS_DIR/models_activity.json"
+            programs_json="$PROGRAMS_DIR/programs_activity_train.json"
             data_dir="$ESK_SYNTH_PATH/D2A_converted_pose_smpl"
             label_dir="$ESK_SYNTH_PATH/D2A_converted_label_activity"
             video_prefix="synth_act"
             ;;
         esk_verbs)
-            models_json="$ESK_PATH/models_verbs.json"
-            programs_json="$ESK_PATH/programs_verbs_train.json"
+            models_json="$MODELS_DIR/models_verbs.json"
+            programs_json="$PROGRAMS_DIR/programs_verbs_train.json"
             data_dir="$ESK_SYNTH_PATH/D2A_converted_pose_smpl"
             label_dir="$ESK_SYNTH_PATH/D2A_converted_label_verbs"
             video_prefix="synth_verb"
             ;;
         humanact12)
-            models_json="$HA12_PATH/models.json"
-            programs_json="$HA12_PATH/programs_train.json"
+            models_json="$MODELS_DIR/models_humanact12.json"
+            programs_json="$PROGRAMS_DIR/programs_humanact12_train.json"
             data_dir="$HA12_SYNTH_PATH/D2A_converted_pose_smpl"
             label_dir="$HA12_SYNTH_PATH/D2A_converted_label_actions"
             video_prefix="synth_ha12"

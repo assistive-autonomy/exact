@@ -68,7 +68,7 @@ def plot_separability_matrix(
 
 def main():
     parser = argparse.ArgumentParser(description="Quick Anomaly Detection using pre-parsed programs")
-    parser.add_argument("--programs", type=str, default="/pvc/esk/programs_train.json",
+    parser.add_argument("--programs", type=str, default="../exact_data/programs/parsed/programs_verbs_train.json",
                        help="Path to programs JSON")
     parser.add_argument("--output-dir", type=str, default="results/anomaly_detection_quick",
                        help="Output directory")

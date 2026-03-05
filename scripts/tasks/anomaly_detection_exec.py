@@ -95,7 +95,7 @@ def parse_args():
     parser.add_argument(
         "--esk-path",
         type=str,
-        default="/pvc/esk",
+        default="../exact_data/benchmarks/esk",
         help="Path to dataset directory",
     )
     

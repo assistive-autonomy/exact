@@ -35,8 +35,9 @@ NUM_CPUS=$(nproc)
 echo "Detected ${NUM_CPUS} CPU cores (no GPU required)"
 
 # ─── Configuration ──────────────────────────────────────────────────────────
-ESK_PATH="${ESK_PATH:-../esk}"
-HUMANACT12_PATH="${HUMANACT12_PATH:-../humanact12}"
+ESK_PATH="${ESK_PATH:-../exact_data/benchmarks/esk}"
+HUMANACT12_PATH="${HUMANACT12_PATH:-../exact_data/benchmarks/humanact12}"
+MODELS_DIR="${MODELS_DIR:-../exact_data/models}"
 
 NUM_SAMPLES="${NUM_SAMPLES:-1000}"
 TRAJECTORY_LEN="${TRAJECTORY_LEN:-100}"
@@ -72,9 +73,9 @@ COMMON_ARGS=(
 # ─── Discover model files ──────────────────────────────────────────────────
 # Verify at least one model file exists
 FOUND=0
-for f in "$ESK_PATH/models_verbs.json" \
-         "$ESK_PATH/models_activity.json" \
-         "$HUMANACT12_PATH/models.json"; do
+for f in "$MODELS_DIR/models_verbs.json" \
+         "$MODELS_DIR/models_activity.json" \
+         "$MODELS_DIR/models_humanact12.json"; do
     if [[ -f "$f" ]]; then
         FOUND=1
         break
@@ -82,9 +83,9 @@ for f in "$ESK_PATH/models_verbs.json" \
 done
 if [[ "$FOUND" -eq 0 ]]; then
     echo "ERROR: No model JSON files found. Expected at least one of:"
-    echo "  $ESK_PATH/models_verbs.json"
-    echo "  $ESK_PATH/models_activity.json"
-    echo "  $HUMANACT12_PATH/models.json"
+    echo "  $MODELS_DIR/models_verbs.json"
+    echo "  $MODELS_DIR/models_activity.json"
+    echo "  $MODELS_DIR/models_humanact12.json"
     echo ""
     echo "Run scripts/train_and_parse.sh first to build models."
     exit 1
@@ -101,48 +102,48 @@ echo "  z variants: $Z_VARIANTS"
 echo ""
 
 # ─── Step 1: ESK verbs ─────────────────────────────────────────────────────
-if [[ -f "$ESK_PATH/models_verbs.json" ]]; then
+if [[ -f "$MODELS_DIR/models_verbs.json" ]]; then
     echo "──────────────────────────────────────────"
     echo "[1] ESK verbs → $ESK_PATH/augmented_verbs/"
     echo "──────────────────────────────────────────"
     uv run scripts/data/generate_augmented_data.py \
-        --models "$ESK_PATH/models_verbs.json" \
+        --models "$MODELS_DIR/models_verbs.json" \
         --output-dir "$ESK_PATH/augmented_verbs" \
         --video-name augmented_verbs \
         "${COMMON_ARGS[@]}"
     echo ""
 else
-    echo "SKIP: $ESK_PATH/models_verbs.json not found"
+    echo "SKIP: $MODELS_DIR/models_verbs.json not found"
 fi
 
 # ─── Step 2: ESK activities ────────────────────────────────────────────────
-if [[ -f "$ESK_PATH/models_activity.json" ]]; then
+if [[ -f "$MODELS_DIR/models_activity.json" ]]; then
     echo "──────────────────────────────────────────"
     echo "[2] ESK activities → $ESK_PATH/augmented_activity/"
     echo "──────────────────────────────────────────"
     uv run scripts/data/generate_augmented_data.py \
-        --models "$ESK_PATH/models_activity.json" \
+        --models "$MODELS_DIR/models_activity.json" \
         --output-dir "$ESK_PATH/augmented_activity" \
         --video-name augmented_activity \
         "${COMMON_ARGS[@]}"
     echo ""
 else
-    echo "SKIP: $ESK_PATH/models_activity.json not found"
+    echo "SKIP: $MODELS_DIR/models_activity.json not found"
 fi
 
 # ─── Step 3: HumanAct12 ───────────────────────────────────────────────────
-if [[ -f "$HUMANACT12_PATH/models.json" ]]; then
+if [[ -f "$MODELS_DIR/models_humanact12.json" ]]; then
     echo "──────────────────────────────────────────"
     echo "[3] HumanAct12 → $HUMANACT12_PATH/augmented/"
     echo "──────────────────────────────────────────"
     uv run scripts/data/generate_augmented_data.py \
-        --models "$HUMANACT12_PATH/models.json" \
+        --models "$MODELS_DIR/models_humanact12.json" \
         --output-dir "$HUMANACT12_PATH/augmented" \
         --video-name augmented_humanact12 \
         "${COMMON_ARGS[@]}"
     echo ""
 else
-    echo "SKIP: $HUMANACT12_PATH/models.json not found"
+    echo "SKIP: $MODELS_DIR/models_humanact12.json not found"
 fi
 
 echo "============================================"
@@ -150,11 +151,11 @@ echo "ALL DONE"
 echo "============================================"
 echo ""
 echo "Outputs:"
-[[ -f "$ESK_PATH/models_verbs.json" ]] && \
+[[ -f "$MODELS_DIR/models_verbs.json" ]] && \
     echo "  ESK verbs:      $ESK_PATH/augmented_verbs/"
-[[ -f "$ESK_PATH/models_activity.json" ]] && \
+[[ -f "$MODELS_DIR/models_activity.json" ]] && \
     echo "  ESK activities:  $ESK_PATH/augmented_activity/"
-[[ -f "$HUMANACT12_PATH/models.json" ]] && \
+[[ -f "$MODELS_DIR/models_humanact12.json" ]] && \
     echo "  HumanAct12:      $HUMANACT12_PATH/augmented/"
 echo ""
 echo "Next steps:"

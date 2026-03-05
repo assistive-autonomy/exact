@@ -3,8 +3,8 @@ project:
   projects_path: dlc2a_benchmark
   data_type: dlc_track
   annotation_type: dlc
-  data_path: ../humanact12/D2A_converted_pose_smpl
-  annotation_path: ../humanact12/D2A_converted_label_actions
+  data_path: ../exact_data/benchmarks/humanact12/D2A_converted_pose_smpl
+  annotation_path: ../exact_data/benchmarks/humanact12/D2A_converted_label_actions
 
 general:
   model_name: c2f_tcn
@@ -39,7 +39,7 @@ training:
   temporal_subsampling_size: 0.85
   parallel: false
   partition_method: file
-  split_path: ../humanact12/trainvaltest_split.txt
+  split_path: ../exact_data/benchmarks/humanact12/trainvaltest_split.txt
 
 losses:
   ms_tcn:
@@ -74,7 +74,6 @@ hyperparameter_search_metric: f1
 num_seeds: 3
 models: [ms_tcn3, c2f_tcn, edtcn, c2f_transformer]
 
-train_fraction: 1
 
 hyperparameter_search_space:
   losses/ms_tcn/focal:

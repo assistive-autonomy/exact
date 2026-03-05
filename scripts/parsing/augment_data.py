@@ -14,9 +14,9 @@ Workflow:
 
 Usage:
     python scripts/parsing/augment_data.py \
-        --load-models /pvc/esk/models.json \
+        --load-models ../exact_data/models/models_verbs.json \
         --num-samples 1000 \
-        --output-dir /pvc/esk/augmented
+        --output-dir ../exact_data/benchmarks/esk/augmented_verbs
 """
 
 import argparse
@@ -652,19 +652,19 @@ def main():
     parser.add_argument(
         "--data-path",
         type=str,
-        default="esk/D2A_converted_pose_smpl",
+        default="../exact_data/benchmarks/esk/D2A_converted_pose_smpl",
         help="Path to pose data directory",
     )
     parser.add_argument(
         "--label-path",
         type=str,
-        default="esk/D2A_converted_label_verbs",
+        default="../exact_data/benchmarks/esk/D2A_converted_label_verbs",
         help="Path to label directory",
     )
     parser.add_argument(
         "--split-path",
         type=str,
-        default="esk/trainvaltest_split.txt",
+        default="../exact_data/benchmarks/esk/trainvaltest_split.txt",
         help="Path to train/val/test split file",
     )
     

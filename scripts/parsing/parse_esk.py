@@ -9,7 +9,7 @@ Output format:
     {
         "metadata": {
             "parser_checkpoint": "results/parser/...",
-            "esk_data_path": "../esk",
+            "esk_data_path": "../exact_data/benchmarks/esk",
             "split": "train",
             "num_videos": 35,
             "num_segments": 1234,
@@ -72,7 +72,7 @@ def parse_args():
     parser.add_argument(
         "--esk-path",
         type=str,
-        default="../esk",
+        default="../exact_data/benchmarks/esk",
         help="Path to ESK dataset (relative to this script or absolute)",
     )
     parser.add_argument(

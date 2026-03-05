@@ -4,7 +4,7 @@ experiment:
   device: auto
 
 data:
-  esk_dir: ../humanact12
+  esk_dir: ../exact_data/benchmarks/humanact12
   label_type: actions
   target_activities:
     - drink

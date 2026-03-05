@@ -17,7 +17,7 @@
 
 set -e  # Exit on error
 
-OUTPUT_DIR="${1:-../exact_data}"
+OUTPUT_DIR="${1:-../exact_data/programs/synthetic}"
 TOTAL_SAMPLES="${2:-50000}"
 NUM_WORKERS="${3:-8}"
 

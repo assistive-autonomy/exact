@@ -4,7 +4,7 @@ experiment:
   device: auto
 
 data:
-  esk_dir: ../esk
+  esk_dir: ../exact_data/benchmarks/esk
   label_type: verbs
   target_activities:
     - Add

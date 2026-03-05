@@ -32,10 +32,13 @@ NUM_CPUS=$(nproc)
 echo "Detected ${NUM_GPUS} GPUs, ${NUM_CPUS} CPUs"
 
 # ─── Configuration ──────────────────────────────────────────────────────────
-ESK_PATH="../esk"
-HUMANACT12_PATH="../humanact12"
+ESK_PATH="../exact_data/benchmarks/esk"
+HUMANACT12_PATH="../exact_data/benchmarks/humanact12"
 SPLITS="${SPLITS:-val test}"    # Space-separated list of splits to parse
 SKIP_BUILD="${SKIP_BUILD:-0}"
+PROGRAMS_DIR="../exact_data/programs/parsed"
+MODELS_DIR="../exact_data/models"
+mkdir -p "$PROGRAMS_DIR" "$MODELS_DIR"
 
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
@@ -90,7 +93,7 @@ for SPLIT in $SPLITS; do
         --split "$SPLIT" \
         --label-type verbs \
         --batch-size "$BATCH_SIZE" \
-        --output "$ESK_PATH/programs_verbs_${SPLIT}.json" &
+        --output "$PROGRAMS_DIR/programs_verbs_${SPLIT}.json" &
     PARSE_PIDS+=($!)
     GPU_IDX=$((GPU_IDX + 1))
 
@@ -101,7 +104,7 @@ for SPLIT in $SPLITS; do
         --split "$SPLIT" \
         --label-type activity \
         --batch-size "$BATCH_SIZE" \
-        --output "$ESK_PATH/programs_activity_${SPLIT}.json" &
+        --output "$PROGRAMS_DIR/programs_activity_${SPLIT}.json" &
     PARSE_PIDS+=($!)
     GPU_IDX=$((GPU_IDX + 1))
 
@@ -112,7 +115,7 @@ for SPLIT in $SPLITS; do
         --split "$SPLIT" \
         --label-type actions \
         --batch-size "$BATCH_SIZE" \
-        --output "$HUMANACT12_PATH/programs_${SPLIT}.json" &
+        --output "$PROGRAMS_DIR/programs_humanact12_${SPLIT}.json" &
     PARSE_PIDS+=($!)
     GPU_IDX=$((GPU_IDX + 1))
 done
@@ -127,9 +130,9 @@ done
 echo ""
 echo "  All parsing complete."
 for SPLIT in $SPLITS; do
-    echo "    ESK verbs ($SPLIT):      $ESK_PATH/programs_verbs_${SPLIT}.json"
-    echo "    ESK activities ($SPLIT):  $ESK_PATH/programs_activity_${SPLIT}.json"
-    echo "    HumanAct12 ($SPLIT):      $HUMANACT12_PATH/programs_${SPLIT}.json"
+    echo "    ESK verbs ($SPLIT):      $PROGRAMS_DIR/programs_verbs_${SPLIT}.json"
+    echo "    ESK activities ($SPLIT):  $PROGRAMS_DIR/programs_activity_${SPLIT}.json"
+    echo "    HumanAct12 ($SPLIT):      $PROGRAMS_DIR/programs_humanact12_${SPLIT}.json"
 done
 
 # ─── Step 2: Build executable models ───────────────────────────────────────
@@ -146,24 +149,24 @@ else
 
     for SPLIT in $SPLITS; do
         uv run scripts/parsing/build_models.py \
-            --programs "$ESK_PATH/programs_verbs_${SPLIT}.json" \
-            --output "$ESK_PATH/models_verbs_${SPLIT}.json" \
+            --programs "$PROGRAMS_DIR/programs_verbs_${SPLIT}.json" \
+            --output "$MODELS_DIR/models_verbs_${SPLIT}.json" \
             --program-budget 110 \
             --selection-method tfidf \
             --validate &
         BUILD_PIDS+=($!)
 
         uv run scripts/parsing/build_models.py \
-            --programs "$ESK_PATH/programs_activity_${SPLIT}.json" \
-            --output "$ESK_PATH/models_activity_${SPLIT}.json" \
+            --programs "$PROGRAMS_DIR/programs_activity_${SPLIT}.json" \
+            --output "$MODELS_DIR/models_activity_${SPLIT}.json" \
             --program-budget 110 \
             --selection-method tfidf \
             --validate &
         BUILD_PIDS+=($!)
 
         uv run scripts/parsing/build_models.py \
-            --programs "$HUMANACT12_PATH/programs_${SPLIT}.json" \
-            --output "$HUMANACT12_PATH/models_${SPLIT}.json" \
+            --programs "$PROGRAMS_DIR/programs_humanact12_${SPLIT}.json" \
+            --output "$MODELS_DIR/models_humanact12_${SPLIT}.json" \
             --program-budget 110 \
             --selection-method tfidf \
             --validate &
@@ -188,12 +191,12 @@ echo "Outputs:"
 echo "  Parser checkpoint: $BEST_CHECKPOINT"
 for SPLIT in $SPLITS; do
     echo "  --- $SPLIT ---"
-    echo "    ESK verbs programs:    $ESK_PATH/programs_verbs_${SPLIT}.json"
-    echo "    ESK activity programs: $ESK_PATH/programs_activity_${SPLIT}.json"
-    echo "    HumanAct12 programs:   $HUMANACT12_PATH/programs_${SPLIT}.json"
+    echo "    ESK verbs programs:    $PROGRAMS_DIR/programs_verbs_${SPLIT}.json"
+    echo "    ESK activity programs: $PROGRAMS_DIR/programs_activity_${SPLIT}.json"
+    echo "    HumanAct12 programs:   $PROGRAMS_DIR/programs_humanact12_${SPLIT}.json"
     if [[ "$SKIP_BUILD" -ne 1 ]]; then
-        echo "    ESK verbs models:      $ESK_PATH/models_verbs_${SPLIT}.json"
-        echo "    ESK activity models:   $ESK_PATH/models_activity_${SPLIT}.json"
-        echo "    HumanAct12 models:     $HUMANACT12_PATH/models_${SPLIT}.json"
+        echo "    ESK verbs models:      $MODELS_DIR/models_verbs_${SPLIT}.json"
+        echo "    ESK activity models:   $MODELS_DIR/models_activity_${SPLIT}.json"
+        echo "    HumanAct12 models:     $MODELS_DIR/models_humanact12_${SPLIT}.json"
     fi
 done

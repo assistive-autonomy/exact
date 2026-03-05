@@ -385,7 +385,7 @@ def main():
     cfg = load_config(args.config, args.overrides)
     
     # Paths - use absolute paths or paths relative to esk_dir from config
-    esk_dir = Path(cfg.data.get("esk_dir", "/pvc/esk"))
+    esk_dir = Path(cfg.data.get("esk_dir", "../exact_data/benchmarks/esk"))
     label_type = cfg.data.get("label_type", "verbs")
     label_dir = str(esk_dir / f"D2A_converted_label_{label_type}")
     pose_dir = str(esk_dir / "D2A_converted_pose_smpl")

@@ -18,8 +18,11 @@ cd /pvc/exact
 
 # ─── Configuration ──────────────────────────────────────────────────────────
 CONFIG="configs/parser/parser.yaml"
-ESK_PATH="../esk"
-HUMANACT12_PATH="../humanact12"
+ESK_PATH="../exact_data/benchmarks/esk"
+HUMANACT12_PATH="../exact_data/benchmarks/humanact12"
+PROGRAMS_DIR="../exact_data/programs/parsed"
+MODELS_DIR="../exact_data/models"
+mkdir -p "$PROGRAMS_DIR" "$MODELS_DIR"
 
 # ─── Multi-GPU / performance environment ────────────────────────────────────
 NUM_GPUS=$(uv run python -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo "1")
@@ -99,9 +102,9 @@ uv run scripts/parsing/parse_esk.py \
     --split train \
     --label-type verbs \
     --batch-size "${BATCH_SIZE:-8}" \
-    --output "$ESK_PATH/programs_verbs_train.json"
+    --output "$PROGRAMS_DIR/programs_verbs_train.json"
 
-echo "  ESK verbs programs saved to: $ESK_PATH/programs_verbs_train.json"
+echo "  ESK verbs programs saved to: $PROGRAMS_DIR/programs_verbs_train.json"
 
 echo ""
 echo "============================================"
@@ -114,9 +117,9 @@ uv run scripts/parsing/parse_esk.py \
     --split train \
     --label-type activity \
     --batch-size "${BATCH_SIZE:-8}" \
-    --output "$ESK_PATH/programs_activity_train.json"
+    --output "$PROGRAMS_DIR/programs_activity_train.json"
 
-echo "  ESK activity programs saved to: $ESK_PATH/programs_activity_train.json"
+echo "  ESK activity programs saved to: $PROGRAMS_DIR/programs_activity_train.json"
 
 echo ""
 echo "============================================"
@@ -129,9 +132,9 @@ uv run scripts/parsing/parse_esk.py \
     --split train \
     --label-type actions \
     --batch-size "${BATCH_SIZE:-8}" \
-    --output "$HUMANACT12_PATH/programs_train.json"
+    --output "$PROGRAMS_DIR/programs_humanact12_train.json"
 
-echo "  HumanAct12 programs saved to: $HUMANACT12_PATH/programs_train.json"
+echo "  HumanAct12 programs saved to: $PROGRAMS_DIR/programs_humanact12_train.json"
 
 echo ""
 echo "============================================"
@@ -139,11 +142,11 @@ echo "Step 5/7: Building executable models (ESK verbs)"
 echo "============================================"
 
 uv run scripts/parsing/build_models.py \
-    --programs "$ESK_PATH/programs_verbs_train.json" \
-    --output "$ESK_PATH/models_verbs.json" \
+    --programs "$PROGRAMS_DIR/programs_verbs_train.json" \
+    --output "$MODELS_DIR/models_verbs.json" \
     --validate
 
-echo "  ESK verbs models saved to: $ESK_PATH/models_verbs.json"
+echo "  ESK verbs models saved to: $MODELS_DIR/models_verbs.json"
 
 echo ""
 echo "============================================"
@@ -151,11 +154,11 @@ echo "Step 6/7: Building executable models (ESK activities)"
 echo "============================================"
 
 uv run scripts/parsing/build_models.py \
-    --programs "$ESK_PATH/programs_activity_train.json" \
-    --output "$ESK_PATH/models_activity.json" \
+    --programs "$PROGRAMS_DIR/programs_activity_train.json" \
+    --output "$MODELS_DIR/models_activity.json" \
     --validate
 
-echo "  ESK activity models saved to: $ESK_PATH/models_activity.json"
+echo "  ESK activity models saved to: $MODELS_DIR/models_activity.json"
 
 echo ""
 echo "============================================"
@@ -163,11 +166,11 @@ echo "Step 7/7: Building executable models (HumanAct12)"
 echo "============================================"
 
 uv run scripts/parsing/build_models.py \
-    --programs "$HUMANACT12_PATH/programs_train.json" \
-    --output "$HUMANACT12_PATH/models.json" \
+    --programs "$PROGRAMS_DIR/programs_humanact12_train.json" \
+    --output "$MODELS_DIR/models_humanact12.json" \
     --validate
 
-echo "  HumanAct12 models saved to: $HUMANACT12_PATH/models.json"
+echo "  HumanAct12 models saved to: $MODELS_DIR/models_humanact12.json"
 
 echo ""
 echo "============================================"
@@ -176,12 +179,12 @@ echo "============================================"
 echo ""
 echo "Outputs:"
 echo "  Parser checkpoint:     $BEST_CHECKPOINT"
-echo "  ESK verbs programs:    $ESK_PATH/programs_verbs_train.json"
-echo "  ESK verbs models:      $ESK_PATH/models_verbs.json"
-echo "  ESK activity programs: $ESK_PATH/programs_activity_train.json"
-echo "  ESK activity models:   $ESK_PATH/models_activity.json"
-echo "  HA12 programs:         $HUMANACT12_PATH/programs_train.json"
-echo "  HA12 models:           $HUMANACT12_PATH/models.json"
+echo "  ESK verbs programs:    $PROGRAMS_DIR/programs_verbs_train.json"
+echo "  ESK verbs models:      $MODELS_DIR/models_verbs.json"
+echo "  ESK activity programs: $PROGRAMS_DIR/programs_activity_train.json"
+echo "  ESK activity models:   $MODELS_DIR/models_activity.json"
+echo "  HA12 programs:         $PROGRAMS_DIR/programs_humanact12_train.json"
+echo "  HA12 models:           $MODELS_DIR/models_humanact12.json"
 echo ""
 echo "Next steps:"
 echo "  - Data augmentation:   uv run scripts/parsing/augment_data.py --models <models.json>"

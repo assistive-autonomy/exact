@@ -28,8 +28,11 @@ echo "Detected ${NUM_GPUS} GPUs, ${NUM_CPUS} CPUs"
 
 # ─── Configuration ──────────────────────────────────────────────────────────
 CONFIG="${CONFIG:-configs/parser/parser_v4.yaml}"
-ESK_PATH="../esk"
-HUMANACT12_PATH="../humanact12"
+ESK_PATH="../exact_data/benchmarks/esk"
+HUMANACT12_PATH="../exact_data/benchmarks/humanact12"
+PROGRAMS_DIR="../exact_data/programs/parsed"
+MODELS_DIR="../exact_data/models"
+mkdir -p "$PROGRAMS_DIR" "$MODELS_DIR"
 
 # Performance: set CPU threading for data loading & NCCL tuning
 export OMP_NUM_THREADS=4
@@ -115,7 +118,7 @@ CUDA_VISIBLE_DEVICES=0 uv run scripts/parsing/parse_esk.py \
     --split train \
     --label-type verbs \
     --batch-size "$BATCH_SIZE" \
-    --output "$ESK_PATH/programs_verbs_train.json" &
+    --output "$PROGRAMS_DIR/programs_verbs_train.json" &
 PARSE_PIDS+=($!)
 
 echo "  [GPU $((NUM_GPUS > 1 ? 1 : 0))] Parsing ESK activities..."
@@ -125,7 +128,7 @@ CUDA_VISIBLE_DEVICES=$((NUM_GPUS > 1 ? 1 : 0)) uv run scripts/parsing/parse_esk.
     --split train \
     --label-type activity \
     --batch-size "$BATCH_SIZE" \
-    --output "$ESK_PATH/programs_activity_train.json" &
+    --output "$PROGRAMS_DIR/programs_activity_train.json" &
 PARSE_PIDS+=($!)
 
 # Wait for one GPU to free up, then launch HumanAct12 parsing
@@ -138,7 +141,7 @@ CUDA_VISIBLE_DEVICES=0 uv run scripts/parsing/parse_esk.py \
     --split train \
     --label-type actions \
     --batch-size "$BATCH_SIZE" \
-    --output "$HUMANACT12_PATH/programs_train.json" &
+    --output "$PROGRAMS_DIR/programs_humanact12_train.json" &
 PARSE_PIDS+=($!)
 
 # Wait for remaining parse jobs
@@ -148,9 +151,9 @@ wait "${PARSE_PIDS[2]}" || { echo "ERROR: HumanAct12 parsing failed"; exit 1; }
 echo "  HumanAct12 done."
 
 echo "  All parsing complete."
-echo "    ESK verbs:      $ESK_PATH/programs_verbs_train.json"
-echo "    ESK activities:  $ESK_PATH/programs_activity_train.json"
-echo "    HumanAct12:      $HUMANACT12_PATH/programs_train.json"
+echo "    ESK verbs:      $PROGRAMS_DIR/programs_verbs_train.json"
+echo "    ESK activities:  $PROGRAMS_DIR/programs_activity_train.json"
+echo "    HumanAct12:      $PROGRAMS_DIR/programs_humanact12_train.json"
 
 echo ""
 echo "============================================"
@@ -162,24 +165,24 @@ echo "============================================"
 BUILD_PIDS=()
 
 uv run scripts/parsing/build_models.py \
-    --programs "$ESK_PATH/programs_verbs_train.json" \
-    --output "$ESK_PATH/models_verbs.json" \
+    --programs "$PROGRAMS_DIR/programs_verbs_train.json" \
+    --output "$MODELS_DIR/models_verbs.json" \
     --program-budget 110 \
     --selection-method tfidf \
     --validate &
 BUILD_PIDS+=($!)
 
 uv run scripts/parsing/build_models.py \
-    --programs "$ESK_PATH/programs_activity_train.json" \
-    --output "$ESK_PATH/models_activity.json" \
+    --programs "$PROGRAMS_DIR/programs_activity_train.json" \
+    --output "$MODELS_DIR/models_activity.json" \
     --program-budget 110 \
     --selection-method tfidf \
     --validate &
 BUILD_PIDS+=($!)
 
 uv run scripts/parsing/build_models.py \
-    --programs "$HUMANACT12_PATH/programs_train.json" \
-    --output "$HUMANACT12_PATH/models.json" \
+    --programs "$PROGRAMS_DIR/programs_humanact12_train.json" \
+    --output "$MODELS_DIR/models_humanact12.json" \
     --program-budget 110 \
     --selection-method tfidf \
     --validate &
@@ -201,12 +204,12 @@ echo "============================================"
 echo ""
 echo "Outputs:"
 echo "  Parser checkpoint:     $BEST_CHECKPOINT"
-echo "  ESK verbs programs:    $ESK_PATH/programs_verbs_train.json"
-echo "  ESK verbs models:      $ESK_PATH/models_verbs.json"
-echo "  ESK activity programs: $ESK_PATH/programs_activity_train.json"
-echo "  ESK activity models:   $ESK_PATH/models_activity.json"
-echo "  HA12 programs:         $HUMANACT12_PATH/programs_train.json"
-echo "  HA12 models:           $HUMANACT12_PATH/models.json"
+echo "  ESK verbs programs:    $PROGRAMS_DIR/programs_verbs_train.json"
+echo "  ESK verbs models:      $MODELS_DIR/models_verbs.json"
+echo "  ESK activity programs: $PROGRAMS_DIR/programs_activity_train.json"
+echo "  ESK activity models:   $MODELS_DIR/models_activity.json"
+echo "  HA12 programs:         $PROGRAMS_DIR/programs_humanact12_train.json"
+echo "  HA12 models:           $MODELS_DIR/models_humanact12.json"
 echo ""
 echo "Next steps:"
 echo "  - Data augmentation:   uv run scripts/parsing/augment_data.py --models <models.json>"

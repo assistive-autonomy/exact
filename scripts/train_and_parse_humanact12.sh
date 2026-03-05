@@ -28,7 +28,10 @@ echo "Detected ${NUM_GPUS} GPUs, ${NUM_CPUS} CPUs"
 
 # ─── Configuration ──────────────────────────────────────────────────────────
 CONFIG="${CONFIG:-configs/parser/parser_v2.yaml}"
-HUMANACT12_PATH="../humanact12"
+HUMANACT12_PATH="../exact_data/benchmarks/humanact12"
+PROGRAMS_DIR="../exact_data/programs/parsed"
+MODELS_DIR="../exact_data/models"
+mkdir -p "$PROGRAMS_DIR" "$MODELS_DIR"
 
 export OMP_NUM_THREADS=4
 export MKL_NUM_THREADS=4
@@ -101,10 +104,10 @@ CUDA_VISIBLE_DEVICES=0 uv run scripts/parsing/parse_esk.py \
     --split train \
     --label-type actions \
     --batch-size "$BATCH_SIZE" \
-    --output "$HUMANACT12_PATH/programs_train.json"
+    --output "$PROGRAMS_DIR/programs_humanact12_train.json"
 
 echo "  HumanAct12 parsing complete."
-echo "    Output: $HUMANACT12_PATH/programs_train.json"
+echo "    Output: $PROGRAMS_DIR/programs_humanact12_train.json"
 
 echo ""
 echo "============================================"
@@ -112,8 +115,8 @@ echo "Step 3/3: Building executable models (CPU)"
 echo "============================================"
 
 uv run scripts/parsing/build_models.py \
-    --programs "$HUMANACT12_PATH/programs_train.json" \
-    --output "$HUMANACT12_PATH/models.json" \
+    --programs "$PROGRAMS_DIR/programs_humanact12_train.json" \
+    --output "$MODELS_DIR/models_humanact12.json" \
     --validate
 
 echo "  Models built."
@@ -125,8 +128,8 @@ echo "============================================"
 echo ""
 echo "Outputs:"
 echo "  Parser checkpoint:  $BEST_CHECKPOINT"
-echo "  HA12 programs:      $HUMANACT12_PATH/programs_train.json"
-echo "  HA12 models:        $HUMANACT12_PATH/models.json"
+echo "  HA12 programs:      $PROGRAMS_DIR/programs_humanact12_train.json"
+echo "  HA12 models:        $MODELS_DIR/models_humanact12.json"
 echo ""
 echo "Next steps:"
 echo "  - Evaluate segmentation: uv run scripts/tasks/segmentation.py --config-name segmentation/humanact12_100pt.yaml"
