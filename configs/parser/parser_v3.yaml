@@ -44,9 +44,9 @@ stgcn_joint_embedding: true
 # This teaches the encoder to handle variable-length inputs (ESK verb
 # segments are median 26 frames; HumanAct12 ~60 frames — vs 1024 in
 # training data), eliminating the domain-gap mode collapse.
-augment_crop_prob: 0.5                 # Apply cropping to 50% of training samples
+augment_crop_prob: 0.6                 # [v3.1] 0.5→0.6: aggressive augmentation to close the domain gap (ESK segments are ~26-60 frames)
 augment_min_segments: 1                # Keep at least 1 segment when cropping
-augment_min_crop_frames: 32            # Skip cropping if result < 32 frames
+augment_min_crop_frames: 64            # [v3.1] 32→64: avoid degenerate crops where 97% is zero-padding
 
 # ========== AUXILIARY LOSSES ==========
 # InfoNCE contrastive alignment
@@ -69,7 +69,7 @@ num_train_epochs: 25                   # [v3] 40→25: best model was at epoch ~
 per_device_train_batch_size: 64
 per_device_eval_batch_size: 64
 learning_rate: 8e-5                    # [v3] 5e-5→8e-5: slightly higher LoRA LR for faster adaptation
-encoder_lr: 5e-6                       # [v3] 1e-4→5e-6: CRITICAL — v2's 1e-4 caused severe encoder overfitting; 5e-6 is more appropriate for a large encoder
+encoder_lr: 1e-5                       # [v3.1] 1e-4→5e-6→1e-5: v2's 1e-4 overfit, v3's 5e-6 too slow; 1e-5 balances learning vs stability for 13M param encoder
 scale_lr: 1e-4
 weight_decay: 0.05                     # [v3] 0.01→0.05: stronger L2 regularization against overfitting
 max_grad_norm: 1.0
@@ -104,6 +104,7 @@ sweep_max_epochs: 10
 # Mid-training generation evaluation
 generation_eval_steps: 1000            # [v3] 2000→1000: earlier and more frequent generation feedback
 generation_eval_samples: 32            # [v3] 16→32: more samples for reliable generation metrics
+gen_early_stopping_patience: 5         # [v3.1] Stop if generation edit distance doesn't improve for 5 consecutive gen evals
 
 # Final evaluation
 eval_samples: 16                       # [v3] 8→16: double eval samples for more reliable metrics

@@ -68,7 +68,15 @@ def parse_args():
         "--program-budget",
         type=int,
         default=None,
-        help="If set, select N diverse programs per activity using hierarchical clustering",
+        help="If set, select N diverse programs per activity using the specified selection method",
+    )
+    parser.add_argument(
+        "--selection-method",
+        type=str,
+        default="tfidf",
+        choices=["tfidf", "hierarchical", "greedy"],
+        help="Selection method for --program-budget: 'tfidf' (fast, feature-based), "
+             "'hierarchical' (edit distance clustering), 'greedy' (maximin). Default: tfidf",
     )
     parser.add_argument(
         "--max-programs",
@@ -95,12 +103,12 @@ def select_diverse_programs(
     budget: int,
     seed: int = 42,
 ) -> list[str]:
-    """Select diverse subset of programs using hierarchical clustering.
+    """Select diverse subset of programs using TF-IDF based diversity selection.
     
     Args:
         programs: List of program strings
         budget: Number of programs to select
-        seed: Random seed
+        seed: Random seed (unused for tfidf, kept for API compatibility)
         
     Returns:
         List of selected programs
@@ -113,8 +121,8 @@ def select_diverse_programs(
     result = _select(
         programs,
         budget=budget,
-        method="hierarchical",
-        show_progress=False,
+        method="tfidf",  # Use fast TF-IDF based diversity selection
+        show_progress=True,
     )
     return result.selected_programs
 
@@ -186,12 +194,15 @@ def main():
         
         # Apply program budget if specified
         if args.program_budget and len(program_strings) > args.program_budget:
-            logger.info(f"  {activity_name}: selecting {args.program_budget} diverse from {len(program_strings)}")
-            program_strings = select_diverse_programs(
+            logger.info(f"  {activity_name}: selecting {args.program_budget} diverse from {len(program_strings)} using {args.selection_method}")
+            from exact.programs import select_diverse_programs as full_select
+            result = full_select(
                 program_strings,
                 budget=args.program_budget,
-                seed=args.seed,
+                method=args.selection_method,
+                show_progress=False,
             )
+            program_strings = result.selected_programs
         elif args.max_programs and len(program_strings) > args.max_programs:
             import random
             rng = random.Random(args.seed)

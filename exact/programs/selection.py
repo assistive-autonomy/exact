@@ -333,6 +333,229 @@ def deduplicate_programs(
     return unique_programs, unique_indices
 
 
+def extract_program_features(program: str) -> dict:
+    """Extract features from a program string for TF-IDF-like vectorization.
+    
+    Extracts:
+    - Predicates as tokens: joint.axis(value_bucket) → "head_y_1.5"
+    - Segment count
+    - Program length (character count)
+    - Temporal span coverage
+    
+    Args:
+        program: Program string like "[0,100]head.y(1.5)*rhand.x(0.3);[100,200]lknee.z(0.8)"
+        
+    Returns:
+        Dict with 'tokens' (list of predicate tokens), 'num_segments', 'length', etc.
+    """
+    import re
+    
+    features = {
+        'tokens': [],
+        'num_segments': 0,
+        'length': len(program),
+        'total_predicates': 0,
+        'joints': set(),
+        'axes': set(),
+    }
+    
+    # Parse segments
+    segments = program.split(';')
+    features['num_segments'] = len([s for s in segments if s.strip()])
+    
+    # Extract predicates from each segment
+    predicate_pattern = re.compile(r'([a-z_]+)\.([xyz])\(([-\d.]+)\)')
+    
+    for segment in segments:
+        segment = segment.strip()
+        if not segment:
+            continue
+            
+        # Find all predicates in this segment
+        for match in predicate_pattern.finditer(segment):
+            joint = match.group(1)
+            axis = match.group(2)
+            value = float(match.group(3))
+            
+            # Bucket the value (0.3 granularity, like edit_distance.py)
+            value_bucket = round(value / 0.3) * 0.3
+            
+            # Create token: joint_axis_value
+            token = f"{joint}_{axis}_{value_bucket:.1f}"
+            features['tokens'].append(token)
+            features['joints'].add(joint)
+            features['axes'].add(axis)
+            features['total_predicates'] += 1
+    
+    return features
+
+
+def select_programs_tfidf(
+    programs: list[str],
+    budget: int,
+    show_progress: bool = True,
+    length_weight: float = 0.1,
+    segment_weight: float = 0.2,
+) -> SelectionResult:
+    """Select diverse programs using TF-IDF-like feature vectorization.
+    
+    This method is much faster than tree edit distance (O(n·d) vs O(n²·k²))
+    and considers:
+    - Predicate diversity (joint.axis combinations with bucketed values)
+    - Program structure (segment count)
+    - Program length
+    
+    The approach:
+    1. Extract tokens from each program (predicates like "head_y_1.5")
+    2. Build TF-IDF matrix over the token vocabulary
+    3. Add structural features (segment count, length) as extra dimensions
+    4. Use k-means++ clustering to select diverse programs as cluster centroids
+    
+    Args:
+        programs: List of program strings
+        budget: Number of programs to select
+        show_progress: Whether to show progress
+        length_weight: Weight for program length feature (0-1)
+        segment_weight: Weight for segment count feature (0-1)
+        
+    Returns:
+        SelectionResult with selected programs and metadata
+    """
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+    from scipy.sparse import hstack, csr_matrix
+    
+    n = len(programs)
+    
+    if budget >= n:
+        return SelectionResult(
+            selected_programs=programs.copy(),
+            selected_indices=list(range(n)),
+            cluster_labels=np.arange(n),
+            cluster_sizes={i: 1 for i in range(n)},
+            distance_matrix=None,
+        )
+    
+    if show_progress:
+        print(f"Extracting features from {n} programs...")
+    
+    # Extract features from all programs
+    all_features = [extract_program_features(p) for p in programs]
+    
+    # Build token strings for TF-IDF (space-separated predicates)
+    token_strings = [' '.join(f['tokens']) for f in all_features]
+    
+    # Handle edge case: all programs have no predicates
+    if all(not ts.strip() for ts in token_strings):
+        # Fall back to random selection if no predicates
+        import random
+        rng = random.Random(42)
+        indices = rng.sample(range(n), budget)
+        return SelectionResult(
+            selected_programs=[programs[i] for i in indices],
+            selected_indices=indices,
+            cluster_labels=np.zeros(n, dtype=int),
+            cluster_sizes={0: n},
+            distance_matrix=None,
+        )
+    
+    # Build TF-IDF matrix
+    if show_progress:
+        print("Building TF-IDF matrix...")
+    
+    vectorizer = TfidfVectorizer(
+        token_pattern=r'[^\s]+',  # Each space-separated token
+        lowercase=False,
+        norm='l2',
+    )
+    tfidf_matrix = vectorizer.fit_transform(token_strings)
+    
+    # Extract structural features
+    lengths = np.array([f['length'] for f in all_features]).reshape(-1, 1)
+    segments = np.array([f['num_segments'] for f in all_features]).reshape(-1, 1)
+    predicates = np.array([f['total_predicates'] for f in all_features]).reshape(-1, 1)
+    n_joints = np.array([len(f['joints']) for f in all_features]).reshape(-1, 1)
+    
+    # Normalize structural features
+    scaler = StandardScaler()
+    structural = np.hstack([lengths, segments, predicates, n_joints])
+    structural_scaled = scaler.fit_transform(structural)
+    
+    # Weight structural features
+    structural_weighted = structural_scaled * np.array([
+        length_weight, segment_weight, 0.1, 0.1  # weights for each feature
+    ])
+    
+    # Combine TF-IDF with structural features
+    combined_matrix = hstack([
+        tfidf_matrix,
+        csr_matrix(structural_weighted)
+    ])
+    
+    if show_progress:
+        print(f"Feature matrix shape: {combined_matrix.shape}")
+        print(f"Running k-means clustering with k={budget}...")
+    
+    # Use k-means++ to find diverse cluster centers
+    kmeans = KMeans(
+        n_clusters=budget,
+        init='k-means++',
+        n_init=10,
+        max_iter=300,
+        random_state=42,
+    )
+    cluster_labels = kmeans.fit_predict(combined_matrix)
+    
+    # Find medoid (closest to centroid) for each cluster
+    selected_indices = []
+    cluster_sizes = {}
+    
+    # Convert to dense for distance computation
+    combined_dense = combined_matrix.toarray()
+    
+    for cluster_id in range(budget):
+        mask = cluster_labels == cluster_id
+        cluster_indices = np.where(mask)[0]
+        cluster_sizes[cluster_id + 1] = len(cluster_indices)
+        
+        if len(cluster_indices) == 0:
+            continue
+        elif len(cluster_indices) == 1:
+            selected_indices.append(cluster_indices[0])
+        else:
+            # Find point closest to cluster centroid
+            centroid = kmeans.cluster_centers_[cluster_id]
+            cluster_points = combined_dense[cluster_indices]
+            distances = np.linalg.norm(cluster_points - centroid, axis=1)
+            medoid_local_idx = np.argmin(distances)
+            selected_indices.append(cluster_indices[medoid_local_idx])
+    
+    # Convert cluster labels to 1-indexed
+    cluster_labels_1indexed = cluster_labels + 1
+    
+    selected_programs = [programs[i] for i in selected_indices]
+    
+    if show_progress:
+        print(f"Selected {len(selected_programs)} diverse programs")
+        # Print some stats about selected programs
+        selected_features = [all_features[i] for i in selected_indices]
+        avg_predicates = np.mean([f['total_predicates'] for f in selected_features])
+        unique_joints = set()
+        for f in selected_features:
+            unique_joints.update(f['joints'])
+        print(f"  Avg predicates per program: {avg_predicates:.1f}")
+        print(f"  Unique joints covered: {len(unique_joints)}")
+    
+    return SelectionResult(
+        selected_programs=selected_programs,
+        selected_indices=selected_indices,
+        cluster_labels=cluster_labels_1indexed,
+        cluster_sizes=cluster_sizes,
+        distance_matrix=None,
+    )
+
+
 def select_diverse_programs(
     programs: list[str],
     budget: int,
@@ -352,7 +575,7 @@ def select_diverse_programs(
     Args:
         programs: List of program strings
         budget: Number of programs to select
-        method: Selection method ('hierarchical' or 'greedy')
+        method: Selection method ('hierarchical', 'greedy', or 'tfidf')
         deduplicate: Whether to remove duplicates first
         dedup_tolerance: Tolerance for deduplication (0 = exact match only)
         cache_path: Path to cache/load distance matrix (numpy .npy file)
@@ -388,9 +611,9 @@ def select_diverse_programs(
     if actual_budget < budget:
         print(f"Adjusted budget from {budget} to {actual_budget} (fewer unique programs)")
     
-    # Step 2: Load or compute distance matrix
+    # Step 2: Load or compute distance matrix (only for hierarchical/greedy)
     distance_matrix = None
-    if cache_path:
+    if method in ("hierarchical", "greedy") and cache_path:
         import os
         if os.path.exists(cache_path):
             print(f"Loading cached distance matrix from {cache_path}")
@@ -412,6 +635,12 @@ def select_diverse_programs(
             working_programs,
             actual_budget,
             distance_matrix=distance_matrix,
+            **kwargs,
+        )
+    elif method == "tfidf":
+        result = select_programs_tfidf(
+            working_programs,
+            actual_budget,
             **kwargs,
         )
     else:
@@ -437,3 +666,240 @@ def select_diverse_programs(
         )
     
     return result
+
+
+def select_programs_tfidf(
+    programs: list[str],
+    budget: int,
+    show_progress: bool = True,
+) -> SelectionResult:
+    """Select diverse programs using TF-IDF vectorization and greedy max-min selection.
+    
+    This is a fast alternative to tree edit distance based methods. It:
+    1. Extracts rich features from each program (joints, axes, predicates, structure)
+    2. Computes TF-IDF vectors capturing predicate diversity
+    3. Uses cosine distance for fast similarity computation
+    4. Applies greedy max-min selection for diversity
+    
+    Features extracted:
+    - Joint-axis pairs (e.g., "lhand_x", "rknee_z")
+    - Value buckets (quantized to 0.3 intervals)
+    - Segment count (num_segs_1, num_segs_2, ...)
+    - Predicates per segment ratios
+    - Temporal span features (early, mid, late coverage)
+    - Body part categories (arm, leg, torso, head, left/right)
+    
+    Args:
+        programs: List of program strings
+        budget: Number of programs to select
+        show_progress: Whether to show progress bar
+        
+    Returns:
+        SelectionResult with selected programs and metadata
+    """
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    import re
+    
+    n = len(programs)
+    
+    if budget >= n:
+        return SelectionResult(
+            selected_programs=programs.copy(),
+            selected_indices=list(range(n)),
+            cluster_labels=np.arange(n),
+            cluster_sizes={i: 1 for i in range(n)},
+            distance_matrix=None,
+        )
+    
+    def program_to_features(program: str) -> str:
+        """Convert program string to a bag of feature tokens."""
+        features = []
+        
+        # Parse segments
+        segments = program.strip().rstrip(';').split(';')
+        num_segments = len(segments)
+        features.append(f"num_segs_{min(num_segments, 10)}")
+        
+        total_predicates = 0
+        covered_frames = set()
+        all_joints = []
+        all_axes = []
+        
+        for seg_idx, segment in enumerate(segments):
+            segment = segment.strip()
+            if not segment:
+                continue
+            
+            # Extract frame range [start,end]
+            frame_match = re.match(r'\[(\d+),(\d+)\]', segment)
+            if frame_match:
+                start, end = int(frame_match.group(1)), int(frame_match.group(2))
+                # Temporal position features (early, mid, late thirds of 1024 frames)
+                if start < 341:
+                    features.append("temporal_early")
+                if start >= 341 and start < 682:
+                    features.append("temporal_mid")
+                if start >= 682:
+                    features.append("temporal_late")
+                # Segment duration feature
+                duration = end - start
+                if duration < 100:
+                    features.append("duration_short")
+                elif duration < 300:
+                    features.append("duration_medium")
+                else:
+                    features.append("duration_long")
+                # Track frame coverage
+                for f in range(start, min(end, 1024)):
+                    covered_frames.add(f)
+            
+            # Extract predicates (joint.axis(value))
+            predicates = re.findall(r'(\w+)\.([xyz])\(([0-9.-]+)\)', segment)
+            for joint, axis, value in predicates:
+                # Joint-axis feature (most important for diversity)
+                features.append(f"{joint}_{axis}")
+                all_joints.append(joint)
+                all_axes.append(axis)
+                
+                # Body part category features
+                if joint.startswith('l'):
+                    features.append("side_left")
+                elif joint.startswith('r'):
+                    features.append("side_right")
+                
+                if any(p in joint for p in ['hand', 'wrist', 'elbow']):
+                    features.append("part_arm")
+                elif any(p in joint for p in ['hip', 'knee', 'ankle', 'toe']):
+                    features.append("part_leg")
+                elif any(p in joint for p in ['shoulder', 'thorax', 'chest', 'spine', 'pelvis', 'torso']):
+                    features.append("part_torso")
+                elif any(p in joint for p in ['head', 'neck']):
+                    features.append("part_head")
+                
+                # Value bucket (quantized)
+                try:
+                    v = float(value)
+                    bucket = round(v / 0.3) * 0.3
+                    features.append(f"val_{bucket:.1f}")
+                    # Extremity features
+                    if v < 0.3:
+                        features.append("val_low")
+                    elif v > 1.5:
+                        features.append("val_high")
+                except ValueError:
+                    pass
+                total_predicates += 1
+            
+            # Predicates per segment
+            num_preds = len(predicates)
+            features.append(f"preds_per_seg_{min(num_preds, 5)}")
+        
+        # Total predicates feature
+        features.append(f"total_preds_{min(total_predicates, 15)}")
+        
+        # Joint diversity in program
+        unique_joints = len(set(all_joints))
+        features.append(f"unique_joints_{min(unique_joints, 10)}")
+        
+        # Axis coverage
+        axis_set = set(all_axes)
+        if 'x' in axis_set:
+            features.append("uses_x")
+        if 'y' in axis_set:
+            features.append("uses_y")
+        if 'z' in axis_set:
+            features.append("uses_z")
+        
+        # Frame coverage ratio
+        coverage = len(covered_frames) / 1024.0
+        if coverage < 0.25:
+            features.append("coverage_low")
+        elif coverage < 0.5:
+            features.append("coverage_med")
+        elif coverage < 0.75:
+            features.append("coverage_high")
+        else:
+            features.append("coverage_full")
+        
+        return " ".join(features)
+    
+    if show_progress:
+        print(f"Extracting features from {n} programs...")
+    
+    # Convert all programs to feature strings
+    feature_docs = [program_to_features(p) for p in programs]
+    
+    # Compute TF-IDF vectors
+    if show_progress:
+        print("Computing TF-IDF vectors...")
+    
+    vectorizer = TfidfVectorizer(
+        lowercase=False,
+        token_pattern=r'[a-zA-Z0-9_.-]+',
+        min_df=1,
+        max_df=0.95,  # Ignore features in >95% of programs
+    )
+    tfidf_matrix = vectorizer.fit_transform(feature_docs)
+    
+    if show_progress:
+        print(f"Feature vocabulary size: {len(vectorizer.vocabulary_)}")
+    
+    # Greedy max-min selection using cosine distance
+    selected_indices = []
+    
+    # Start with program that has highest L2 norm (most distinctive features)
+    norms = np.asarray(tfidf_matrix.power(2).sum(axis=1)).flatten()
+    first_idx = int(np.argmax(norms))
+    selected_indices.append(first_idx)
+    
+    # Track minimum distance to selected set for each program
+    # Using cosine distance: 1 - cosine_similarity
+    selected_vectors = tfidf_matrix[first_idx]
+    min_dist_to_selected = 1 - np.asarray(
+        tfidf_matrix.dot(selected_vectors.T).todense()
+    ).flatten()
+    
+    iterator = range(budget - 1)
+    if show_progress:
+        iterator = tqdm(iterator, desc="Selecting diverse programs")
+    
+    for _ in iterator:
+        # Mask already selected
+        min_dist_to_selected[selected_indices] = -np.inf
+        
+        # Select program with maximum minimum distance
+        next_idx = int(np.argmax(min_dist_to_selected))
+        selected_indices.append(next_idx)
+        
+        # Update minimum distances with new selection
+        new_vec = tfidf_matrix[next_idx]
+        new_distances = 1 - np.asarray(
+            tfidf_matrix.dot(new_vec.T).todense()
+        ).flatten()
+        min_dist_to_selected = np.minimum(min_dist_to_selected, new_distances)
+    
+    # Assign cluster labels based on nearest selected program
+    if show_progress:
+        print("Assigning cluster labels...")
+    
+    selected_matrix = tfidf_matrix[selected_indices]
+    similarities = tfidf_matrix.dot(selected_matrix.T).toarray()
+    cluster_labels = np.argmax(similarities, axis=1) + 1  # 1-indexed
+    
+    # Count cluster sizes
+    cluster_sizes = {}
+    for cluster_id in range(1, budget + 1):
+        cluster_sizes[cluster_id] = int((cluster_labels == cluster_id).sum())
+    
+    selected_programs = [programs[i] for i in selected_indices]
+    
+    if show_progress:
+        print(f"Selected {len(selected_programs)} diverse programs")
+    
+    return SelectionResult(
+        selected_programs=selected_programs,
+        selected_indices=selected_indices,
+        cluster_labels=cluster_labels,
+        cluster_sizes=cluster_sizes,
+        distance_matrix=None,  # Not computed for TF-IDF method
+    )

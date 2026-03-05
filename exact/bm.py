@@ -33,6 +33,7 @@ class BehaviourModel:
 
         self.model = FBcprModel.from_pretrained(model_name)
         self.model.to(device)
+        self.model.cfg.device = device  # .to() moves params but doesn't update internal config
         self.model.eval()
 
         buffer_path = hf_hub_download(

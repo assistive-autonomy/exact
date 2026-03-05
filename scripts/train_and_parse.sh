@@ -27,7 +27,7 @@ NUM_CPUS=$(nproc)
 echo "Detected ${NUM_GPUS} GPUs, ${NUM_CPUS} CPUs"
 
 # ─── Configuration ──────────────────────────────────────────────────────────
-CONFIG="configs/parser/parser.yaml"
+CONFIG="${CONFIG:-configs/parser/parser_v4.yaml}"
 ESK_PATH="../esk"
 HUMANACT12_PATH="../humanact12"
 
@@ -80,6 +80,13 @@ else
     echo "  Training output: $OUTPUT_DIR"
 
     BEST_CHECKPOINT="$OUTPUT_DIR"
+
+    # Prefer best-by-generation checkpoint if available (tracks edit distance,
+    # which is a better proxy for downstream quality than teacher-forced eval_loss)
+    if [[ -f "$OUTPUT_DIR/best_generation/prefix_parser.pt" ]]; then
+        BEST_CHECKPOINT="$OUTPUT_DIR/best_generation"
+        echo "  Using best-generation checkpoint (by edit distance)"
+    fi
 
     # Verify checkpoint files exist
     if [[ ! -f "$BEST_CHECKPOINT/prefix_parser.pt" ]]; then
@@ -151,23 +158,30 @@ echo "Step 3/3: Building executable models in parallel (CPU, ${NUM_CPUS} cores)"
 echo "============================================"
 
 # Build-models is CPU-only — run all 3 concurrently
+# Use --program-budget with TF-IDF diversity selection (not random sampling)
 BUILD_PIDS=()
 
 uv run scripts/parsing/build_models.py \
     --programs "$ESK_PATH/programs_verbs_train.json" \
     --output "$ESK_PATH/models_verbs.json" \
+    --program-budget 110 \
+    --selection-method tfidf \
     --validate &
 BUILD_PIDS+=($!)
 
 uv run scripts/parsing/build_models.py \
     --programs "$ESK_PATH/programs_activity_train.json" \
     --output "$ESK_PATH/models_activity.json" \
+    --program-budget 110 \
+    --selection-method tfidf \
     --validate &
 BUILD_PIDS+=($!)
 
 uv run scripts/parsing/build_models.py \
     --programs "$HUMANACT12_PATH/programs_train.json" \
     --output "$HUMANACT12_PATH/models.json" \
+    --program-budget 110 \
+    --selection-method tfidf \
     --validate &
 BUILD_PIDS+=($!)
 

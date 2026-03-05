@@ -398,6 +398,10 @@ class TrajectoryGenerationDataset(Dataset):
         self.prompt_prefix = prompt_prefix
         self.augment_crop_prob = augment_crop_prob
         self.augment_min_segments = augment_min_segments
+        
+        # Curriculum learning: indices filtered by segment count
+        self._curriculum_indices: Optional[List[int]] = None
+        self._segment_counts: Optional[List[int]] = None
         self.augment_min_crop_frames = augment_min_crop_frames
 
         if programs is not None and obs is not None:
@@ -423,7 +427,50 @@ class TrajectoryGenerationDataset(Dataset):
                 f"eligible={n_multi}/{len(self.programs)} multi-segment programs"
             )
 
+    def _compute_segment_counts(self) -> List[int]:
+        """Compute segment count for each program (cached)."""
+        if self._segment_counts is None:
+            self._segment_counts = [p.count(";") + 1 for p in self.programs]
+        return self._segment_counts
+
+    def set_curriculum(
+        self,
+        min_segments: int = 1,
+        max_segments: int = 999,
+    ) -> int:
+        """Filter dataset by segment count for curriculum learning.
+
+        Args:
+            min_segments: Minimum number of segments (inclusive)
+            max_segments: Maximum number of segments (inclusive)
+
+        Returns:
+            Number of samples in the filtered curriculum
+        """
+        seg_counts = self._compute_segment_counts()
+        self._curriculum_indices = [
+            i for i, n in enumerate(seg_counts)
+            if min_segments <= n <= max_segments
+        ]
+        logger.info(
+            f"Curriculum set: segments in [{min_segments}, {max_segments}] → "
+            f"{len(self._curriculum_indices)}/{len(self.programs)} samples"
+        )
+        return len(self._curriculum_indices)
+
+    def reset_curriculum(self):
+        """Reset to use all samples (no curriculum filtering)."""
+        self._curriculum_indices = None
+        logger.info(f"Curriculum reset: using all {len(self.programs)} samples")
+
+    @property
+    def curriculum_active(self) -> bool:
+        """Whether curriculum filtering is active."""
+        return self._curriculum_indices is not None
+
     def __len__(self) -> int:
+        if self._curriculum_indices is not None:
+            return len(self._curriculum_indices)
         return len(self.programs)
 
     def __getitem__(self, idx: int) -> dict:
@@ -438,8 +485,14 @@ class TrajectoryGenerationDataset(Dataset):
                 - attention_mask: attention mask (max_seq_length,)
                 - obs: motion observations (T, 72)
         """
-        program = self.programs[idx]
-        obs = self.obs[idx]
+        # Map idx through curriculum filter if active
+        if self._curriculum_indices is not None:
+            actual_idx = self._curriculum_indices[idx]
+        else:
+            actual_idx = idx
+
+        program = self.programs[actual_idx]
+        obs = self.obs[actual_idx]
 
         # ── Variable-length crop augmentation ─────────────────────────────
         # Randomly crop a contiguous subset of program segments and the

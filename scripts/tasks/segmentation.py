@@ -60,29 +60,51 @@ def write_split_file(splits: dict, output_path: str):
             f.write(f"{video}\n")
 
 
-def subsample_train_videos(splits: dict, fraction: float, seed: int) -> dict:
+def subsample_train_videos(
+    splits: dict,
+    fraction: float,
+    seed: int,
+    forced_include: list[str] | None = None,
+) -> dict:
     """Create a new splits dict with subsampled training videos.
     
     Args:
         splits: Original splits dictionary
         fraction: Fraction of training videos to keep (0.0-1.0)
         seed: Random seed for reproducibility
+        forced_include: Video names to always include (not subject to
+            subsampling). Added to the train set even if absent from the
+            original split file.
         
     Returns:
         New splits dict with subsampled training videos
     """
-    if fraction >= 1.0:
-        return splits
-    
+    forced_include = list(forced_include or [])
+
     train_videos = splits["train"].copy()
-    n_total = len(train_videos)
-    n_keep = max(1, int(n_total * fraction))
-    
-    # Use seed for reproducibility
+
+    # Add forced videos not already in the train list
+    for v in forced_include:
+        if v not in train_videos:
+            train_videos.append(v)
+
+    if fraction >= 1.0:
+        return {
+            "train": train_videos,
+            "validation": splits["validation"],
+            "test": splits["test"],
+        }
+
+    # Separate forced from subsample pool
+    forced_set = set(forced_include)
+    pool = [v for v in train_videos if v not in forced_set]
+    forced = [v for v in train_videos if v in forced_set]
+
+    n_keep = max(1, int(len(pool) * fraction))
     rng = random.Random(seed)
-    sampled_train = rng.sample(train_videos, n_keep)
+    sampled_train = rng.sample(pool, n_keep) + forced
     
-    logger.info(f"    Subsampled {n_keep}/{n_total} training videos (seed={seed})")
+    logger.info(f"    Subsampled {n_keep}/{len(pool)} training videos + {len(forced)} forced (seed={seed})")
     
     return {
         "train": sampled_train,
@@ -184,6 +206,7 @@ def main(cfg: DictConfig):
     project_cfg = cfg.project
     models = cfg.models
     train_fraction = cfg.get("train_fraction", 1.0)
+    forced_train_videos = list(cfg.get("forced_train_videos", []) or [])
     num_seeds = cfg.num_seeds
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -191,6 +214,8 @@ def main(cfg: DictConfig):
     # Generate project name with fraction
     project_name = get_project_name(project_cfg.project_name, train_fraction)
     logger.info(f"Project name: {project_name} (train_fraction={train_fraction})")
+    if forced_train_videos:
+        logger.info(f"Forced train videos (always included): {forced_train_videos}")
 
     evaluate_only = cfg.get("evaluate_only", False)
     if evaluate_only:
@@ -247,7 +272,7 @@ def main(cfg: DictConfig):
             logger.info(f"  Using {train_fraction*100:.0f}% of training data for HP search")
         
             # Create a subsampled split file for HP search (seed=0 for consistency)
-            hp_splits = subsample_train_videos(base_splits, train_fraction, seed=0)
+            hp_splits = subsample_train_videos(base_splits, train_fraction, seed=0, forced_include=forced_train_videos)
             hp_split_path = temp_dir / "hp_search_split.txt"
             write_split_file(hp_splits, str(hp_split_path))
         
@@ -365,7 +390,7 @@ def main(cfg: DictConfig):
                     logger.info(f"  Training {model} seed {seed_idx}/{num_seeds-1}...")
                 
                     # Create subsampled split file for this seed
-                    seed_splits = subsample_train_videos(base_splits, train_fraction, seed=seed_idx)
+                    seed_splits = subsample_train_videos(base_splits, train_fraction, seed=seed_idx, forced_include=forced_train_videos)
                     seed_split_path = temp_dir / f"train_split_seed{seed_idx}.txt"
                     write_split_file(seed_splits, str(seed_split_path))
                 

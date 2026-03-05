@@ -1,0 +1,115 @@
+seed: 42
+device: auto
+
+# Data (relative to project root)
+train_data: ../exact_data/train_diverse.h5
+eval_data: ../exact_data/eval.h5
+
+# Output
+output_dir: results/parser
+
+# ========== MODEL ==========
+model_name: /pvc/Qwen/Qwen2.5-Coder-3B
+max_seq_length: 512
+load_in_4bit: false
+
+# Generation / evaluation settings
+generation_max_new_tokens: 512
+generation_retries: 5
+generation_retry_temperature: 0.7
+generation_retry_top_p: 0.92
+generation_temperature: 0.4
+use_constrained_decoding: true
+log_generation_attempts: false
+skip_post_training_eval: false
+max_frame: 1024
+
+# ========== ST-GCN ENCODER ==========
+motion_dim: 72  # 24 joints * 3 (x, y, z)
+graph_strategy: spatial
+
+stgcn_hidden_channels: 256
+stgcn_num_blocks: 8
+stgcn_num_temporal_tokens: 16
+stgcn_temporal_kernel: 7
+stgcn_spatial_kernel: 3
+stgcn_dropout: 0.3
+stgcn_joint_embedding: true
+
+# ========== VARIABLE-LENGTH CROP AUGMENTATION ==========
+# [v4] Increased to 0.8 for stronger diversity / domain-gap bridging
+augment_crop_prob: 0.8
+augment_min_segments: 1
+augment_min_crop_frames: 64
+
+# ========== CURRICULUM LEARNING ==========
+# [v4] NEW: Start with simpler multi-segment programs, gradually add harder ones
+# Phase 1 (0-30%): 2-3 segment programs — learn basic multi-segment structure
+# Phase 2 (30-60%): 2-5 segment programs — medium complexity
+# Phase 3 (60-100%): all programs — full complexity
+curriculum_learning: true
+curriculum_phase1_end: 0.30
+curriculum_phase2_end: 0.60
+curriculum_phase1_segments: [2, 3]     # Start with 2-3 segment programs
+curriculum_phase2_segments: [2, 5]     # Then add 4-5 segment programs
+
+# ========== AUXILIARY LOSSES ==========
+alignment_weight: 0.15
+alignment_dim: 512
+alignment_temperature: 0.07
+
+# ========== LORA CONFIG ==========
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.1
+
+# ========== TRAINING HYPERPARAMETERS ==========
+num_train_epochs: 25
+per_device_train_batch_size: 64
+per_device_eval_batch_size: 64
+learning_rate: 8e-5
+encoder_lr: 1e-5
+scale_lr: 1e-4
+weight_decay: 0.05
+max_grad_norm: 1.0
+warmup_ratio: 0.15
+lr_scheduler_type: cosine
+gradient_accumulation_steps: 1
+dataloader_num_workers: 16
+dataloader_persistent_workers: true
+logging_steps: 100
+bf16: true
+tf32: true
+dataloader_prefetch_factor: 4
+gradient_checkpointing: true
+eval_strategy: steps
+eval_steps: 500
+max_eval_samples_training: 100
+
+# Checkpointing
+save_strategy: steps
+save_steps: 500
+save_total_limit: 5
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+
+# Early stopping
+early_stopping_patience: 5
+
+# Sweep-specific
+sweep_train_fraction: 0.1
+sweep_max_epochs: 10
+
+# Mid-training generation evaluation
+generation_eval_steps: 1000
+generation_eval_samples: 32
+gen_early_stopping_patience: 5
+
+# Final evaluation
+eval_samples: 16
+
+# Wandb
+report_to: wandb
+wandb_project: exact
+wandb_entity: assistive-autonomy
+wandb_mode: online

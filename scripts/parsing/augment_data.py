@@ -263,6 +263,7 @@ def generate_augmented_data(
     dry_run: bool = False,
     batch_envs: int = 1,
     z_variants: int = 1,
+    video_name: str = "augmented_data",
 ) -> str:
     """Generate augmented data using executable activity models.
 
@@ -310,7 +311,7 @@ def generate_augmented_data(
     writer = ESKDatasetWriter(
         activity_names=activities,
         output_dir=output_dir,
-        video_name="augmented_data",
+        video_name=video_name,
     )
 
     # Generate trajectories for each activity
@@ -485,6 +486,7 @@ def generate_augmented_data_parallel(
     relabel_workers: int | None = None,
     z_variants: int = 4,
     seed: int = 42,
+    video_name: str = "augmented_data",
 ) -> str:
     """Generate augmented data using multiple GPUs in parallel.
 
@@ -604,7 +606,7 @@ def generate_augmented_data_parallel(
         writer = ESKDatasetWriter(
             activity_names=activities,
             output_dir=output_dir,
-            video_name="augmented_data",
+            video_name=video_name,
         )
 
         for gpu_id, assignments in gpu_assignments.items():
@@ -784,6 +786,12 @@ def main():
         default=4,
         help="Number of z vector variants per timestep for diversity (default: 4)",
     )
+    parser.add_argument(
+        "--video-name",
+        type=str,
+        default="augmented_data",
+        help="Video name for the generated data files (default: augmented_data)",
+    )
     
     args = parser.parse_args()
     
@@ -912,6 +920,7 @@ def main():
             relabel_workers=args.relabel_workers,
             z_variants=args.z_variants,
             seed=args.seed,
+            video_name=args.video_name,
         )
     else:
         # ----- Single-GPU (or dry-run) path -----
@@ -960,6 +969,7 @@ def main():
             dry_run=args.dry_run,
             batch_envs=args.batch_envs,
             z_variants=args.z_variants,
+            video_name=args.video_name,
         )
     
     logger.success(f"Augmentation complete! Data saved to {output_dir}")

@@ -157,6 +157,10 @@ class GenerationEvalCallback(TrainerCallback):
     Unlike eval_loss (teacher-forced), this tests actual autoregressive
     generation — the metric that matters for deployment.  It catches the
     failure mode where eval_loss looks fine but generation is garbage.
+
+    Optionally saves the best checkpoint by generation edit distance and
+    triggers early stopping if edit distance doesn't improve for
+    ``gen_early_stopping_patience`` consecutive evaluations.
     """
 
     def __init__(
@@ -169,6 +173,7 @@ class GenerationEvalCallback(TrainerCallback):
         cfg: DictConfig,
         every_n_steps: int = 4000,
         n_samples: int = 16,
+        gen_early_stopping_patience: int = 0,
     ):
         self.parser_model = parser_model
         self.tokenizer = tokenizer
@@ -178,7 +183,12 @@ class GenerationEvalCallback(TrainerCallback):
         self.cfg = cfg
         self.every_n_steps = every_n_steps
         self.n_samples = n_samples
+        self.gen_early_stopping_patience = gen_early_stopping_patience
         self._eval_samples = None
+        # Track best generation edit distance for checkpoint saving & early stopping
+        self._best_edit_distance = float("inf")
+        self._best_step = 0
+        self._no_improve_count = 0
 
     def _get_eval_samples(self):
         if self._eval_samples is None:
@@ -215,21 +225,76 @@ class GenerationEvalCallback(TrainerCallback):
                     ),
                     max_frame=self.cfg.get("max_frame", 1024),
                 )
+
+                edit_dist = eval_results.get("mean_normalized_edit_distance")
                 logger.info(
                     f"[Step {state.global_step}] Generation eval: "
                     f"accuracy={eval_results['accuracy']:.1%}, "
                     f"validity={eval_results['validity_rate']:.1%}, "
-                    f"edit_dist={eval_results.get('mean_normalized_edit_distance', 'N/A')}"
+                    f"edit_dist={edit_dist if edit_dist is not None else 'N/A'}"
                 )
+
+                # ── Track best generation edit distance ─────────────────
+                if edit_dist is not None:
+                    if edit_dist < self._best_edit_distance:
+                        self._best_edit_distance = edit_dist
+                        self._best_step = state.global_step
+                        self._no_improve_count = 0
+                        logger.info(
+                            f"  New best gen edit_distance: {edit_dist:.4f} "
+                            f"(step {state.global_step})"
+                        )
+                        # Save best-by-generation checkpoint
+                        best_gen_dir = os.path.join(args.output_dir, "best_generation")
+                        os.makedirs(best_gen_dir, exist_ok=True)
+                        self.parser_model.save_pretrained(best_gen_dir)
+                        # Also save LoRA adapter
+                        if hasattr(self.parser_model, "model") and hasattr(
+                            self.parser_model.model, "save_pretrained"
+                        ):
+                            self.parser_model.model.save_pretrained(
+                                os.path.join(best_gen_dir, "lora_adapter")
+                            )
+                        # Save step info
+                        import json as _json
+                        with open(os.path.join(best_gen_dir, "gen_eval_info.json"), "w") as f:
+                            _json.dump(
+                                {
+                                    "step": state.global_step,
+                                    "edit_distance": edit_dist,
+                                    "accuracy": eval_results["accuracy"],
+                                    "validity_rate": eval_results["validity_rate"],
+                                },
+                                f,
+                                indent=2,
+                            )
+                        logger.info(f"  Saved best-generation checkpoint to {best_gen_dir}")
+                    else:
+                        self._no_improve_count += 1
+                        logger.info(
+                            f"  No improvement: {edit_dist:.4f} vs best {self._best_edit_distance:.4f} "
+                            f"(patience {self._no_improve_count}/{self.gen_early_stopping_patience})"
+                        )
+
+                    # ── Generation-based early stopping ─────────────────
+                    if (
+                        self.gen_early_stopping_patience > 0
+                        and self._no_improve_count >= self.gen_early_stopping_patience
+                    ):
+                        logger.warning(
+                            f"  Generation early stopping triggered at step {state.global_step}! "
+                            f"Best edit_distance={self._best_edit_distance:.4f} at step {self._best_step}."
+                        )
+                        control.should_training_stop = True
+
                 if WANDB_AVAILABLE and wandb.run is not None:
                     log_data = {
                         "gen_eval/accuracy": eval_results["accuracy"],
                         "gen_eval/validity_rate": eval_results["validity_rate"],
+                        "gen_eval/best_edit_distance": self._best_edit_distance,
                     }
-                    if eval_results.get("mean_normalized_edit_distance") is not None:
-                        log_data["gen_eval/edit_distance"] = eval_results[
-                            "mean_normalized_edit_distance"
-                        ]
+                    if edit_dist is not None:
+                        log_data["gen_eval/edit_distance"] = edit_dist
                     wandb.log(log_data, step=state.global_step)
             except Exception as e:
                 logger.warning(f"Mid-training generation eval failed: {e}")
@@ -259,6 +324,82 @@ class AlignmentLoggingCallback(TrainerCallback):
         # Track learned motion embedding scale
         if hasattr(m, "_motion_scale"):
             logs["train/motion_scale"] = m._motion_scale.item()
+
+
+class CurriculumCallback(TrainerCallback):
+    """Curriculum learning: start with simple programs, gradually add harder ones.
+
+    Schedule (by training progress percentage):
+      - Phase 1 (0-30%):   2-3 segment programs only (learn basic multi-segment structure)
+      - Phase 2 (30-60%):  2-5 segment programs (add medium complexity)
+      - Phase 3 (60-100%): All programs (full complexity)
+
+    This prevents the model from taking shortcuts by learning from easy examples
+    first, then progressively introducing harder examples.
+    """
+
+    def __init__(
+        self,
+        train_dataset,
+        phase1_end: float = 0.30,  # End phase 1 at 30% through training
+        phase2_end: float = 0.60,  # End phase 2 at 60% through training
+        phase1_segments: tuple = (2, 3),   # Phase 1: 2-3 segments
+        phase2_segments: tuple = (2, 5),   # Phase 2: 2-5 segments
+    ):
+        self.train_dataset = train_dataset
+        self.phase1_end = phase1_end
+        self.phase2_end = phase2_end
+        self.phase1_segments = phase1_segments
+        self.phase2_segments = phase2_segments
+        self._current_phase = 0
+        self._total_steps = None
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        # Compute total training steps
+        self._total_steps = state.max_steps
+        # Start with phase 1 curriculum
+        self._set_phase(1)
+        logger.info(
+            f"Curriculum learning enabled: "
+            f"Phase 1 (0-{self.phase1_end:.0%}): {self.phase1_segments[0]}-{self.phase1_segments[1]} segments, "
+            f"Phase 2 ({self.phase1_end:.0%}-{self.phase2_end:.0%}): {self.phase2_segments[0]}-{self.phase2_segments[1]} segments, "
+            f"Phase 3 ({self.phase2_end:.0%}-100%): all segments"
+        )
+
+    def _set_phase(self, phase: int):
+        """Update curriculum phase."""
+        if phase == self._current_phase:
+            return
+
+        self._current_phase = phase
+        if phase == 1:
+            self.train_dataset.set_curriculum(
+                min_segments=self.phase1_segments[0],
+                max_segments=self.phase1_segments[1],
+            )
+        elif phase == 2:
+            self.train_dataset.set_curriculum(
+                min_segments=self.phase2_segments[0],
+                max_segments=self.phase2_segments[1],
+            )
+        else:  # phase 3
+            self.train_dataset.reset_curriculum()
+
+        if WANDB_AVAILABLE and wandb.run is not None:
+            wandb.log({"curriculum/phase": phase})
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if self._total_steps is None or self._total_steps == 0:
+            return
+
+        progress = state.global_step / self._total_steps
+
+        if progress < self.phase1_end:
+            self._set_phase(1)
+        elif progress < self.phase2_end:
+            self._set_phase(2)
+        else:
+            self._set_phase(3)
 
 
 # ─── Evaluation ───────────────────────────────────────────────────────────────
@@ -1040,9 +1181,24 @@ def main():
     callbacks.append(EncoderCheckpointCallback(model))
     callbacks.append(AlignmentLoggingCallback(model))
 
+    # Curriculum learning: start with simpler programs
+    curriculum_enabled = cfg.get("curriculum_learning", False)
+    if curriculum_enabled:
+        callbacks.append(
+            CurriculumCallback(
+                train_dataset=train_dataset,
+                phase1_end=cfg.get("curriculum_phase1_end", 0.30),
+                phase2_end=cfg.get("curriculum_phase2_end", 0.60),
+                phase1_segments=tuple(cfg.get("curriculum_phase1_segments", [2, 3])),
+                phase2_segments=tuple(cfg.get("curriculum_phase2_segments", [2, 5])),
+            )
+        )
+        logger.info("Curriculum learning callback added")
+
     # Mid-training generation-based evaluation
     gen_eval_steps = cfg.get("generation_eval_steps", 0)
     gen_eval_samples = cfg.get("generation_eval_samples", 16)
+    gen_early_stopping_patience = cfg.get("gen_early_stopping_patience", 0)
     if gen_eval_steps > 0 and cfg.eval_data and os.path.exists(cfg.eval_data):
         callbacks.append(
             GenerationEvalCallback(
@@ -1054,11 +1210,14 @@ def main():
                 cfg=cfg,
                 every_n_steps=gen_eval_steps,
                 n_samples=gen_eval_samples,
+                gen_early_stopping_patience=gen_early_stopping_patience,
             )
         )
         logger.info(
             f"Generation eval enabled every {gen_eval_steps} steps "
             f"({gen_eval_samples} samples)"
+            + (f", gen early stopping patience={gen_early_stopping_patience}"
+               if gen_early_stopping_patience > 0 else "")
         )
 
     # ── Train ───────────────────────────────────────────────────────────────
