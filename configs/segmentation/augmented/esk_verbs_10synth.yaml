@@ -1,5 +1,5 @@
 project:
-  project_name: esk_verbs_exact_100pt_10synth
+  project_name: esk_verbs_augmented_10synth
   projects_path: dlc2a_benchmark
   data_type: dlc_track
   annotation_type: dlc
@@ -96,4 +96,4 @@ hyperparameter_search_space:
     choices: [1024]
 
 output_dir: results/segmentation
-results_table_path: results_verbs_exact_100_10synth.csv
+results_table_path: results_verbs_augmented_10synth.csv

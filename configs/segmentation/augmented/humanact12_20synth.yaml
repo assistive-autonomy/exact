@@ -1,10 +1,10 @@
 project:
-  project_name: esk_verbs_exact_100pt_20synth
+  project_name: humanact12_augmented_20synth
   projects_path: dlc2a_benchmark
   data_type: dlc_track
   annotation_type: dlc
-  data_path: ../exact_data/benchmarks/esk/D2A_converted_pose_smpl
-  annotation_path: ../exact_data/benchmarks/esk/D2A_converted_label_verbs
+  data_path: ../exact_data/benchmarks/humanact12/D2A_converted_pose_smpl
+  annotation_path: ../exact_data/benchmarks/humanact12/D2A_converted_label_actions
 
 general:
   model_name: c2f_tcn
@@ -39,7 +39,7 @@ training:
   temporal_subsampling_size: 0.85
   parallel: false
   partition_method: file
-  split_path: ../exact_data/benchmarks/esk/trainvaltest_split.txt
+  split_path: ../exact_data/benchmarks/humanact12/trainvaltest_split.txt
 
 losses:
   ms_tcn:
@@ -73,7 +73,7 @@ hyperparameter_search_metric: f1
 num_seeds: 3
 models: [ms_tcn3, c2f_tcn, edtcn, c2f_transformer]
 
-forced_train_videos: [synth_verb_20pct]
+forced_train_videos: [synth_ha12_20pct]
 
 hyperparameter_search_space:
   losses/ms_tcn/focal:
@@ -96,4 +96,4 @@ hyperparameter_search_space:
     choices: [1024]
 
 output_dir: results/segmentation
-results_table_path: results_verbs_exact_100_20synth.csv
+results_table_path: results_humanact12_augmented_20synth.csv

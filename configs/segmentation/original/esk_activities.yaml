@@ -1,5 +1,5 @@
 project:
-  project_name: esk_activities_exact_100pt_10synth
+  project_name: esk_activities_original
   projects_path: dlc2a_benchmark
   data_type: dlc_track
   annotation_type: dlc
@@ -27,14 +27,14 @@ data:
   filter_background: false
   visibility_min_score: 0
   visibility_min_frac: 0
-  num_cpus: 2
+  num_cpus: 2  # Limit parallel workers to reduce memory usage
 
 training:
   lr: 0.001
   device: auto
   num_epochs: 50
   to_ram: false
-  batch_size: 32
+  batch_size: 32  # Reduced from 64 to lower memory usage
   normalize: true
   temporal_subsampling_size: 0.85
   parallel: false
@@ -73,7 +73,6 @@ hyperparameter_search_metric: f1
 num_seeds: 3
 models: [ms_tcn3, c2f_tcn, edtcn, c2f_transformer]
 
-forced_train_videos: [synth_act_10pct]
 
 hyperparameter_search_space:
   losses/ms_tcn/focal:
@@ -93,7 +92,7 @@ hyperparameter_search_space:
     high: 128
   general/len_segment:
     type: categorical
-    choices: [1024]
+    choices: [1024] 
 
 output_dir: results/segmentation
-results_table_path: results_activities_exact_100_10synth.csv
+results_table_path: results_activities_original.csv
