@@ -79,7 +79,7 @@ def parse_args():
         "--split",
         type=str,
         default="train",
-        choices=["train", "test", "all"],
+        choices=["train", "val", "test", "all"],
         help="Which split to parse",
     )
     parser.add_argument(
@@ -316,6 +316,11 @@ def main():
     # Select videos based on split argument
     if args.split == "train":
         videos = splits["train"]
+    elif args.split == "val":
+        videos = splits.get("val", [])
+        if not videos:
+            logger.error("No validation videos found in split file")
+            return 1
     elif args.split == "test":
         videos = splits["test"]
     else:

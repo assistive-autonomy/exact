@@ -68,16 +68,23 @@ def parse_args():
     
     # Data sources
     parser.add_argument(
+        "--models",
+        type=str,
+        default=None,
+        help="Path to saved ActivityModelCollection JSON (e.g., models_activity.json). "
+             "Uses these as the exact model programs. Auto-detected from --esk-path if not set.",
+    )
+    parser.add_argument(
         "--train-programs",
         type=str,
         default=None,
-        help="Path to pre-parsed programs JSON for training",
+        help="Path to pre-parsed programs JSON for training (ignored if --models is set)",
     )
     parser.add_argument(
         "--test-programs",
         type=str,
         default=None,
-        help="Path to pre-parsed programs JSON for testing (default: same as train)",
+        help="Path to pre-parsed programs JSON for testing (default: auto-detected)",
     )
     parser.add_argument(
         "--parser-checkpoint",
@@ -89,7 +96,7 @@ def parse_args():
         "--esk-path",
         type=str,
         default="/pvc/esk",
-        help="Path to ESK dataset",
+        help="Path to dataset directory",
     )
     
     # Label configuration
@@ -97,8 +104,8 @@ def parse_args():
         "--label-type",
         type=str,
         default="verbs",
-        choices=["verbs", "activity"],
-        help="Label type: verbs (fine-grained) or activity (coarse-grained)",
+        choices=["verbs", "activity", "actions"],
+        help="Label type: verbs (fine-grained), activity (coarse-grained), or actions (humanact12)",
     )
     parser.add_argument(
         "--activities",
@@ -314,6 +321,101 @@ def plot_separation_summary(
     return fig
 
 
+def plot_auc_matrix(
+    auc_matrix: np.ndarray,
+    activity_names: list[str],
+    output_path: str,
+    title: str = "AUC Matrix",
+    cmap: str = "RdYlGn",
+):
+    """Plot AUC matrix as heatmap.
+    
+    AUC[i,j] = how well model i separates its own activity i (positive) from activity j (negative).
+    Diagonal = one-vs-rest AUROC for model i.
+    Same convention as the NF anomaly detection matrix.
+    """
+    n = len(activity_names)
+    wrapped_names = [name.replace("_", "\n").replace(" ", "\n") for name in activity_names]
+    
+    fig, ax = plt.subplots(figsize=(12, 10))
+    
+    # Mask NaN for display
+    mask = np.isnan(auc_matrix)
+    
+    im = sns.heatmap(
+        auc_matrix,
+        annot=True,
+        fmt=".2f",
+        cmap=cmap,
+        square=True,
+        linewidths=0.5,
+        linecolor="white",
+        vmin=0.0,
+        vmax=1.0,
+        mask=mask,
+        cbar_kws={"label": "AUC (higher = better separation)", "shrink": 0.8},
+        annot_kws={"size": 9},
+        ax=ax,
+        xticklabels=wrapped_names,
+        yticklabels=wrapped_names,
+    )
+    
+    ax.set_xlabel("Query Activity", fontsize=14, fontweight="bold")
+    ax.set_ylabel("Target Activity (model)", fontsize=14, fontweight="bold")
+    ax.set_title(title, fontsize=16, fontweight="bold")
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close()
+    logger.info(f"Saved AUC matrix plot to {output_path}")
+    
+    return fig
+
+
+def plot_auc_comparison(
+    activity_names: list[str],
+    mean_sigmoid_aucs: dict[str, float],
+    min_sigmoid_aucs: dict[str, float],
+    output_path: str,
+):
+    """Plot per-model AUC comparison between mean-sigmoid and min-sigmoid."""
+    n = len(activity_names)
+    x = np.arange(n)
+    width = 0.35
+    
+    mean_vals = [mean_sigmoid_aucs.get(a, 0) for a in activity_names]
+    min_vals = [min_sigmoid_aucs.get(a, 0) for a in activity_names]
+    
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    bars1 = ax.bar(x - width / 2, mean_vals, width, label="mean-sigmoid", color="#3498db", alpha=0.8)
+    bars2 = ax.bar(x + width / 2, min_vals, width, label="min-sigmoid", color="#e67e22", alpha=0.8)
+    
+    ax.set_xticks(x)
+    ax.set_xticklabels(activity_names, rotation=45, ha="right", fontsize=10)
+    ax.set_ylabel("AUC (one-vs-rest)", fontsize=12)
+    ax.set_title("Per-Activity AUC: mean-sigmoid vs min-sigmoid", fontsize=14, fontweight="bold")
+    ax.axhline(y=0.5, color="black", linestyle="--", linewidth=0.5, alpha=0.7, label="Random")
+    ax.set_ylim(0, 1.05)
+    ax.legend()
+    ax.grid(axis="y", alpha=0.3, linestyle="--")
+    
+    # Value labels
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            h = bar.get_height()
+            if not np.isnan(h):
+                ax.annotate(f"{h:.2f}", xy=(bar.get_x() + bar.get_width() / 2, h),
+                           ha="center", va="bottom", fontsize=7)
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close()
+    logger.info(f"Saved AUC comparison plot to {output_path}")
+    
+    return fig
+
+
 def main():
     args = parse_args()
     
@@ -349,6 +451,7 @@ def main():
             name=run_name,
             config={
                 "label_type": args.label_type,
+                "model_source": "saved_models" if (args.models or not args.train_programs) else "train_programs",
                 "train_budget": args.train_budget,
                 "max_test_per_activity": args.max_test_per_activity,
                 "value_tolerance": VALUE_TOLERANCE,
@@ -359,36 +462,95 @@ def main():
         )
         logger.info(f"Wandb run: {run_name}")
     
-    # Load programs
-    # Determine correct programs file based on label type
-    if args.train_programs:
-        train_path = args.train_programs
-    else:
-        # Auto-detect based on label type
-        esk_path = Path(args.esk_path)
-        if args.label_type == "activity":
-            train_path = esk_path / "programs_activity_train.json"
-        else:
-            train_path = esk_path / "programs_train.json"
+    # =========================================================================
+    # Resolve paths
+    # =========================================================================
+    esk_path = Path(args.esk_path)
     
-    if not Path(train_path).exists():
-        logger.error(f"Programs file not found: {train_path}")
-        logger.error("Run parse_esk.py first to generate programs")
+    # --- Model programs (the "exact models") ---
+    models_path = None
+    if args.models:
+        models_path = Path(args.models)
+    else:
+        # Auto-detect model file from esk_path + label_type
+        if args.label_type == "activity":
+            candidate = esk_path / "models_activity.json"
+        elif args.label_type == "verbs":
+            candidate = esk_path / "models_verbs.json"
+        else:
+            candidate = esk_path / "models.json"
+        if candidate.exists():
+            models_path = candidate
+    
+    use_saved_models = models_path is not None and models_path.exists()
+    
+    # --- Test programs file ---
+    if args.test_programs:
+        test_path = Path(args.test_programs)
+    else:
+        # Auto-detect test programs file
+        if args.label_type == "activity":
+            test_path = esk_path / "programs_activity_test.json"
+        elif args.label_type == "verbs":
+            test_path = esk_path / "programs_verbs_test.json"
+            if not test_path.exists():
+                test_path = esk_path / "programs_test.json"
+        else:
+            test_path = esk_path / "programs_test.json"
+    
+    if not test_path.exists():
+        logger.error(f"Test programs file not found: {test_path}")
         return 1
     
-    logger.info(f"Loading programs from: {train_path}")
-    train_data = load_programs_from_json(train_path)
+    # --- Train programs file (fallback if no saved models) ---
+    train_path = None
+    if not use_saved_models:
+        if args.train_programs:
+            train_path = Path(args.train_programs)
+        else:
+            if args.label_type == "activity":
+                train_path = esk_path / "programs_activity_train.json"
+            elif args.label_type == "verbs":
+                train_path = esk_path / "programs_verbs_train.json"
+                if not train_path.exists():
+                    train_path = esk_path / "programs_train.json"
+            else:
+                train_path = esk_path / "programs_train.json"
+        
+        if not train_path.exists():
+            logger.error(f"No model file or train programs found. Tried: {models_path}, {train_path}")
+            return 1
     
-    # Use same file for test if not specified
-    if args.test_programs:
-        test_data = load_programs_from_json(args.test_programs)
+    # =========================================================================
+    # Load model programs
+    # =========================================================================
+    if use_saved_models:
+        logger.info(f"Loading saved ExAct models from: {models_path}")
+        with open(models_path, "r") as f:
+            models_data = json.load(f)
+        
+        all_activity_names = list(models_data["models"].keys())
+        model_programs_by_activity = {}
+        for act_name, model_info in models_data["models"].items():
+            model_programs_by_activity[act_name] = model_info["original_programs"]
+        
+        logger.info(f"Loaded models for {len(all_activity_names)} activities")
+        for act, progs in model_programs_by_activity.items():
+            logger.info(f"  {act}: {len(progs)} model programs")
     else:
-        test_data = train_data
+        logger.info(f"Loading train programs from: {train_path}")
+        train_data = load_programs_from_json(train_path)
+        all_activity_names = train_data["activity_names"]
+        model_programs_by_activity = None  # will sample below
     
-    # Filter activities if specified
-    all_activity_names = train_data["activity_names"]
+    # Load test programs
+    logger.info(f"Loading test programs from: {test_path}")
+    test_data = load_programs_from_json(test_path)
+    
+    # =========================================================================
+    # Filter activities
+    # =========================================================================
     if args.activities:
-        # Validate specified activities exist
         invalid = [a for a in args.activities if a not in all_activity_names]
         if invalid:
             logger.error(f"Unknown activities: {invalid}")
@@ -398,80 +560,105 @@ def main():
         logger.info(f"Filtering to {len(activity_names)} activities: {activity_names}")
     else:
         activity_names = all_activity_names
-        logger.info(f"Found {len(activity_names)} activities: {activity_names}")
+        logger.info(f"Using all {len(activity_names)} activities: {activity_names}")
     
-    # Create distance matrix calculator
+    # =========================================================================
+    # Build distance matrix: model + test programs
+    # =========================================================================
     dist_matrix = ProgramDistanceMatrix(activity_names)
-    
-    # Build train/test sets
-    logger.info("Building train/test program sets...")
     
     train_counts = {}
     test_counts = {}
     
     for activity in activity_names:
-        # Get all programs for this activity
-        train_progs_raw = train_data["programs_by_activity"].get(activity, [])
-        test_progs_raw = test_data["programs_by_activity"].get(activity, [])
+        # --- Model programs ---
+        if use_saved_models:
+            # Use exact saved model programs (no budget, no sampling)
+            raw_progs = model_programs_by_activity.get(activity, [])
+            model_progs = filter_valid_programs(
+                [{"program": p} if isinstance(p, str) else p for p in raw_progs]
+            )
+        else:
+            # Sample from train programs up to budget
+            train_progs_raw = train_data["programs_by_activity"].get(activity, [])
+            if not train_progs_raw:
+                logger.warning(f"No training programs for {activity}")
+                continue
+            random.shuffle(train_progs_raw)
+            model_progs = filter_valid_programs(train_progs_raw, max_count=args.train_budget)
         
-        if not train_progs_raw:
-            logger.warning(f"No training programs for {activity}")
+        if model_progs:
+            dist_matrix.set_model_programs(activity, model_progs)
+            train_counts[activity] = len(model_progs)
+        else:
+            logger.warning(f"No valid model programs for {activity}")
             continue
         
-        # Shuffle for random selection
-        random.shuffle(train_progs_raw)
-        
-        # Filter to valid programs and limit to budget
-        train_progs = filter_valid_programs(train_progs_raw, max_count=args.train_budget)
-        
-        # For test: use all remaining programs (or separate test set)
-        # Apply sample_test limit if specified
+        # --- Test programs ---
+        test_progs_raw = test_data["programs_by_activity"].get(activity, [])
         test_limit = args.sample_test if args.sample_test else args.max_test_per_activity
-        if args.test_programs:
-            # Separate test set - use all valid programs
-            test_progs = filter_valid_programs(test_progs_raw, max_count=test_limit)
-        else:
-            # Same file - use programs not in training set
-            remaining = train_progs_raw[args.train_budget:]
-            test_progs = filter_valid_programs(remaining, max_count=test_limit)
+        test_progs = filter_valid_programs(test_progs_raw, max_count=test_limit)
         
-        # Set model programs
-        if train_progs:
-            dist_matrix.set_model_programs(activity, train_progs)
-            train_counts[activity] = len(train_progs)
-        
-        # Add test programs
         for prog in test_progs:
             dist_matrix.add_test_program(activity, prog)
         test_counts[activity] = len(test_progs)
         
-        logger.info(f"  {activity}: {len(train_progs)} train, {len(test_progs)} test")
+        logger.info(f"  {activity}: {train_counts.get(activity, 0)} model, {len(test_progs)} test")
     
-    # Compute distance matrix
-    logger.info(f"Computing separability matrix with {args.num_workers} worker(s)...")
+    # Compute raw distance matrix (existing behavior)
+    logger.info(f"Computing raw distance matrix with {args.num_workers} worker(s)...")
     matrix = dist_matrix.compute_matrix(verbose=True, num_workers=args.num_workers)
     
-    # Get metrics
+    # Get raw distance metrics
     metrics = dist_matrix.get_separability_metrics()
     
     logger.info("=" * 60)
-    logger.info("Results")
+    logger.info("Raw Distance Results")
     logger.info("=" * 60)
     logger.info(f"Diagonal mean (same-activity): {metrics['diagonal_mean']:.2f}")
     logger.info(f"Off-diagonal mean (cross-activity): {metrics['off_diagonal_mean']:.2f}")
     logger.info(f"Separation (higher = better): {metrics['separation']:.2f}")
     
+    # =========================================================================
+    # Sigmoid-based scoring and AUC computation
+    # =========================================================================
+    scoring_methods = ["mean-sigmoid", "min-sigmoid"]
+    auc_results = {}
+    
+    for method in scoring_methods:
+        logger.info(f"\nComputing {method} scores and AUC...")
+        auc_matrix, score_matrix, auc_metrics = dist_matrix.compute_auc_matrix(
+            method=method, verbose=True
+        )
+        
+        auc_results[method] = {
+            "auc_matrix": auc_matrix,
+            "score_matrix": score_matrix,
+            "metrics": auc_metrics,
+        }
+        
+        logger.info(f"  {method} mean AUC (one-vs-rest): {auc_metrics['mean_auc']:.4f}")
+        logger.info(f"  {method} mean pairwise AUC: {auc_metrics['mean_pairwise_auc']:.4f}")
+        
+        # Per-model AUC
+        for act, auc_val in auc_metrics["per_model_auc"].items():
+            logger.info(f"    {act}: AUC = {auc_val:.4f}")
+    
+    # =========================================================================
     # Build results dict
+    # =========================================================================
     results = {
         "activity_names": activity_names,
-        "matrix": matrix.tolist(),
-        "metrics": metrics,
+        "distance_matrix": matrix.tolist(),
+        "distance_metrics": metrics,
         "train_counts": train_counts,
         "test_counts": test_counts,
         "config": {
             "label_type": args.label_type,
-            "train_programs": str(train_path),
-            "train_budget": args.train_budget,
+            "model_source": str(models_path) if use_saved_models else "train_programs",
+            "train_programs": str(train_path) if train_path else None,
+            "test_programs": str(test_path),
+            "train_budget": args.train_budget if not use_saved_models else None,
             "max_test_per_activity": args.max_test_per_activity,
             "value_tolerance": VALUE_TOLERANCE,
             "seed": args.seed,
@@ -479,13 +666,27 @@ def main():
         },
     }
     
+    # Add sigmoid/AUC results
+    for method in scoring_methods:
+        method_key = method.replace("-", "_")
+        r = auc_results[method]
+        results[f"{method_key}_score_matrix"] = r["score_matrix"].tolist()
+        results[f"{method_key}_auc_matrix"] = np.where(
+            np.isnan(r["auc_matrix"]), None, r["auc_matrix"]
+        ).tolist()
+        results[f"{method_key}_metrics"] = r["metrics"]
+    
     # Save results JSON
     results_path = output_dir / "results.json"
     with open(results_path, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(results, f, indent=2, default=str)
     logger.info(f"Saved results to {results_path}")
     
-    # Plot and save visualizations
+    # =========================================================================
+    # Plots
+    # =========================================================================
+    
+    # 1. Raw distance separability matrix
     matrix_plot_path = output_dir / "separability_matrix.png"
     plot_separability_matrix(
         matrix,
@@ -494,29 +695,97 @@ def main():
         title=f"Program Edit Distance Separability ({args.label_type})",
     )
     
+    # 2. Raw distance separation summary
     summary_plot_path = output_dir / "separation_summary.png"
     plot_separation_summary(activity_names, metrics, str(summary_plot_path))
     
+    # 3. AUC matrices for each method
+    auc_plot_paths = {}
+    score_plot_paths = {}
+    for method in scoring_methods:
+        method_key = method.replace("-", "_")
+        r = auc_results[method]
+        
+        # AUC matrix heatmap
+        auc_path = output_dir / f"auc_matrix_{method_key}.png"
+        plot_auc_matrix(
+            r["auc_matrix"],
+            activity_names,
+            str(auc_path),
+            title=f"AUC Matrix ({method}, {args.label_type})",
+        )
+        auc_plot_paths[method] = auc_path
+        
+        # Score matrix heatmap
+        score_path = output_dir / f"score_matrix_{method_key}.png"
+        plot_separability_matrix(
+            r["score_matrix"],
+            activity_names,
+            str(score_path),
+            title=f"Sigmoid Score Matrix ({method}, {args.label_type})",
+            cmap="RdYlGn",
+        )
+        score_plot_paths[method] = score_path
+    
+    # 4. AUC comparison (mean-sigmoid vs min-sigmoid)
+    comparison_path = output_dir / "auc_comparison.png"
+    plot_auc_comparison(
+        activity_names,
+        auc_results["mean-sigmoid"]["metrics"]["per_model_auc"],
+        auc_results["min-sigmoid"]["metrics"]["per_model_auc"],
+        str(comparison_path),
+    )
+    
+    # =========================================================================
     # Log to wandb
+    # =========================================================================
     if use_wandb:
         import wandb
         
-        # Log metrics
-        wandb.summary["diagonal_mean"] = metrics["diagonal_mean"]
-        wandb.summary["off_diagonal_mean"] = metrics["off_diagonal_mean"]
-        wandb.summary["separation"] = metrics["separation"]
+        # Raw distance metrics
+        wandb.summary["distance/diagonal_mean"] = metrics["diagonal_mean"]
+        wandb.summary["distance/off_diagonal_mean"] = metrics["off_diagonal_mean"]
+        wandb.summary["distance/separation"] = metrics["separation"]
         wandb.summary["n_activities"] = len(activity_names)
         wandb.summary["total_train_programs"] = sum(train_counts.values())
         wandb.summary["total_test_programs"] = sum(test_counts.values())
         
-        # Log per-activity metrics
+        # Per-activity raw metrics
         per_activity = metrics.get("per_activity", {})
         for act, act_metrics in per_activity.items():
             wandb.summary[f"{act}/separation"] = act_metrics.get("separation", 0)
             wandb.summary[f"{act}/same_dist"] = act_metrics.get("same_activity_dist", 0)
             wandb.summary[f"{act}/cross_dist"] = act_metrics.get("cross_activity_dist", 0)
         
-        # Log separability matrix as table
+        # Sigmoid/AUC metrics for each method
+        for method in scoring_methods:
+            method_key = method.replace("-", "_")
+            r = auc_results[method]
+            m = r["metrics"]
+            
+            wandb.summary[f"{method_key}/mean_auc"] = m["mean_auc"]
+            wandb.summary[f"{method_key}/mean_pairwise_auc"] = m["mean_pairwise_auc"]
+            
+            for act, auc_val in m["per_model_auc"].items():
+                wandb.summary[f"{method_key}/{act}/auc"] = auc_val
+            
+            # Log AUC matrix as table
+            auc_mat = r["auc_matrix"]
+            auc_table_data = []
+            for i, row_act in enumerate(activity_names):
+                row_data = [row_act]
+                for j in range(len(activity_names)):
+                    val = auc_mat[i, j]
+                    row_data.append(float(val) if not np.isnan(val) else None)
+                auc_table_data.append(row_data)
+            
+            auc_table = wandb.Table(
+                columns=["target_activity"] + activity_names,
+                data=auc_table_data,
+            )
+            wandb.log({f"{method_key}_auc_matrix": auc_table})
+        
+        # Log raw distance matrix as table
         matrix_table_data = []
         for i, row_act in enumerate(activity_names):
             row = {"model_trained_on": row_act}
@@ -529,34 +798,43 @@ def main():
             data=[[row["model_trained_on"]] + [row[a] for a in activity_names] 
                   for row in matrix_table_data]
         )
-        wandb.log({"separability_matrix": matrix_table})
+        wandb.log({"distance_matrix": matrix_table})
         
-        # Log results table
+        # Log results summary table
         results_table_data = []
         for act in activity_names:
             act_metrics = per_activity.get(act, {})
-            results_table_data.append({
-                "activity": act,
-                "separation": act_metrics.get("separation", 0),
-                "same_activity_dist": act_metrics.get("same_activity_dist", 0),
-                "cross_activity_dist": act_metrics.get("cross_activity_dist", 0),
-                "n_train": train_counts.get(act, 0),
-                "n_test": test_counts.get(act, 0),
-            })
+            mean_sig_auc = auc_results["mean-sigmoid"]["metrics"]["per_model_auc"].get(act, float("nan"))
+            min_sig_auc = auc_results["min-sigmoid"]["metrics"]["per_model_auc"].get(act, float("nan"))
+            results_table_data.append([
+                act,
+                act_metrics.get("separation", 0),
+                act_metrics.get("same_activity_dist", 0),
+                act_metrics.get("cross_activity_dist", 0),
+                mean_sig_auc,
+                min_sig_auc,
+                train_counts.get(act, 0),
+                test_counts.get(act, 0),
+            ])
         
         results_table = wandb.Table(
-            columns=["activity", "separation", "same_activity_dist", "cross_activity_dist", "n_train", "n_test"],
-            data=[[r["activity"], r["separation"], r["same_activity_dist"], 
-                   r["cross_activity_dist"], r["n_train"], r["n_test"]] 
-                  for r in results_table_data]
+            columns=["activity", "separation", "same_dist", "cross_dist",
+                     "mean_sigmoid_auc", "min_sigmoid_auc", "n_train", "n_test"],
+            data=results_table_data,
         )
         wandb.log({"results_table": results_table})
         
-        # Log plots
-        wandb.log({
+        # Log all plots
+        plot_log = {
             "separability_matrix_plot": wandb.Image(str(matrix_plot_path)),
             "separation_summary_plot": wandb.Image(str(summary_plot_path)),
-        })
+            "auc_comparison_plot": wandb.Image(str(comparison_path)),
+        }
+        for method in scoring_methods:
+            method_key = method.replace("-", "_")
+            plot_log[f"{method_key}_auc_matrix_plot"] = wandb.Image(str(auc_plot_paths[method]))
+            plot_log[f"{method_key}_score_matrix_plot"] = wandb.Image(str(score_plot_paths[method]))
+        wandb.log(plot_log)
         
         wandb.finish()
         logger.info("Logged results to wandb")

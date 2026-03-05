@@ -563,6 +563,206 @@ class ProgramDistanceMatrix:
             "per_activity": per_activity,
         }
     
+    def compute_score_matrix(
+        self,
+        method: str = "mean-sigmoid",
+        verbose: bool = True,
+        num_workers: int = 1,
+    ) -> np.ndarray:
+        """Compute a score matrix using sigmoid-based similarity scoring.
+
+        For each test program q from activity i scored against model j:
+        - mean-sigmoid: score = (1/N) * sum_k sigma(-edist(model_k, q))
+        - min-sigmoid:  score = sigma(-min_k edist(model_k, q))
+
+        Higher score = test program is more similar to model activity.
+
+        Args:
+            method: "mean-sigmoid" or "min-sigmoid"
+            verbose: Whether to show progress
+            num_workers: Number of parallel workers (unused for now, sequential)
+
+        Returns:
+            Matrix S where S[i,j] = mean score of activity i test programs against model j
+        """
+        from tqdm import tqdm
+
+        if method not in ("mean-sigmoid", "min-sigmoid"):
+            raise ValueError(f"Unknown method: {method}. Use 'mean-sigmoid' or 'min-sigmoid'.")
+
+        score_matrix = np.zeros((self.n_activities, self.n_activities))
+
+        iterator = self.activity_names
+        if verbose:
+            iterator = tqdm(iterator, desc=f"Computing score matrix ({method})")
+
+        for i, query_activity in enumerate(iterator):
+            if query_activity not in self.test_programs:
+                continue
+
+            query_programs = self.test_programs[query_activity]
+
+            for j, model_activity in enumerate(self.activity_names):
+                if model_activity not in self.model_programs:
+                    continue
+
+                model_progs = self.model_programs[model_activity]
+                scores = _compute_sigmoid_scores(query_programs, model_progs, method)
+                score_matrix[i, j] = np.mean(scores)
+
+        return score_matrix
+
+    def compute_score_matrix_per_program(
+        self,
+        method: str = "mean-sigmoid",
+        verbose: bool = True,
+    ) -> dict[str, dict[str, list[float]]]:
+        """Compute per-program scores for AUC computation.
+
+        Returns:
+            Dict[query_activity][model_activity] -> list of scores (one per test program)
+        """
+        from tqdm import tqdm
+
+        if method not in ("mean-sigmoid", "min-sigmoid"):
+            raise ValueError(f"Unknown method: {method}. Use 'mean-sigmoid' or 'min-sigmoid'.")
+
+        per_program_scores: dict[str, dict[str, list[float]]] = {}
+
+        iterator = self.activity_names
+        if verbose:
+            iterator = tqdm(iterator, desc=f"Computing per-program scores ({method})")
+
+        for query_activity in iterator:
+            if query_activity not in self.test_programs:
+                continue
+
+            query_programs = self.test_programs[query_activity]
+            per_program_scores[query_activity] = {}
+
+            for model_activity in self.activity_names:
+                if model_activity not in self.model_programs:
+                    continue
+
+                model_progs = self.model_programs[model_activity]
+                scores = _compute_sigmoid_scores(query_programs, model_progs, method)
+                per_program_scores[query_activity][model_activity] = scores
+
+        return per_program_scores
+
+    def compute_auc_matrix(
+        self,
+        method: str = "mean-sigmoid",
+        verbose: bool = True,
+    ) -> tuple[np.ndarray, np.ndarray, dict]:
+        """Compute AUC matrix using sigmoid scoring.
+
+        Follows the same convention as the NF anomaly detection AUC matrix:
+
+        AUC[i,j] (off-diagonal): AUROC of model i separating its own activity i
+                  (positive) from activity j (negative).
+                  = P(score_i(x_i) > score_i(x_j))
+        AUC[i,i] (diagonal): one-vs-rest AUROC for model i — how well model i
+                  separates activity i from all other activities pooled.
+
+        Where score_i(x) is the sigmoid-based similarity score of program x
+        evaluated against model i's programs.
+
+        Args:
+            method: "mean-sigmoid" or "min-sigmoid"
+            verbose: Whether to show progress
+
+        Returns:
+            Tuple of:
+            - auc_matrix: N×N AUROC matrix (row=model/target, col=query/negative)
+            - score_matrix: N×N matrix of mean scores S[i,j]
+              where S[i,j] = mean score of activity i test programs against model j
+            - metrics: Dict with per-model AUC, mean AUC, etc.
+        """
+        from sklearn.metrics import roc_auc_score
+
+        # Get per-program scores
+        # per_program_scores[query_activity][model_activity] -> list of scores
+        per_program_scores = self.compute_score_matrix_per_program(method, verbose)
+
+        # Compute score matrix (mean over test programs)
+        # score_matrix[i,j] = mean score of activity i test programs against model j
+        score_matrix = np.zeros((self.n_activities, self.n_activities))
+        for i, qa in enumerate(self.activity_names):
+            for j, ma in enumerate(self.activity_names):
+                scores = per_program_scores.get(qa, {}).get(ma, [])
+                score_matrix[i, j] = np.mean(scores) if scores else 0.0
+
+        # Compute pairwise AUC matrix
+        # Convention: auc_matrix[i, j] = AUROC of model i separating activity i from activity j
+        # Row = model (target), Column = query (negative class)
+        auc_matrix = np.full((self.n_activities, self.n_activities), np.nan)
+
+        for i, model_activity in enumerate(self.activity_names):
+            # Positive: test programs from model_activity scored by this model
+            pos_scores = per_program_scores.get(model_activity, {}).get(model_activity, [])
+            if not pos_scores:
+                continue
+
+            # Off-diagonal: pairwise AUROC against each other activity
+            for j, query_activity in enumerate(self.activity_names):
+                if i == j:
+                    continue  # diagonal handled below
+
+                # Negative: test programs from query_activity scored by model i
+                neg_scores = per_program_scores.get(query_activity, {}).get(model_activity, [])
+                if not neg_scores:
+                    continue
+
+                # AUC: can model i tell apart its own activity from activity j?
+                y_true = [1] * len(pos_scores) + [0] * len(neg_scores)
+                y_score = list(pos_scores) + list(neg_scores)
+
+                try:
+                    auc_matrix[i, j] = roc_auc_score(y_true, y_score)
+                except ValueError:
+                    pass
+
+            # Diagonal: one-vs-rest AUROC for model i
+            all_neg_scores = []
+            for j, query_activity in enumerate(self.activity_names):
+                if i == j:
+                    continue
+                neg = per_program_scores.get(query_activity, {}).get(model_activity, [])
+                all_neg_scores.extend(neg)
+
+            if all_neg_scores:
+                y_true = [1] * len(pos_scores) + [0] * len(all_neg_scores)
+                y_score = list(pos_scores) + list(all_neg_scores)
+                try:
+                    auc_matrix[i, i] = float(roc_auc_score(y_true, y_score))
+                except ValueError:
+                    pass
+
+        # Per-model aggregate AUC = diagonal values
+        per_model_auc = {}
+        for i, model_activity in enumerate(self.activity_names):
+            per_model_auc[model_activity] = float(auc_matrix[i, i])
+
+        # Summary metrics
+        valid_aucs = [v for v in per_model_auc.values() if not np.isnan(v)]
+        mean_auc = float(np.mean(valid_aucs)) if valid_aucs else float("nan")
+
+        # Off-diagonal AUC mean
+        off_diag_mask = ~np.eye(self.n_activities, dtype=bool)
+        valid_pairwise = auc_matrix[off_diag_mask]
+        valid_pairwise = valid_pairwise[~np.isnan(valid_pairwise)]
+        mean_pairwise_auc = float(np.mean(valid_pairwise)) if len(valid_pairwise) > 0 else float("nan")
+
+        metrics = {
+            "method": method,
+            "mean_auc": mean_auc,
+            "mean_pairwise_auc": mean_pairwise_auc,
+            "per_model_auc": per_model_auc,
+        }
+
+        return auc_matrix, score_matrix, metrics
+
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         import numpy as np
@@ -573,6 +773,58 @@ class ProgramDistanceMatrix:
             "matrix_std": self.matrix_std.tolist() if self.matrix_std is not None else None,
             "metrics": self.get_separability_metrics() if self.matrix is not None else None,
         }
+
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    """Numerically stable sigmoid function."""
+    return np.where(
+        x >= 0,
+        1.0 / (1.0 + np.exp(-x)),
+        np.exp(x) / (1.0 + np.exp(x)),
+    )
+
+
+def _compute_sigmoid_scores(
+    query_programs: list[ProgramTree],
+    model_programs: list[ProgramTree],
+    method: str,
+) -> list[float]:
+    """Compute sigmoid-based similarity scores for each query against a model.
+
+    Args:
+        query_programs: Test programs to score
+        model_programs: Model programs (from training)
+        method: "mean-sigmoid" or "min-sigmoid"
+
+    Returns:
+        List of scores, one per query program (higher = more similar to model)
+    """
+    from edist.uted import uted
+
+    scores = []
+    for query in query_programs:
+        # Compute distances to all model programs
+        dists = np.array([
+            uted(
+                query.nodes, query.adj,
+                model.nodes, model.adj,
+                delta=None,
+            )
+            for model in model_programs
+        ])
+
+        if method == "mean-sigmoid":
+            # mean over i of sigma(-edist(model_i, query))
+            score = float(np.mean(_sigmoid(-dists)))
+        elif method == "min-sigmoid":
+            # sigma(-min_i edist(model_i, query))
+            score = float(_sigmoid(np.array([-dists.min()]))[0])
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+        scores.append(score)
+
+    return scores
 
 
 # Need numpy for matrix operations
