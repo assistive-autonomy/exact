@@ -1,3 +1,5 @@
+method: nf
+
 experiment:
   name: null
   seed: 42

@@ -1,0 +1,28 @@
+# method: mean_sigmoid  or  min_sigmoid  (override via CLI: method=min_sigmoid)
+method: mean_sigmoid
+
+experiment:
+  name: null
+  seed: 42
+
+data:
+  esk_dir: ../exact_data/benchmarks/humanact12
+  label_type: actions
+  target_activities:
+    - drink
+    - jump
+    - run
+    - throw
+    - walk
+  # Paths auto-detected from esk_dir and label_type when not set:
+  models_path: null          # path to models_humanact12.json
+  test_programs_path: null   # path to programs_humanact12_test.json
+  train_budget: 100          # programs per activity (used only if models_path is absent)
+  exec_num_workers: 1        # parallel workers for edit-distance computation
+
+output:
+  dir: results/anomaly_detection
+
+wandb_project: exact
+wandb_entity: assistive-autonomy
+wandb_mode: online

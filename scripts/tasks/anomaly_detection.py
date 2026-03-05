@@ -1,783 +1,750 @@
 #!/usr/bin/env python
-"""Anomaly Detection using STG-NF normalizing flows.
+"""Anomaly Detection — unified script for all methods.
 
-This script performs full evaluation of STG-NF models for activity recognition:
-- Trains N models (one per target activity)
-- Evaluates each model on ALL target activities (cross-activity evaluation)
-- Generates separability matrix showing how well each model distinguishes activities
-- Reports per-activity AUC and separation metrics
+Supports three anomaly-detection algorithms, selected via ``method`` in the
+config file:
 
-For hyperparameter tuning, use tune_anomaly_detection.py instead which is faster
-and reports mean_auc for sweep optimization.
+  nf           — Normalising-flow density estimator (STG-NF).
+                 Trains one model per target activity; separability is measured
+                 by each model's log-probability on every test activity.
+
+  mean_sigmoid — Executable activity models + program edit distance.
+                 Scores a test sequence by the *mean* sigmoid-transformed
+                 distance from the test program to each activity's program set.
+
+  min_sigmoid  — Same as above but uses the *minimum* distance rather than
+                 the mean (picks the closest matching program in the model).
+
+All three methods produce identical output artefacts:
+  • results.json             — full numerical results
+  • auc_matrix.png           — N × N heatmap (AUC[i,j] = model i vs activity j)
+  • separation_summary.png   — per-activity AUROC bar-chart
+  • wandb run                — tables + images
+
+Usage:
+    uv run scripts/tasks/anomaly_detection.py --config configs/anomaly_detection/nf_esk_verbs.yaml
+    uv run scripts/tasks/anomaly_detection.py --config configs/anomaly_detection/exec_esk_verbs.yaml
+    uv run scripts/tasks/anomaly_detection.py --config configs/anomaly_detection/exec_esk_verbs.yaml method=min_sigmoid
 """
 
 import json
+import random
 import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
-import torch
+import seaborn as sns
 from loguru import logger
 from omegaconf import OmegaConf, DictConfig
 from sklearn.metrics import roc_auc_score
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import ExponentialLR
 from tqdm import tqdm
 
-# Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from exact.anomaly import STG_NF, AnomalyTrainer as Trainer
-from exact.encoder.utils import Graph
-from exact.data.esk import get_esk_dataloaders, get_unique_activities
 
-import wandb
-import matplotlib.pyplot as plt
-import matplotlib
-
-matplotlib.use("Agg")
-
+# =============================================================================
+# Shared helpers
+# =============================================================================
 
 def load_config(config_path: str, overrides: list[str] = None) -> DictConfig:
-    """Load config file and apply CLI overrides."""
     base_cfg = OmegaConf.load(config_path)
-
     if overrides:
         override_cfg = OmegaConf.from_dotlist(overrides)
         cfg = OmegaConf.merge(base_cfg, override_cfg)
     else:
         cfg = base_cfg
-
     return cfg
 
 
 def set_seed(seed: int):
-    """Set random seeds for reproducibility."""
-    torch.manual_seed(seed)
+    random.seed(seed)
     np.random.seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+            torch.backends.cudnn.deterministic = True
+    except ImportError:
+        pass
 
 
-def get_device(device_str: str) -> torch.device:
-    """Get torch device from config string."""
+def get_device(device_str: str):
+    import torch
     if device_str == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device_str)
 
 
-@torch.no_grad()
-def evaluate_by_activity(
-    model: STG_NF,
-    test_loader,
-    device: torch.device,
-    target_activity: str,
-    use_wandb: bool = False,
-) -> dict:
-    """
-    Evaluate model and compute per-activity statistics.
+# =============================================================================
+# Shared plotting
+# =============================================================================
 
-    For a good anomaly detector:
-    - Target activity should have HIGH probability (low NLL)
-    - Other activities should have LOW probability (high NLL)
+def plot_auc_matrix(
+    auc_matrix: np.ndarray,
+    activity_names: list,
+    output_path: str,
+    title: str = "AUC Matrix",
+):
+    """N × N AUC heatmap.
 
-    Returns dict with:
-    - Per-activity mean/std of log-probability
-    - Separation metrics between target and others
+    Convention: AUC[i, j] = how well model i separates its own activity i
+    (positive class) from activity j (negative class).
+    Diagonal = one-vs-rest AUROC for model i.
     """
+    wrapped = [n.replace("_", "\n").replace(" ", "\n") for n in activity_names]
+    sz = max(8, len(activity_names) * 1.2)
+    fig, ax = plt.subplots(figsize=(sz, sz * 0.85))
+    mask = np.isnan(auc_matrix)
+    sns.heatmap(
+        auc_matrix,
+        annot=True, fmt=".2f",
+        cmap="RdYlGn",
+        square=True,
+        linewidths=0.5, linecolor="white",
+        vmin=0.0, vmax=1.0,
+        mask=mask,
+        cbar_kws={"label": "AUC", "shrink": 0.8},
+        annot_kws={"size": 9},
+        ax=ax,
+        xticklabels=wrapped, yticklabels=wrapped,
+    )
+    ax.set_xlabel("Query Activity", fontsize=13, fontweight="bold")
+    ax.set_ylabel("Target Activity (model)", fontsize=13, fontweight="bold")
+    ax.set_title(title, fontsize=15, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close()
+    logger.info(f"Saved AUC matrix → {output_path}")
+
+
+def plot_separation_summary(
+    activity_names: list,
+    per_activity_auc: dict,
+    output_path: str,
+    title: str = "Per-Activity AUC (one-vs-rest)",
+):
+    """Bar chart of one-vs-rest AUC per activity."""
+    aucs = [per_activity_auc.get(a, float("nan")) for a in activity_names]
+    colors = ["#2ecc71" if (not np.isnan(v) and v >= 0.5) else "#e74c3c" for v in aucs]
+
+    fig, ax = plt.subplots(figsize=(max(8, len(activity_names) * 1.0), 5))
+    bars = ax.bar(range(len(activity_names)), aucs, color=colors,
+                  edgecolor="black", linewidth=0.5)
+    ax.set_xticks(range(len(activity_names)))
+    ax.set_xticklabels(activity_names, rotation=45, ha="right", fontsize=10)
+    ax.set_ylabel("AUC", fontsize=12)
+    ax.set_ylim(0, 1.05)
+    ax.axhline(0.5, color="black", linestyle="--", linewidth=0.8, alpha=0.6, label="Random")
+    ax.set_title(title, fontsize=14, fontweight="bold")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.3, linestyle="--")
+    for bar, val in zip(bars, aucs):
+        if not np.isnan(val):
+            ax.annotate(f"{val:.2f}", xy=(bar.get_x() + bar.get_width() / 2, val + 0.01),
+                        ha="center", va="bottom", fontsize=8)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close()
+    logger.info(f"Saved separation summary → {output_path}")
+
+
+def _log_auc_to_wandb(wandb, activity_names, auc_matrix, per_activity_auc, mean_auc,
+                      prefix: str = ""):
+    """Log AUC matrix + per-activity scalars to wandb."""
+    p = f"{prefix}/" if prefix else ""
+    wandb.summary[f"{p}mean_auc"] = mean_auc
+    for act, val in per_activity_auc.items():
+        wandb.summary[f"{p}{act}/auc"] = val
+    rows = []
+    for i, row_act in enumerate(activity_names):
+        row = [row_act] + [
+            float(auc_matrix[i, j]) if not np.isnan(auc_matrix[i, j]) else None
+            for j in range(len(activity_names))
+        ]
+        rows.append(row)
+    wandb.log({f"{p}auc_matrix_table": wandb.Table(
+        columns=["target"] + activity_names,
+        data=rows,
+    )})
+
+
+# =============================================================================
+# NF pipeline
+# =============================================================================
+
+def _nf_evaluate_by_activity(model, test_loader, device, target_activity: str) -> dict:
+    """Forward-pass the NF model over the full test set; returns per-activity stats."""
+    import torch
     model.eval()
-
-    # Collect scores per activity
     activity_scores = defaultdict(list)
 
-    pbar = tqdm(test_loader, desc="Evaluating")
-    for batch in pbar:
-        poses, labels, activities = batch
-        poses = poses.to(device, non_blocking=True).float()
+    with torch.no_grad():
+        for batch in tqdm(test_loader, desc=f"Eval [{target_activity}]", leave=False):
+            poses, labels, activities = batch
+            poses = poses.to(device, non_blocking=True).float()
+            _, nll = model(poses)
+            log_probs = -nll.cpu().numpy()
+            for i, act in enumerate(activities):
+                activity_scores[act].append(log_probs[i])
 
-        # Forward pass - get negative log-likelihood
-        _, nll = model(poses)
+    results = {"per_activity": {}, "target_activity": target_activity}
+    all_target, all_other, other_means = [], [], []
 
-        # Convert NLL to log-probability (higher = more likely)
-        log_probs = -nll.cpu().numpy()
-
-        # Group by activity
-        for i, activity in enumerate(activities):
-            activity_scores[activity].append(log_probs[i])
-
-    # Compute statistics per activity
-    results = {
-        "per_activity": {},
-        "target_activity": target_activity,
-    }
-
-    all_target_scores = []
-    all_other_scores = []
-    other_activity_means = []  # For balanced separation calculation
-
-    for activity, scores in activity_scores.items():
-        scores = np.array(scores)
-        activity_mean = float(np.mean(scores))
-        results["per_activity"][activity] = {
-            "mean_log_prob": activity_mean,
-            "std_log_prob": float(np.std(scores)),
-            "n_samples": len(scores),
+    for act, scores in activity_scores.items():
+        arr = np.array(scores)
+        results["per_activity"][act] = {
+            "mean_log_prob": float(np.mean(arr)),
+            "std_log_prob":  float(np.std(arr)),
+            "n_samples":     len(arr),
         }
-
-        if activity == target_activity:
-            all_target_scores.extend(scores)
+        if act == target_activity:
+            all_target.extend(arr)
         else:
-            all_other_scores.extend(scores)
-            other_activity_means.append(activity_mean)
+            all_other.extend(arr)
+            other_means.append(float(np.mean(arr)))
 
-    # Compute separation metrics (class-balanced: average of per-activity means)
-    if all_target_scores and other_activity_means:
-        target_mean = np.mean(all_target_scores)
-        # Balanced: each activity contributes equally regardless of sample count
-        other_mean_balanced = np.mean(other_activity_means)
+    if all_target and other_means:
+        target_mean = float(np.mean(all_target))
+        other_mean  = float(np.mean(other_means))  # class-balanced
+        results["target_mean_log_prob"] = target_mean
+        results["other_mean_log_prob"]  = other_mean
+        results["separation"]           = target_mean - other_mean
 
-        # Higher target mean = better (model assigns higher prob to target)
-        results["target_mean_log_prob"] = float(target_mean)
-        results["other_mean_log_prob"] = float(other_mean_balanced)
-        results["separation"] = float(target_mean - other_mean_balanced)
-
-        # Compute AUC: can we distinguish target from others?
-        all_scores = np.array(all_target_scores + all_other_scores)
-        all_labels = np.array(
-            [1] * len(all_target_scores) + [0] * len(all_other_scores)
-        )
-
+        all_scores = np.array(all_target + all_other)
+        all_labels = np.array([1] * len(all_target) + [0] * len(all_other))
         try:
-            results["auc_target_vs_others"] = float(
-                roc_auc_score(all_labels, all_scores)
-            )
+            results["auc_target_vs_others"] = float(roc_auc_score(all_labels, all_scores))
         except ValueError:
             results["auc_target_vs_others"] = 0.5
 
-        # Compute exact pairwise AUROC: model i vs each individual activity j
-        # Off-diagonal only: skip self-comparison (target vs target = 0.5 by definition)
-        target_arr = np.array(all_target_scores)
+        # Pairwise AUC: model-i vs each individual activity j
+        target_arr  = np.array(all_target)
         auc_pairwise = {}
-        for activity, scores in activity_scores.items():
-            if activity == target_activity:
-                continue  # diagonal handled by auc_target_vs_others
+        for act, scores in activity_scores.items():
+            if act == target_activity:
+                continue
             other_arr = np.array(scores)
-            combined = np.concatenate([target_arr, other_arr])
-            labels = np.array([1] * len(target_arr) + [0] * len(other_arr))
+            combined  = np.concatenate([target_arr, other_arr])
+            lbls      = np.array([1] * len(target_arr) + [0] * len(other_arr))
             try:
-                auc_pairwise[activity] = float(roc_auc_score(labels, combined))
+                auc_pairwise[act] = float(roc_auc_score(lbls, combined))
             except ValueError:
-                auc_pairwise[activity] = 0.5
+                auc_pairwise[act] = 0.5
         results["auc_pairwise"] = auc_pairwise
-
-    # Log to wandb
-    if use_wandb:
-        wandb_metrics = {
-            "eval/target_mean_log_prob": results.get("target_mean_log_prob", 0),
-            "eval/other_mean_log_prob": results.get("other_mean_log_prob", 0),
-            "eval/separation": results.get("separation", 0),
-            "eval/auc": results.get("auc_target_vs_others", 0.5),
-        }
-        for activity, stats in results["per_activity"].items():
-            safe_name = activity.replace(" ", "_")
-            wandb_metrics[f"eval/activity_{safe_name}_mean"] = stats["mean_log_prob"]
-        wandb.log(wandb_metrics)
 
     return results
 
 
-def print_results(results: dict):
-    """Pretty print evaluation results."""
-    target = results["target_activity"]
-    logger.info("EVALUATION RESULTS")
-    logger.info(f"Target Activity (trained on): {target}")
+def _build_nf_auc_matrix(all_results: list, activity_names: list):
+    n   = len(activity_names)
+    idx = {a: i for i, a in enumerate(activity_names)}
+    auc_matrix = np.full((n, n), np.nan)
 
-    logger.info("Per-Activity Log-Probability (higher = more likely)")
-    header = f"{'Activity':<25} {'Mean':>12} {'Std':>12} {'N Samples':>12}"
-    logger.info(header)
+    for r in all_results:
+        target = r["target_activity"]
+        if target not in idx:
+            continue
+        row = idx[target]
+        if "auc_target_vs_others" in r:
+            auc_matrix[row, row] = r["auc_target_vs_others"]
+        for act, val in r.get("auc_pairwise", {}).items():
+            if act in idx:
+                auc_matrix[row, idx[act]] = val
 
-    # Sort by mean log-prob (target should be highest)
-    sorted_activities = sorted(
-        results["per_activity"].items(),
-        key=lambda x: x[1]["mean_log_prob"],
-        reverse=True,
-    )
+    per_activity_auc = {
+        activity_names[i]: float(auc_matrix[i, i])
+        for i in range(n) if not np.isnan(auc_matrix[i, i])
+    }
+    valid    = [v for v in np.diag(auc_matrix) if not np.isnan(v)]
+    mean_auc = float(np.mean(valid)) if valid else 0.5
+    return auc_matrix, per_activity_auc, mean_auc
 
-    for activity, stats in sorted_activities:
-        marker = " <-- TARGET" if activity == target else ""
-        logger.info(
-            f"{activity:<25} {stats['mean_log_prob']:>12.4f} {stats['std_log_prob']:>12.4f} {stats['n_samples']:>12}{marker}"
+
+def run_nf_pipeline(cfg: DictConfig, output_dir: Path) -> dict:
+    """Train one STG-NF model per target activity and evaluate cross-activity."""
+    import torch
+    from torch.optim import AdamW
+    from torch.optim.lr_scheduler import ExponentialLR
+    from exact.anomaly import STG_NF, AnomalyTrainer as Trainer
+    from exact.encoder.utils import Graph
+    from exact.data.esk import get_esk_dataloaders
+
+    device           = get_device(cfg.experiment.device)
+    target_activities = list(cfg.data.target_activities)
+    logger.info(f"NF pipeline — {len(target_activities)} models, device={device}")
+
+    all_per_model_results = []
+
+    for i, target in enumerate(target_activities):
+        logger.info(f"[{i+1}/{len(target_activities)}] Training on '{target}'")
+        model_dir = output_dir / target.replace(" ", "_")
+        model_dir.mkdir(parents=True, exist_ok=True)
+
+        train_loader, test_loader, info = get_esk_dataloaders(
+            esk_dir      = cfg.data.esk_dir,
+            label_type   = cfg.data.label_type,
+            target_activity = target,
+            test_activities = target_activities,
+            seg_len      = cfg.data.seg_len,
+            seg_stride   = cfg.data.seg_stride,
+            batch_size   = cfg.training.batch_size,
+            num_workers  = cfg.training.num_workers,
         )
 
-    if "separation" in results:
-        logger.info("Separation Metrics")
-        logger.info(f"Target mean log-prob:  {results['target_mean_log_prob']:.4f}")
-        logger.info(f"Others mean log-prob:  {results['other_mean_log_prob']:.4f}")
-        logger.info(f"Separation (target - others): {results['separation']:.4f}")
-        logger.info(f"AUC (target vs others): {results['auc_target_vs_others']:.4f}")
-
-
-def aggregate_results(results_dirs: list[Path]) -> dict:
-    """
-    Aggregate results from multiple model runs into separability matrices.
-
-    Args:
-        results_dirs: List of directories containing results.json files
-
-    Returns:
-        Dictionary with:
-        - activities: List of activity names
-        - score_matrix: NxN matrix of mean log-probabilities
-          (row=model trained on, col=activity evaluated)
-        - auc_matrix: NxN matrix of pairwise AUC scores
-        - separation_vector: Per-model separation scores
-    """
-    # Load all results
-    all_results = []
-    for results_dir in results_dirs:
-        results_file = results_dir / "results.json"
-        if results_file.exists():
-            with open(results_file) as f:
-                all_results.append(json.load(f))
-
-    if not all_results:
-        raise ValueError("No results.json files found")
-
-    # Get all unique activities across all results
-    all_activities = set()
-    for r in all_results:
-        all_activities.update(r["results"]["per_activity"].keys())
-    activities = sorted(all_activities)
-    n_activities = len(activities)
-    activity_to_idx = {a: i for i, a in enumerate(activities)}
-
-    # Initialize matrices
-    score_matrix = np.full((n_activities, n_activities), np.nan)
-    auc_matrix = np.full((n_activities, n_activities), np.nan)
-    separation_vector = np.full(n_activities, np.nan)
-
-    # Fill matrices from results
-    for r in all_results:
-        target = r["results"]["target_activity"]
-        if target not in activity_to_idx:
+        if info["n_train_samples"] == 0:
+            logger.warning(f"No training samples for '{target}', skipping")
             continue
-        row_idx = activity_to_idx[target]
 
-        # Fill score row
-        for activity, stats in r["results"]["per_activity"].items():
-            if activity in activity_to_idx:
-                col_idx = activity_to_idx[activity]
-                score_matrix[row_idx, col_idx] = stats["mean_log_prob"]
+        graph = Graph(strategy=cfg.model.adj_strategy, max_hop=1)
+        model = STG_NF(
+            pose_shape      = (3, cfg.data.seg_len, 24),
+            hidden_channels = cfg.model.hidden_channels,
+            K               = cfg.model.K,
+            L               = cfg.model.L,
+            graph           = graph,
+            learn_prior     = cfg.model.learn_prior,
+            R               = cfg.model.R,
+            temporal_kernel_size = cfg.model.temporal_kernel,
+            permutation     = cfg.model.permutation,
+            device          = str(device),
+        )
 
-        # Fill separation
-        if "separation" in r["results"]:
-            separation_vector[row_idx] = r["results"]["separation"]
+        optimizer = AdamW(model.parameters(),
+                          lr=cfg.training.lr, weight_decay=cfg.training.weight_decay)
+        scheduler = ExponentialLR(optimizer, gamma=cfg.training.lr_decay)
 
-        # Fill AUC: off-diagonal from exact pairwise, diagonal from overall AUC
-        if "auc_pairwise" in r["results"]:
-            for activity, auc_val in r["results"]["auc_pairwise"].items():
-                if activity in activity_to_idx:
-                    col_idx = activity_to_idx[activity]
-                    auc_matrix[row_idx, col_idx] = auc_val
-        if "auc_target_vs_others" in r["results"]:
-            # Diagonal = AUROC of model i vs all other activities pooled
-            auc_matrix[row_idx, row_idx] = r["results"]["auc_target_vs_others"]
+        trainer = Trainer(
+            model        = model,
+            train_loader = train_loader,
+            test_loader  = test_loader,
+            optimizer    = optimizer,
+            scheduler    = scheduler,
+            device       = str(device),
+            checkpoint_dir = (
+                str(model_dir / "checkpoints") if cfg.output.save_checkpoints else None
+            ),
+            use_wandb    = False,
+        )
+
+        if not cfg.checkpoint.eval_only:
+            history = trainer.train(
+                epochs       = cfg.training.epochs,
+                grad_clip    = cfg.training.grad_clip,
+                log_interval = cfg.training.log_interval,
+            )
+            with open(model_dir / "history.json", "w") as f:
+                json.dump(history, f, indent=2)
+
+        eval_results = _nf_evaluate_by_activity(model, test_loader, device, target)
+        with open(model_dir / "results.json", "w") as f:
+            json.dump({"info": info, "results": eval_results}, f, indent=2, default=str)
+        all_per_model_results.append(eval_results)
+
+    auc_matrix, per_activity_auc, mean_auc = _build_nf_auc_matrix(
+        all_per_model_results, target_activities
+    )
+    logger.info(f"NF mean AUC (one-vs-rest): {mean_auc:.4f}")
+    for act, val in per_activity_auc.items():
+        logger.info(f"  {act}: {val:.4f}")
 
     return {
-        "activities": activities,
-        "score_matrix": score_matrix,
-        "auc_matrix": auc_matrix,
-        "separation_vector": separation_vector,
-        "n_models": len(all_results),
+        "activity_names":      target_activities,
+        "auc_matrix":          auc_matrix,
+        "per_activity_auc":    per_activity_auc,
+        "mean_auc":            mean_auc,
+        "per_model_results":   all_per_model_results,
     }
 
 
-def plot_separability_matrix(
-    aggregated: dict,
-    output_path: Path,
-    title: str = "Activity Separability Matrix",
-):
-    """
-    Plot separability matrix as a heatmap.
+# =============================================================================
+# Exec pipeline  (mean_sigmoid / min_sigmoid)
+# =============================================================================
 
-    Rows = model trained on activity
-    Cols = activity being evaluated
-    Values = mean log-probability (higher = model thinks it's more likely)
+def _load_programs(path: str) -> dict:
+    with open(path) as f:
+        data = json.load(f)
+    return {
+        "activity_names":       data.get("activity_names", []),
+        "programs_by_activity": data.get("programs_by_activity", {}),
+        "metadata":             data.get("metadata", {}),
+    }
 
-    Diagonal should be highest if models are working well.
-    """
-    activities = aggregated["activities"]
-    score_matrix = aggregated["score_matrix"]
-    n = len(activities)
 
-    fig, ax = plt.subplots(figsize=(10, 8))
+def _filter_valid(programs: list, max_count: int = None) -> list:
+    from exact.programs import parse_to_tree
+    valid = []
+    for p in programs:
+        s = p.get("program", "") if isinstance(p, dict) else str(p)
+        try:
+            if parse_to_tree(s) is not None:
+                valid.append(s)
+        except Exception:
+            continue
+        if max_count and len(valid) >= max_count:
+            break
+    return valid
 
-    # Normalize per row for better visualization (relative scores)
-    normalized = score_matrix.copy()
-    for i in range(n):
-        row = normalized[i, :]
-        valid = ~np.isnan(row)
-        if valid.any():
-            row_min, row_max = row[valid].min(), row[valid].max()
-            if row_max > row_min:
-                normalized[i, valid] = (row[valid] - row_min) / (row_max - row_min)
 
-    im = ax.imshow(normalized, cmap="RdYlGn", aspect="auto", vmin=0, vmax=1)
+def _resolve_exec_paths(cfg: DictConfig):
+    """Resolve models_path and test_programs_path from config or auto-detect."""
+    # Infer a "data root" from esk_dir: .../benchmarks/<dataset> → .../
+    esk_dir  = Path(cfg.data.get("esk_dir", "../exact_data/benchmarks/esk"))
+    data_root = esk_dir.parent.parent  # exact_data/
+    label    = cfg.data.label_type
 
-    # Add colorbar
-    cbar = ax.figure.colorbar(im, ax=ax)
-    cbar.ax.set_ylabel("Normalized Score (per row)", rotation=-90, va="bottom")
+    # Models path
+    mp = cfg.data.get("models_path", None)
+    if mp:
+        models_path = Path(mp)
+    else:
+        name_map = {
+            "verbs":    "models_verbs.json",
+            "activity": "models_activity.json",
+            "actions":  "models_humanact12.json",
+        }
+        models_path = data_root / "models" / name_map.get(label, "models.json")
 
-    # Set ticks
-    ax.set_xticks(np.arange(n))
-    ax.set_yticks(np.arange(n))
-    ax.set_xticklabels(activities, rotation=45, ha="right")
-    ax.set_yticklabels(activities)
+    if not models_path.exists():
+        models_path = None   # will fall back to train_programs_path
 
-    # Labels
-    ax.set_xlabel("Evaluated Activity")
-    ax.set_ylabel("Model Trained On")
-    ax.set_title(title)
+    # Test programs path
+    tp = cfg.data.get("test_programs_path", None)
+    if tp:
+        test_path = Path(tp)
+    else:
+        name_map = {
+            "verbs":    "programs_verbs_test.json",
+            "activity": "programs_activity_test.json",
+            "actions":  "programs_humanact12_test.json",
+        }
+        test_path = data_root / "programs" / "parsed" / name_map.get(label, "programs_test.json")
 
-    # Add text annotations with actual values
-    for i in range(n):
-        for j in range(n):
-            val = score_matrix[i, j]
-            if not np.isnan(val):
-                # Highlight diagonal
-                weight = "bold" if i == j else "normal"
-                color = "white" if normalized[i, j] < 0.5 else "black"
-                ax.text(
-                    j, i, f"{val:.1f}",
-                    ha="center", va="center",
-                    color=color, fontsize=8, fontweight=weight
-                )
+    return models_path, test_path
 
+
+def _plot_edit_distance_matrix(matrix, activity_names, output_path, title):
+    wrapped = [n.replace("_", "\n").replace(" ", "\n") for n in activity_names]
+    sz  = max(8, len(activity_names) * 1.2)
+    fig, ax = plt.subplots(figsize=(sz, sz * 0.85))
+    sns.heatmap(
+        matrix,
+        annot=True, fmt=".1f",
+        cmap="coolwarm",
+        square=True,
+        linewidths=0.5, linecolor="white",
+        cbar_kws={"label": "Min Edit Distance (lower = more similar)", "shrink": 0.8},
+        annot_kws={"size": 10},
+        ax=ax,
+        xticklabels=wrapped, yticklabels=wrapped,
+    )
+    ax.set_xlabel("Model Activity", fontsize=13, fontweight="bold")
+    ax.set_ylabel("Query Activity", fontsize=13, fontweight="bold")
+    ax.set_title(title, fontsize=15, fontweight="bold")
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close()
-    logger.info(f"Saved separability matrix plot: {output_path}")
+    logger.info(f"Saved edit distance matrix → {output_path}")
 
 
-def plot_separation_summary(
-    aggregated: dict,
-    output_path: Path,
-    title: str = "Per-Activity Separation & AUC",
-):
-    """
-    Plot bar chart of separation scores and AUC per activity.
-    """
-    activities = aggregated["activities"]
-    separation = aggregated["separation_vector"]
-    auc_diag = np.diag(aggregated["auc_matrix"])
-    n = len(activities)
+def run_exec_pipeline(cfg: DictConfig, method: str, output_dir: Path) -> dict:
+    """Executable-model pipeline: edit distance → sigmoid scores → AUC matrix."""
+    from exact.programs import ProgramDistanceMatrix, VALUE_TOLERANCE
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    models_path, test_path = _resolve_exec_paths(cfg)
 
-    # Separation scores
-    ax1 = axes[0]
-    valid_sep = ~np.isnan(separation)
-    colors = ["green" if s > 0 else "red" for s in separation]
-    bars = ax1.bar(np.arange(n)[valid_sep], separation[valid_sep],
-                   color=[c for c, v in zip(colors, valid_sep) if v])
-    ax1.set_xticks(np.arange(n))
-    ax1.set_xticklabels(activities, rotation=45, ha="right")
-    ax1.set_ylabel("Separation (target - others)")
-    ax1.set_title("Separation Score per Model")
-    ax1.axhline(y=0, color="black", linestyle="-", linewidth=0.5)
+    if not test_path.exists():
+        raise FileNotFoundError(f"Test programs not found: {test_path} — run 2_train_and_parse.sh first")
 
-    # AUC scores
-    ax2 = axes[1]
-    valid_auc = ~np.isnan(auc_diag)
-    colors = ["green" if a > 0.5 else "red" for a in auc_diag]
-    ax2.bar(np.arange(n)[valid_auc], auc_diag[valid_auc],
-            color=[c for c, v in zip(colors, valid_auc) if v])
-    ax2.set_xticks(np.arange(n))
-    ax2.set_xticklabels(activities, rotation=45, ha="right")
-    ax2.set_ylabel("AUC (target vs others)")
-    ax2.set_title("AUC Score per Model")
-    ax2.axhline(y=0.5, color="black", linestyle="--", linewidth=0.5, label="Random")
-    ax2.set_ylim(0, 1)
-    ax2.legend()
+    train_budget = int(cfg.data.get("train_budget", 100))
+    num_workers  = int(cfg.data.get("exec_num_workers", 1))
 
-    plt.suptitle(title)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    logger.info(f"Saved separation summary plot: {output_path}")
+    # ── Load model programs ──────────────────────────────────────────────────
+    if models_path is not None:
+        logger.info(f"Loading executable models from {models_path}")
+        with open(models_path) as f:
+            models_data = json.load(f)
+        all_activity_names = list(models_data["models"].keys())
+        model_programs_by_activity = {
+            act: info["original_programs"]
+            for act, info in models_data["models"].items()
+        }
+        use_saved_models = True
+    else:
+        tpp = cfg.data.get("train_programs_path", None)
+        if not tpp:
+            raise ValueError(
+                "No models_path found and no train_programs_path set — "
+                "run scripts/2_train_and_parse.sh first."
+            )
+        logger.info(f"Loading train programs from {tpp}")
+        train_data             = _load_programs(tpp)
+        all_activity_names     = train_data["activity_names"]
+        model_programs_by_activity = None
+        use_saved_models       = False
+
+    logger.info(f"Loading test programs from {test_path}")
+    test_data = _load_programs(str(test_path))
+
+    # ── Filter to requested activities ──────────────────────────────────────
+    requested = list(cfg.data.get("target_activities", []))
+    if requested:
+        invalid = [a for a in requested if a not in all_activity_names]
+        if invalid:
+            raise ValueError(f"Unknown activities: {invalid}. Available: {all_activity_names}")
+        activity_names = requested
+    else:
+        activity_names = all_activity_names
+
+    logger.info(f"Activities ({len(activity_names)}): {activity_names}")
+
+    # ── Build distance matrix ────────────────────────────────────────────────
+    dist_matrix  = ProgramDistanceMatrix(activity_names)
+    train_counts = {}
+    test_counts  = {}
+
+    for activity in activity_names:
+        if use_saved_models:
+            raw  = model_programs_by_activity.get(activity, [])
+            mprg = _filter_valid([{"program": p} if isinstance(p, str) else p for p in raw])
+        else:
+            raw  = train_data["programs_by_activity"].get(activity, [])
+            random.shuffle(raw)
+            mprg = _filter_valid(raw, max_count=train_budget)
+
+        if not mprg:
+            logger.warning(f"No valid model programs for {activity}")
+            continue
+
+        dist_matrix.set_model_programs(activity, mprg)
+        train_counts[activity] = len(mprg)
+
+        test_raw  = test_data["programs_by_activity"].get(activity, [])
+        test_prgs = _filter_valid(test_raw)
+        for prog in test_prgs:
+            dist_matrix.add_test_program(activity, prog)
+        test_counts[activity] = len(test_prgs)
+
+        logger.info(f"  {activity}: {len(mprg)} model  |  {len(test_prgs)} test")
+
+    logger.info(f"Computing edit distances ({num_workers} worker(s))…")
+    raw_distance_matrix = dist_matrix.compute_matrix(verbose=True, num_workers=num_workers)
+    distance_metrics    = dist_matrix.get_separability_metrics()
+    logger.info(f"  diagonal mean (same):  {distance_metrics['diagonal_mean']:.2f}")
+    logger.info(f"  off-diag mean (cross): {distance_metrics['off_diagonal_mean']:.2f}")
+    logger.info(f"  separation:            {distance_metrics['separation']:.2f}")
+
+    # ── Compute AUC for both sigmoid methods ─────────────────────────────────
+    sigmoid_results = {}
+    for sig_method in ("mean-sigmoid", "min-sigmoid"):
+        logger.info(f"Computing {sig_method} AUC…")
+        auc_mat, score_mat, auc_metrics = dist_matrix.compute_auc_matrix(
+            method=sig_method, verbose=True
+        )
+        sigmoid_results[sig_method] = {
+            "auc_matrix":   auc_mat,
+            "score_matrix": score_mat,
+            "metrics":      auc_metrics,
+        }
+        logger.info(f"  {sig_method} mean AUC: {auc_metrics['mean_auc']:.4f}")
+        for act, val in auc_metrics["per_model_auc"].items():
+            logger.info(f"    {act}: {val:.4f}")
+
+    # Primary method drives the top-level reporting
+    canonical = method.replace("_", "-")   # mean_sigmoid → mean-sigmoid
+    primary   = sigmoid_results[canonical]
+
+    return {
+        "activity_names":      activity_names,
+        "method":              method,
+        "auc_matrix":          primary["auc_matrix"],
+        "per_activity_auc":    primary["metrics"]["per_model_auc"],
+        "mean_auc":            primary["metrics"]["mean_auc"],
+        "raw_distance_matrix": raw_distance_matrix,
+        "distance_metrics":    distance_metrics,
+        "sigmoid_results":     sigmoid_results,
+        "train_counts":        train_counts,
+        "test_counts":         test_counts,
+        "value_tolerance":     VALUE_TOLERANCE,
+        "test_programs_path":  str(test_path),
+        "models_path":         str(models_path) if models_path else None,
+    }
 
 
-def print_aggregated_results(aggregated: dict):
-    """Print aggregated results summary."""
-    activities = aggregated["activities"]
-    separation = aggregated["separation_vector"]
-    auc_diag = np.diag(aggregated["auc_matrix"])
-
-    logger.info("AGGREGATED RESULTS SUMMARY")
-    logger.info(f"Models evaluated: {aggregated['n_models']}")
-    logger.info(f"Activities: {len(activities)}")
-
-    logger.info("Per-Model Performance")
-    header = f"{'Activity (trained on)':<25} {'Separation':>12} {'AUC':>12}"
-    logger.info(header)
-
-    for i, act in enumerate(activities):
-        sep = separation[i]
-        auc = auc_diag[i]
-        sep_str = f"{sep:.4f}" if not np.isnan(sep) else "N/A"
-        auc_str = f"{auc:.4f}" if not np.isnan(auc) else "N/A"
-        logger.info(f"{act:<25} {sep_str:>12} {auc_str:>12}")
-
-    # Summary stats
-    valid_sep = separation[~np.isnan(separation)]
-    valid_auc = auc_diag[~np.isnan(auc_diag)]
-
-    if len(valid_sep) > 0:
-        logger.info(f"Mean Separation: {np.mean(valid_sep):.4f} ± {np.std(valid_sep):.4f}")
-    if len(valid_auc) > 0:
-        logger.info(f"Mean AUC: {np.mean(valid_auc):.4f} ± {np.std(valid_auc):.4f}")
-
+# =============================================================================
+# Main
+# =============================================================================
 
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Anomaly Detection")
-    parser.add_argument(
-        "--config", type=str, default="configs/anomaly_detection.yaml", help="Config file"
+    parser = argparse.ArgumentParser(
+        description="Anomaly Detection  (method: nf | mean_sigmoid | min_sigmoid)"
     )
-    parser.add_argument(
-        "--list-activities", action="store_true", help="List available activities"
-    )
-    parser.add_argument(
-        "--aggregate",
-        type=str,
-        nargs="+",
-        metavar="DIR",
-        help="Aggregate results from multiple runs and generate separability matrix",
-    )
-    parser.add_argument(
-        "--aggregate-output",
-        type=str,
-        default="results/anomaly_detection/aggregated",
-        help="Output directory for aggregated results",
-    )
-    parser.add_argument("overrides", nargs="*", help="Config overrides (key=value)")
-
+    parser.add_argument("--config", type=str, required=True,
+                        help="Path to YAML config file")
+    parser.add_argument("overrides", nargs="*",
+                        help="OmegaConf dot-list overrides, e.g. method=min_sigmoid")
     args = parser.parse_args()
 
-    # Aggregate mode - combine results from multiple runs
-    if args.aggregate:
-        logger.info("Aggregating Results")
-        results_dirs = [Path(d) for d in args.aggregate]
-        logger.info(f"Input directories: {len(results_dirs)}")
+    cfg    = load_config(args.config, args.overrides)
+    method = str(cfg.get("method", "nf")).lower()
 
-        aggregated = aggregate_results(results_dirs)
-        print_aggregated_results(aggregated)
+    if method not in {"nf", "mean_sigmoid", "min_sigmoid"}:
+        logger.error(f"Unknown method '{method}'. Choose: nf | mean_sigmoid | min_sigmoid")
+        sys.exit(1)
 
-        # Save and plot
-        output_dir = Path(args.aggregate_output)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Save aggregated data
-        with open(output_dir / "aggregated.json", "w") as f:
-            json.dump(
-                {
-                    "activities": aggregated["activities"],
-                    "score_matrix": aggregated["score_matrix"].tolist(),
-                    "auc_matrix": aggregated["auc_matrix"].tolist(),
-                    "separation_vector": aggregated["separation_vector"].tolist(),
-                    "n_models": aggregated["n_models"],
-                },
-                f,
-                indent=2,
-            )
-
-        # Generate plots
-        plot_separability_matrix(
-            aggregated,
-            output_dir / "separability_matrix.png",
-        )
-        plot_separation_summary(
-            aggregated,
-            output_dir / "separation_summary.png",
-        )
-
-        logger.success(f"Aggregated results saved to: {output_dir}")
-        return
-
-    # Load config
-    cfg = load_config(args.config, args.overrides)
-
-    # List activities mode
-    if args.list_activities:
-        logger.info(f"Available Activities ({cfg.data.label_type})")
-        activities = get_unique_activities(cfg.data.esk_dir, cfg.data.label_type)
-        for a in activities:
-            logger.info(f"  {a}")
-        return
-
-    # Set up
     set_seed(cfg.experiment.seed)
-    device = get_device(cfg.experiment.device)
 
-    # Create output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_name = cfg.experiment.name or f"{cfg.data.label_type}_{timestamp}"
+    timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    label_type = cfg.data.label_type
+    exp_name   = cfg.experiment.get("name", None) or f"{method}_{label_type}_{timestamp}"
     output_dir = Path(cfg.output.dir) / exp_name
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save config
     OmegaConf.save(cfg, output_dir / "config.yaml")
 
-    # Get target activities
-    target_activities = list(cfg.data.target_activities)
-    n_models = len(target_activities)
-
-    # Initialize wandb
-    use_wandb = cfg.wandb_mode != "disabled"
+    use_wandb = cfg.get("wandb_mode", "disabled") != "disabled"
     if use_wandb:
-        wandb.init(
-            project=cfg.wandb_project,
-            entity=cfg.wandb_entity,
-            name=exp_name,
-            config=OmegaConf.to_container(cfg, resolve=True),
-            mode=cfg.wandb_mode,
+        import wandb as _wandb
+        _wandb.init(
+            project = cfg.get("wandb_project", "exact"),
+            entity  = cfg.get("wandb_entity", None),
+            name    = exp_name,
+            config  = OmegaConf.to_container(cfg, resolve=True),
+            mode    = cfg.get("wandb_mode", "online"),
         )
 
-    logger.info("Anomaly Detection - STG-NF")
-    logger.info(f"Label type: {cfg.data.label_type}")
-    logger.info(f"Target activities: {target_activities}")
-    logger.info(f"Number of models to train: {n_models}")
-    logger.info(f"Device: {device}")
-    logger.info(f"Output: {output_dir}")
+    logger.info("=" * 60)
+    logger.info(f"Anomaly Detection  [method={method}]")
+    logger.info(f"Label type : {label_type}")
+    logger.info(f"Output     : {output_dir}")
+    logger.info("=" * 60)
+
+    # ── Run selected pipeline ────────────────────────────────────────────────
+    if method == "nf":
+        out = run_nf_pipeline(cfg, output_dir)
+    else:
+        out = run_exec_pipeline(cfg, method, output_dir)
+
+    activity_names   = out["activity_names"]
+    auc_matrix       = out["auc_matrix"]
+    per_activity_auc = out["per_activity_auc"]
+    mean_auc         = out["mean_auc"]
+
+    logger.info(f"Mean AUC (one-vs-rest): {mean_auc:.4f}")
+
+    # ── Shared plots ─────────────────────────────────────────────────────────
+    auc_plot  = str(output_dir / "auc_matrix.png")
+    sep_plot  = str(output_dir / "separation_summary.png")
+    plot_auc_matrix(auc_matrix, activity_names, auc_plot,
+                    title=f"AUC Matrix — {method} ({label_type})")
+    plot_separation_summary(activity_names, per_activity_auc, sep_plot,
+                            title=f"Per-Activity AUC — {method} ({label_type})")
+
+    # ── Extra exec plots ─────────────────────────────────────────────────────
+    extra_plots = {}
+    if method in ("mean_sigmoid", "min_sigmoid"):
+        sr = out["sigmoid_results"]
+
+        dist_plot = str(output_dir / "edit_distance_matrix.png")
+        _plot_edit_distance_matrix(
+            out["raw_distance_matrix"], activity_names, dist_plot,
+            title=f"Program Edit Distance ({label_type})",
+        )
+        extra_plots["edit_distance_matrix"] = dist_plot
+
+        for sig_key in ("mean-sigmoid", "min-sigmoid"):
+            sig_label = sig_key.replace("-", "_")
+            p = str(output_dir / f"auc_matrix_{sig_label}.png")
+            plot_auc_matrix(sr[sig_key]["auc_matrix"], activity_names, p,
+                            title=f"AUC Matrix — {sig_key} ({label_type})")
+            extra_plots[f"auc_matrix_{sig_label}"] = p
+
+        # Side-by-side comparison bar chart
+        ms_aucs  = sr["mean-sigmoid"]["metrics"]["per_model_auc"]
+        min_aucs = sr["min-sigmoid"]["metrics"]["per_model_auc"]
+        n, x, w = len(activity_names), np.arange(len(activity_names)), 0.35
+        fig, ax = plt.subplots(figsize=(max(10, n * 1.0), 5))
+        ax.bar(x - w / 2, [ms_aucs.get(a, 0)  for a in activity_names],
+               w, label="mean-sigmoid", color="#3498db", alpha=0.8)
+        ax.bar(x + w / 2, [min_aucs.get(a, 0) for a in activity_names],
+               w, label="min-sigmoid",  color="#e67e22", alpha=0.8)
+        ax.set_xticks(x)
+        ax.set_xticklabels(activity_names, rotation=45, ha="right", fontsize=10)
+        ax.set_ylim(0, 1.05)
+        ax.axhline(0.5, color="black", linestyle="--", linewidth=0.8, alpha=0.6)
+        ax.set_title(f"AUC: mean-sigmoid vs min-sigmoid ({label_type})",
+                     fontsize=14, fontweight="bold")
+        ax.legend(); ax.grid(axis="y", alpha=0.3, linestyle="--")
+        comp_path = str(output_dir / "auc_comparison.png")
+        plt.tight_layout()
+        plt.savefig(comp_path, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close()
+        extra_plots["auc_comparison"] = comp_path
+
+    # ── Save results JSON ─────────────────────────────────────────────────────
+    payload: dict = {
+        "method":          method,
+        "label_type":      label_type,
+        "activity_names":  activity_names,
+        "mean_auc":        mean_auc,
+        "per_activity_auc": per_activity_auc,
+        "auc_matrix":      np.where(np.isnan(auc_matrix), None, auc_matrix).tolist(),
+        "timestamp":       timestamp,
+    }
+    if method == "nf":
+        payload["per_model_results"] = out.get("per_model_results", [])
+    else:
+        payload["raw_distance_matrix"] = out["raw_distance_matrix"].tolist()
+        payload["distance_metrics"]    = out["distance_metrics"]
+        payload["train_counts"]        = out["train_counts"]
+        payload["test_counts"]         = out["test_counts"]
+        for sig_key in ("mean-sigmoid", "min-sigmoid"):
+            sl = sig_key.replace("-", "_")
+            sr = out["sigmoid_results"][sig_key]
+            payload[f"{sl}_auc_matrix"] = np.where(
+                np.isnan(sr["auc_matrix"]), None, sr["auc_matrix"]
+            ).tolist()
+            payload[f"{sl}_metrics"] = sr["metrics"]
+
+    with open(output_dir / "results.json", "w") as f:
+        json.dump(payload, f, indent=2, default=str)
+    logger.info(f"Saved results.json → {output_dir}")
+
+    # ── Wandb ─────────────────────────────────────────────────────────────────
     if use_wandb:
-        logger.info(f"Wandb: {cfg.wandb_project}/{exp_name}")
+        import wandb as _wandb
+        _wandb.summary["method"]       = method
+        _wandb.summary["mean_auc"]     = mean_auc
+        _wandb.summary["n_activities"] = len(activity_names)
+        _log_auc_to_wandb(_wandb, activity_names, auc_matrix, per_activity_auc, mean_auc)
 
-    # Train one model per target activity
-    all_results = []
-    model_dirs = []
+        if method in ("mean_sigmoid", "min_sigmoid"):
+            sr = out["sigmoid_results"]
+            for sig_key in ("mean-sigmoid", "min-sigmoid"):
+                sl = sig_key.replace("-", "_")
+                m  = sr[sig_key]["metrics"]
+                _log_auc_to_wandb(_wandb, activity_names,
+                                  sr[sig_key]["auc_matrix"],
+                                  m["per_model_auc"], m["mean_auc"], prefix=sl)
+            dm = out["distance_metrics"]
+            _wandb.summary["distance/diagonal_mean"]    = dm["diagonal_mean"]
+            _wandb.summary["distance/off_diagonal_mean"] = dm["off_diagonal_mean"]
+            _wandb.summary["distance/separation"]       = dm["separation"]
 
-    for i, target_activity in enumerate(target_activities):
-        logger.info(f"Model {i+1}/{n_models}: Training on '{target_activity}'")
+        _wandb.log({
+            "auc_matrix_plot":    _wandb.Image(auc_plot),
+            "separation_summary": _wandb.Image(sep_plot),
+            **{k: _wandb.Image(v) for k, v in extra_plots.items()},
+        })
+        _wandb.finish()
 
-        # Create model-specific output directory
-        safe_name = target_activity.replace(" ", "_")
-        model_dir = output_dir / safe_name
-        model_dir.mkdir(parents=True, exist_ok=True)
-        model_dirs.append(model_dir)
-
-        # Load data for this target activity
-        logger.info("Loading data...")
-        train_loader, test_loader, info = get_esk_dataloaders(
-            esk_dir=cfg.data.esk_dir,
-            label_type=cfg.data.label_type,
-            target_activity=target_activity,
-            test_activities=target_activities,  # Test on all target activities
-            seg_len=cfg.data.seg_len,
-            seg_stride=cfg.data.seg_stride,
-            batch_size=cfg.training.batch_size,
-            num_workers=cfg.training.num_workers,
-        )
-
-        logger.info(f"Training samples ({target_activity} only): {info['n_train_samples']}")
-        logger.info(f"Test samples: {info['n_test_samples']}")
-        logger.info("Test activity distribution:")
-        for act, count in sorted(info["test_activity_counts"].items(), key=lambda x: -x[1]):
-            marker = " <-- TARGET" if act == target_activity else ""
-            logger.info(f"  {act}: {count}{marker}")
-
-        if info["n_train_samples"] == 0:
-            logger.warning(f"No training samples for '{target_activity}', skipping...")
-            continue
-
-        # Build model
-        logger.info("Building model...")
-        pose_shape = (3, cfg.data.seg_len, 24)  # (C, T, V) for SMPL
-
-        graph = Graph(
-            strategy=cfg.model.adj_strategy,
-            max_hop=1,
-        )
-
-        model = STG_NF(
-            pose_shape=pose_shape,
-            hidden_channels=cfg.model.hidden_channels,
-            K=cfg.model.K,
-            L=cfg.model.L,
-            graph=graph,
-            learn_prior=cfg.model.learn_prior,
-            R=cfg.model.R,
-            temporal_kernel_size=cfg.model.temporal_kernel,
-            permutation=cfg.model.permutation,
-            device=str(device),
-        )
-
-        if i == 0:
-            n_params = sum(p.numel() for p in model.parameters())
-            logger.info(f"Model parameters: {n_params:,}")
-            if use_wandb:
-                wandb.log({"model/n_params": n_params})
-
-        # Optimizer and scheduler
-        optimizer = AdamW(
-            model.parameters(),
-            lr=cfg.training.lr,
-            weight_decay=cfg.training.weight_decay,
-        )
-        scheduler = ExponentialLR(optimizer, gamma=cfg.training.lr_decay)
-
-        # Trainer
-        trainer = Trainer(
-            model=model,
-            train_loader=train_loader,
-            test_loader=test_loader,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            device=str(device),
-            checkpoint_dir=(
-                str(model_dir / "checkpoints") if cfg.output.save_checkpoints else None
-            ),
-            use_wandb=False,  # We'll log aggregated metrics
-        )
-
-        # Train
-        if not cfg.checkpoint.eval_only:
-            logger.info("Training...")
-            history = trainer.train(
-                epochs=cfg.training.epochs,
-                grad_clip=cfg.training.grad_clip,
-                log_interval=cfg.training.log_interval,
-            )
-
-            with open(model_dir / "history.json", "w") as f:
-                json.dump(history, f, indent=2)
-
-        # Evaluate
-        if cfg.evaluation.enabled:
-            logger.info("Evaluating...")
-            results = evaluate_by_activity(
-                model=model,
-                test_loader=test_loader,
-                device=device,
-                target_activity=target_activity,
-                use_wandb=False,
-            )
-
-            print_results(results)
-
-            # Save results
-            results_dict = {
-                "config": OmegaConf.to_container(cfg, resolve=True),
-                "info": info,
-                "results": results,
-            }
-
-            with open(model_dir / "results.json", "w") as f:
-                json.dump(results_dict, f, indent=2, default=str)
-
-            all_results.append(results)
-
-    # Aggregate results and generate separability matrix
-    if len(all_results) > 1:
-        logger.info("AGGREGATING RESULTS")
-
-        aggregated = aggregate_results(model_dirs)
-        print_aggregated_results(aggregated)
-
-        # Save aggregated data
-        with open(output_dir / "aggregated.json", "w") as f:
-            json.dump(
-                {
-                    "activities": aggregated["activities"],
-                    "score_matrix": aggregated["score_matrix"].tolist(),
-                    "auc_matrix": aggregated["auc_matrix"].tolist(),
-                    "separation_vector": aggregated["separation_vector"].tolist(),
-                    "n_models": aggregated["n_models"],
-                },
-                f,
-                indent=2,
-            )
-
-        # Generate plots
-        plot_separability_matrix(
-            aggregated,
-            output_dir / "separability_matrix.png",
-            title=f"Separability Matrix ({cfg.data.label_type})",
-        )
-        plot_separation_summary(
-            aggregated,
-            output_dir / "separation_summary.png",
-            title=f"Per-Activity Metrics ({cfg.data.label_type})",
-        )
-
-        # Log aggregated results to wandb as a summary table
-        if use_wandb:
-            activities = aggregated["activities"]
-            separation = aggregated["separation_vector"]
-            auc_diag = np.diag(aggregated["auc_matrix"])
-
-            # Create results table (per-activity metrics)
-            results_table = wandb.Table(
-                columns=["activity", "auc", "separation", "target_mean_log_prob", "other_mean_log_prob"]
-            )
-            for i, act in enumerate(activities):
-                auc_val = auc_diag[i] if not np.isnan(auc_diag[i]) else None
-                sep_val = separation[i] if not np.isnan(separation[i]) else None
-                # Get detailed metrics from all_results
-                target_mean = None
-                other_mean = None
-                for r in all_results:
-                    if r["target_activity"] == act:
-                        target_mean = r.get("target_mean_log_prob")
-                        other_mean = r.get("other_mean_log_prob")
-                        break
-                results_table.add_data(act, auc_val, sep_val, target_mean, other_mean)
-
-            wandb.log({"results_table": results_table})
-
-            # Create separability matrix table (NxN scores)
-            score_matrix = aggregated["score_matrix"]
-            matrix_table = wandb.Table(
-                columns=["model_trained_on"] + activities
-            )
-            for i, act in enumerate(activities):
-                row_data = [act] + [
-                    score_matrix[i, j] if not np.isnan(score_matrix[i, j]) else None
-                    for j in range(len(activities))
-                ]
-                matrix_table.add_data(*row_data)
-
-            wandb.log({"separability_matrix": matrix_table})
-
-            # Log plots as images
-            wandb.log({
-                "separability_matrix_plot": wandb.Image(str(output_dir / "separability_matrix.png")),
-                "separation_summary_plot": wandb.Image(str(output_dir / "separation_summary.png")),
-            })
-
-            # Summary metrics
-            valid_auc = auc_diag[~np.isnan(auc_diag)]
-            valid_sep = separation[~np.isnan(separation)]
-
-            mean_auc = float(np.mean(valid_auc)) if len(valid_auc) > 0 else 0.5
-            mean_sep = float(np.mean(valid_sep)) if len(valid_sep) > 0 else 0
-            std_auc = float(np.std(valid_auc)) if len(valid_auc) > 0 else 0
-            std_sep = float(np.std(valid_sep)) if len(valid_sep) > 0 else 0
-
-            wandb.summary["mean_auc"] = mean_auc
-            wandb.summary["std_auc"] = std_auc
-            wandb.summary["mean_separation"] = mean_sep
-            wandb.summary["std_separation"] = std_sep
-            wandb.summary["n_models"] = len(valid_auc)
-
-    # Finish wandb
-    if use_wandb:
-        wandb.finish()
-
-    logger.success(f"Results saved to: {output_dir}")
+    logger.success(f"Done. Results → {output_dir}")
 
 
 if __name__ == "__main__":
