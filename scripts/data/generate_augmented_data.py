@@ -268,6 +268,16 @@ def main():
     for name, n in activity_samples:
         logger.info(f"  {name}: {n} samples")
 
+    # ── Pre-download model files to HF cache (avoids race in workers) ─
+    logger.info("Pre-downloading behaviour model to local cache...")
+    from huggingface_hub import hf_hub_download
+    hf_hub_download(
+        repo_id=args.behaviour_model,
+        filename="data/buffer_inference_500000.hdf5",
+        repo_type="model",
+    )
+    logger.info("Model files cached; launching workers.")
+
     # ── Launch parallel workers ──────────────────────────────────────
     all_results: dict[str, list[np.ndarray]] = {}
 

@@ -41,10 +41,21 @@ class BehaviourModel:
             filename="data/buffer_inference_500000.hdf5",
             repo_type="model",
         )
-        with h5py.File(buffer_path, "r") as f:
-            data = {k: v[:] for k, v in f.items()}
-            self.buffer = DictBuffer(capacity=data["qpos"].shape[0], device=device)
-            self.buffer.extend(data)
+        try:
+            with h5py.File(buffer_path, "r") as f:
+                data = {k: v[:] for k, v in f.items()}
+        except OSError:
+            # File may be corrupted (e.g. partial download); re-download
+            buffer_path = hf_hub_download(
+                repo_id=model_name,
+                filename="data/buffer_inference_500000.hdf5",
+                repo_type="model",
+                force_download=True,
+            )
+            with h5py.File(buffer_path, "r") as f:
+                data = {k: v[:] for k, v in f.items()}
+        self.buffer = DictBuffer(capacity=data["qpos"].shape[0], device=device)
+        self.buffer.extend(data)
 
     def z_from_reward(self, env: HumEnv, reward_fn: SensorReward) -> torch.Tensor:
         """Compute latent z from reward function using buffer relabeling."""
