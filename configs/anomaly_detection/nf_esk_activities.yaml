@@ -29,7 +29,7 @@ model:
   permutation: invconv
 
 training:
-  epochs: 50
+  epochs: 30
   batch_size: 128
   lr: 3.3e-04
   lr_decay: 0.96

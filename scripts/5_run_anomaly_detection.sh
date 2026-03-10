@@ -31,7 +31,7 @@
 # =============================================================================
 set -euo pipefail
 
-cd /pvc/exact
+#cd /pvc/exact
 
 SCRIPT="scripts/tasks/anomaly_detection.py"
 

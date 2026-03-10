@@ -27,6 +27,7 @@ Usage:
     uv run scripts/tasks/anomaly_detection.py --config configs/anomaly_detection/exec_esk_verbs.yaml method=min_sigmoid
 """
 
+import gc
 import json
 import random
 import sys
@@ -345,6 +346,13 @@ def run_nf_pipeline(cfg: DictConfig, output_dir: Path) -> dict:
         with open(model_dir / "results.json", "w") as f:
             json.dump({"info": info, "results": eval_results}, f, indent=2, default=str)
         all_per_model_results.append(eval_results)
+
+        # ── Explicit cleanup to prevent OOM between iterations ──
+        del model, trainer, optimizer, scheduler, train_loader, test_loader
+        gc.collect()
+        import torch as _torch
+        if _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
 
     auc_matrix, per_activity_auc, mean_auc = _build_nf_auc_matrix(
         all_per_model_results, target_activities
