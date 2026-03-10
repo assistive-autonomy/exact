@@ -17,7 +17,8 @@ data:
   # Paths auto-detected from esk_dir and label_type when not set:
   models_path: null          # path to models_verbs.json
   test_programs_path: null   # path to programs_verbs_test.json
-  train_budget: 100          # programs per activity (used only if models_path is absent)
+  train_budget: 10           # programs per activity (sub-selects from model if needed)
+  selection_method: greedy    # diversity selection: greedy (maximin), hierarchical, tfidf
   exec_num_workers: 1        # parallel workers for edit-distance computation
 
 output:

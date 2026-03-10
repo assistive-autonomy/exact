@@ -463,6 +463,7 @@ def _plot_edit_distance_matrix(matrix, activity_names, output_path, title):
 def run_exec_pipeline(cfg: DictConfig, method: str, output_dir: Path) -> dict:
     """Executable-model pipeline: edit distance → sigmoid scores → AUC matrix."""
     from exact.programs import ProgramDistanceMatrix, VALUE_TOLERANCE
+    from exact.programs.selection import select_diverse_programs
 
     models_path, test_path = _resolve_exec_paths(cfg)
 
@@ -511,6 +512,9 @@ def run_exec_pipeline(cfg: DictConfig, method: str, output_dir: Path) -> dict:
 
     logger.info(f"Activities ({len(activity_names)}): {activity_names}")
 
+    # ── Selection strategy for sub-selecting from loaded models ────────────
+    selection_method = str(cfg.data.get("selection_method", "greedy"))
+
     # ── Build distance matrix ────────────────────────────────────────────────
     dist_matrix  = ProgramDistanceMatrix(activity_names)
     train_counts = {}
@@ -528,6 +532,22 @@ def run_exec_pipeline(cfg: DictConfig, method: str, output_dir: Path) -> dict:
         if not mprg:
             logger.warning(f"No valid model programs for {activity}")
             continue
+
+        # Sub-select when we have more programs than train_budget
+        if len(mprg) > train_budget:
+            logger.info(
+                f"  {activity}: sub-selecting {train_budget} from {len(mprg)} "
+                f"using {selection_method}"
+            )
+            result = select_diverse_programs(
+                mprg,
+                budget=train_budget,
+                method=selection_method,
+                deduplicate=True,
+                dedup_tolerance=0.0,
+                show_progress=False,
+            )
+            mprg = result.selected_programs
 
         dist_matrix.set_model_programs(activity, mprg)
         train_counts[activity] = len(mprg)

@@ -254,8 +254,9 @@ def create_parser(checkpoint_path: str | None = None, use_mock: bool = False):
         use_grammar_constraint=True,   # Grammar-constrained decoding (whitespace-safe)
         temperature=0.4,               # [v3] 0.3→0.4: higher temp avoids mode collapse on short segments
         top_p=0.92,                    # [v3] 0.95→0.92: slightly tighter nucleus for quality
-        num_retries=5,                 # [v3] 2→5: more retries for multi-segment program recovery
-        retry_temperature=0.7,         # [v3] 0.5→0.7: higher retry temp for diverse exploration
+        num_retries=10,                # [v4] 5→10: more retries for hard-to-parse motions (e.g. cooking)
+        retry_temperature=0.5,         # [v4] 0.7→0.5: start lower, wider temperature sweep (0.5→2.5)
+        num_passes=3,                  # [v4] NEW: 3 independent full attempts; resets RNG each pass
     )
 
 

@@ -226,11 +226,11 @@ def weighted_delta(a: Optional[str], b: Optional[str]) -> float:
     return 5.0
 
 
-#: Default cost function used throughout the pipeline.  ``None`` uses
-#: unit costs (best cross-dataset AUC).  Set to :func:`weighted_delta`
-#: for body-region-aware scoring on datasets where activities involve
-#: distinct body regions (e.g. HumanAct12).
-DEFAULT_DELTA = None
+#: Default cost function used throughout the pipeline.
+#: :func:`weighted_delta` assigns body-region-aware costs so that e.g.
+#: swapping a left-hand joint for its right-hand mirror is cheaper than
+#: swapping it for an ankle.  Set to ``None`` for unit costs.
+DEFAULT_DELTA = weighted_delta
 
 
 @dataclass

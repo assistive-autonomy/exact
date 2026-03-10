@@ -56,6 +56,7 @@ class TrainedParser:
         top_p: float = 0.95,
         num_retries: int = 2,
         retry_temperature: float = 0.5,
+        num_passes: int = 1,
     ):
         """Load a trained parser from checkpoint.
         
@@ -67,6 +68,16 @@ class TrainedParser:
             device: Device to run on ('auto', 'cuda', 'cpu')
             use_grammar_constraint: Whether to use grammar-constrained decoding
             max_new_tokens: Maximum tokens to generate
+            temperature: Base sampling temperature for the first attempt
+            top_p: Nucleus sampling probability mass
+            num_retries: Number of retry rounds per pass (temperature increases
+                each round by 0.2 starting from *retry_temperature*)
+            retry_temperature: Starting temperature for retry rounds
+            num_passes: Number of independent full generation passes.  Each
+                pass starts a fresh attempt at *temperature*, followed by up to
+                *num_retries* retries.  This multiplies the total number of
+                attempts by *num_passes* and is effective for hard-to-parse
+                motions where resetting the random seed helps.
         """
         self.checkpoint_path = Path(checkpoint_path)
         self.max_new_tokens = max_new_tokens
@@ -75,6 +86,7 @@ class TrainedParser:
         self.top_p = top_p
         self.num_retries = num_retries
         self.retry_temperature = retry_temperature
+        self.num_passes = num_passes
         
         # Determine device
         if device == "auto":
@@ -279,7 +291,10 @@ class TrainedParser:
         """Parse a single motion sequence into a program.
 
         Uses sampling with batched retries at increasing temperature to
-        maximize the chance of producing a valid program.
+        maximize the chance of producing a valid program.  When
+        ``num_passes > 1``, the entire attempt+retry cycle is repeated
+        independently — this helps when the first random seed lands in a
+        bad region of the output distribution.
 
         Args:
             motion: Motion sequence of shape (seq_len, motion_dim)
@@ -287,37 +302,42 @@ class TrainedParser:
         Returns:
             Program string
         """
-        results = self._pad_and_generate(
-            [motion], temperature=self.temperature, do_sample=True
-        )
-        program, is_valid = results[0]
-        if is_valid:
-            return program
+        best_program = None
 
-        # Retry with increasing temperature
-        for retry in range(self.num_retries):
-            temp = self.retry_temperature + retry * 0.2
+        for _pass in range(self.num_passes):
             results = self._pad_and_generate(
-                [motion], temperature=temp, do_sample=True
+                [motion], temperature=self.temperature, do_sample=True
             )
             program, is_valid = results[0]
             if is_valid:
                 return program
+            best_program = program  # keep last attempt as fallback
 
-        return program
+            # Retry with increasing temperature
+            for retry in range(self.num_retries):
+                temp = self.retry_temperature + retry * 0.2
+                results = self._pad_and_generate(
+                    [motion], temperature=temp, do_sample=True
+                )
+                program, is_valid = results[0]
+                if is_valid:
+                    return program
+                best_program = program
+
+        return best_program
 
     @torch.no_grad()
     def parse_batch(self, motions: list[np.ndarray]) -> list[str]:
         """Parse multiple motion sequences with batched retries.
 
-        Strategy:
-          1. Run all motions through batched generation at base temperature.
+        Strategy (repeated for each of ``num_passes`` independent passes):
+          1. Run all *still-invalid* motions through generation at base temp.
           2. Collect indices of invalid programs.
           3. Re-run *only* the failures as a new batch at higher temperature.
           4. Repeat for ``num_retries`` rounds (temp increases each round).
 
-        This keeps GPU utilization high by always doing batched inference
-        instead of falling back to single-sample retries.
+        Multiple passes help hard-to-parse motions where a fresh random
+        seed can yield a valid program even though earlier seeds did not.
 
         Args:
             motions: List of motion sequences, each (seq_len_i, motion_dim)
@@ -330,31 +350,43 @@ class TrainedParser:
         if len(motions) == 1:
             return [self.parse(motions[0])]
 
-        # --- First pass at base temperature ---
-        results = self._pad_and_generate(
-            motions, temperature=self.temperature, do_sample=True
-        )
+        programs: list[str] = [""] * len(motions)
+        invalid_mask: list[bool] = [True] * len(motions)
 
-        programs: list[str] = [r[0] for r in results]
-        invalid_mask: list[bool] = [not r[1] for r in results]
+        for _pass in range(self.num_passes):
+            # Indices that still need a valid program
+            pass_indices = [i for i, inv in enumerate(invalid_mask) if inv]
+            if not pass_indices:
+                break
 
-        # --- Batched retries at increasing temperature ---
-        for retry in range(self.num_retries):
-            retry_indices = [i for i, inv in enumerate(invalid_mask) if inv]
-            if not retry_indices:
-                break  # All valid
-
-            temp = self.retry_temperature + retry * 0.2
-            retry_motions = [motions[i] for i in retry_indices]
-
-            retry_results = self._pad_and_generate(
-                retry_motions, temperature=temp, do_sample=True
+            # --- Fresh attempt at base temperature ---
+            pass_motions = [motions[i] for i in pass_indices]
+            results = self._pad_and_generate(
+                pass_motions, temperature=self.temperature, do_sample=True
             )
 
-            for idx, (prog, is_valid) in zip(retry_indices, retry_results):
+            for idx, (prog, is_valid) in zip(pass_indices, results):
+                programs[idx] = prog
                 if is_valid:
-                    programs[idx] = prog
                     invalid_mask[idx] = False
+
+            # --- Batched retries at increasing temperature ---
+            for retry in range(self.num_retries):
+                retry_indices = [i for i, inv in enumerate(invalid_mask) if inv]
+                if not retry_indices:
+                    break  # All valid
+
+                temp = self.retry_temperature + retry * 0.2
+                retry_motions = [motions[i] for i in retry_indices]
+
+                retry_results = self._pad_and_generate(
+                    retry_motions, temperature=temp, do_sample=True
+                )
+
+                for idx, (prog, is_valid) in zip(retry_indices, retry_results):
+                    if is_valid:
+                        programs[idx] = prog
+                        invalid_mask[idx] = False
 
         return programs
 
