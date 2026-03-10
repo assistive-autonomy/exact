@@ -24,6 +24,215 @@ _PARSER = Lark(_GRAMMAR, start="start", parser="earley")
 VALUE_TOLERANCE = 0.3
 
 
+# =============================================================================
+# Body-region groupings for weighted edit distance
+# =============================================================================
+
+JOINT_GROUPS: dict[str, list[str]] = {
+    "head":      ["head", "neck"],
+    "torso":     ["pelvis", "torso", "spine", "chest"],
+    "left_arm":  ["lthorax", "lshoulder", "lelbow", "lwrist", "lhand"],
+    "right_arm": ["rthorax", "rshoulder", "relbow", "rwrist", "rhand"],
+    "left_leg":  ["lhip", "lknee", "lankle", "ltoe"],
+    "right_leg": ["rhip", "rknee", "rankle", "rtoe"],
+}
+
+# Reverse mapping: joint name -> group name
+JOINT_TO_GROUP: dict[str, str] = {
+    joint: group for group, joints in JOINT_GROUPS.items() for joint in joints
+}
+
+ALL_JOINTS: set[str] = set(JOINT_TO_GROUP.keys())
+ALL_AXES: set[str] = {"x", "y", "z"}
+STRUCTURAL_NODES: set[str] = {"start", "motion", "sensor"}
+
+_MIRROR_GROUPS: dict[str, str] = {
+    "left_arm": "right_arm", "right_arm": "left_arm",
+    "left_leg": "right_leg", "right_leg": "left_leg",
+}
+
+# Adjacent body region pairs (upper ↔ lower on the same side)
+_ADJACENT_GROUPS: set[frozenset[str]] = {
+    frozenset({"left_arm", "left_leg"}),
+    frozenset({"right_arm", "right_leg"}),
+    frozenset({"torso", "left_arm"}), frozenset({"torso", "right_arm"}),
+    frozenset({"torso", "left_leg"}), frozenset({"torso", "right_leg"}),
+    frozenset({"head", "torso"}),
+}
+
+
+def _is_value_label(label: str) -> bool:
+    """Check if a node label is a normalized value bucket."""
+    return label.startswith("v:")
+
+
+def _get_value_from_label(label: str) -> float:
+    """Extract numeric value from a value bucket label."""
+    return float(label[2:])
+
+
+def _parse_composite_label(label: str) -> tuple[str, str, str | None] | None:
+    """Parse a composite sensor label ``"joint.axis:value"``.
+
+    Returns ``(joint, axis, value_bucket)`` or ``None`` if *label* is
+    not a composite sensor label.
+    """
+    if "." not in label:
+        return None
+    try:
+        joint_axis, *rest = label.split(":", 1)
+        joint, axis = joint_axis.split(".", 1)
+    except ValueError:
+        return None
+    if joint not in ALL_JOINTS or axis not in ALL_AXES:
+        return None
+    value = rest[0] if rest else None
+    return joint, axis, value
+
+
+# -- Cost constants (tuned via grid search on HumanAct12) ----------------
+# Joint distributions look very similar across activities, so joint region
+# costs are intentionally low to let *tree structure* dominate.  Axis and
+# value costs are kept modest because the discriminative signal lives in
+# which joints are *present* rather than which axis/value they use.
+
+#: Substitution: joint in same body region (e.g. lhand ↔ lwrist)
+COST_SAME_REGION = 0.25
+#: Substitution: mirror joint (e.g. lhand ↔ rhand)
+COST_MIRROR = 0.5
+#: Substitution: adjacent body region (e.g. lhand ↔ lhip, torso ↔ larm)
+COST_ADJACENT = 1.0
+#: Substitution: distant body region (e.g. lhand ↔ rankle)
+COST_DISTANT = 2.0
+#: Substitution: different axis on otherwise identical sensor
+COST_AXIS = 0.3
+#: Maximum value-difference contribution
+COST_VALUE_CAP = 0.5
+#: Insertion / deletion of a composite sensor node
+COST_SENSOR_INDEL = 1.5
+#: Insertion / deletion of a structural node (start / motion)
+COST_STRUCTURAL_INDEL = 0.05
+
+def weighted_delta(a: Optional[str], b: Optional[str]) -> float:
+    """Body-region-aware cost function for tree edit distance.
+
+    Designed for *collapsed* program trees where each sensor is a single
+    composite node ``"joint.axis:value"`` (e.g. ``"lhand.x:v0.3"``).
+    Structural nodes (``start``, ``motion``) are nearly free so the
+    distance is dominated by **which body parts** the programs use.
+
+    The cost hierarchy reflects the hypothesis that activity similarity
+    is driven by shared body-region involvement, with costs deliberately
+    low so that overall tree structure (number/arrangement of sensors)
+    dominates over individual joint identity:
+
+    Composite sensor substitution (joint.axis:value ↔ joint.axis:value):
+        Same label                   → 0.0
+        Same region joint            → 0.25  (+ axis/value penalty)
+        Mirror joint (l↔r)           → 0.5   (+ axis/value penalty)
+        Adjacent region              → 1.0   (+ axis/value penalty)
+        Distant region               → 2.0   (+ axis/value penalty)
+        (axis mismatch adds 0.3, value diff adds ≤ 0.5)
+
+    Insertion / deletion:
+        Composite sensor             → 1.5
+        Structural node              → 0.05
+
+    Falls back to per-token costs for non-collapsed (legacy) trees.
+    """
+    # ------------------------------------------------------------------
+    # Deletion / insertion
+    # ------------------------------------------------------------------
+    if a is None or b is None:
+        node = a if b is None else b
+        # Composite sensor label?
+        if _parse_composite_label(node) is not None:
+            return COST_SENSOR_INDEL
+        if node in STRUCTURAL_NODES:
+            return COST_STRUCTURAL_INDEL
+        # Legacy individual tokens
+        if node in ALL_JOINTS:
+            return 1.5
+        if node in ALL_AXES:
+            return 0.5
+        if _is_value_label(node):
+            return 0.25
+        return 1.0
+
+    # ------------------------------------------------------------------
+    # Identical labels → zero cost
+    # ------------------------------------------------------------------
+    if a == b:
+        return 0.0
+
+    # ------------------------------------------------------------------
+    # Both composite sensors (primary path for collapsed trees)
+    # ------------------------------------------------------------------
+    ca = _parse_composite_label(a)
+    cb = _parse_composite_label(b)
+    if ca is not None and cb is not None:
+        joint_a, axis_a, val_a = ca
+        joint_b, axis_b, val_b = cb
+
+        # -- Joint identity (DOMINANT signal) --
+        cost = 0.0
+        if joint_a != joint_b:
+            ga, gb = JOINT_TO_GROUP[joint_a], JOINT_TO_GROUP[joint_b]
+            if ga == gb:
+                cost += COST_SAME_REGION
+            elif _MIRROR_GROUPS.get(ga) == gb:
+                cost += COST_MIRROR
+            elif frozenset({ga, gb}) in _ADJACENT_GROUPS:
+                cost += COST_ADJACENT
+            else:
+                cost += COST_DISTANT
+
+        # -- Axis (secondary signal) --
+        if axis_a != axis_b:
+            cost += COST_AXIS
+
+        # -- Value (amplified — movement amplitude varies across activities) --
+        if val_a and val_b and val_a != val_b:
+            va = _get_value_from_label(val_a)
+            vb = _get_value_from_label(val_b)
+            cost += min(abs(va - vb), COST_VALUE_CAP)
+
+        return cost
+
+    # ------------------------------------------------------------------
+    # Fallback: legacy individual-token comparison
+    # ------------------------------------------------------------------
+    if a in ALL_JOINTS and b in ALL_JOINTS:
+        ga, gb = JOINT_TO_GROUP[a], JOINT_TO_GROUP[b]
+        if ga == gb:
+            return COST_SAME_REGION
+        if _MIRROR_GROUPS.get(ga) == gb:
+            return COST_MIRROR
+        if frozenset({ga, gb}) in _ADJACENT_GROUPS:
+            return COST_ADJACENT
+        return COST_DISTANT
+
+    if a in ALL_AXES and b in ALL_AXES:
+        return COST_AXIS
+
+    if _is_value_label(a) and _is_value_label(b):
+        diff = abs(_get_value_from_label(a) - _get_value_from_label(b))
+        return min(diff, COST_VALUE_CAP)
+
+    if a in STRUCTURAL_NODES and b in STRUCTURAL_NODES:
+        return 0.0
+
+    # Cross-type substitution (should be rare)
+    return 5.0
+
+
+#: Default cost function used throughout the pipeline.  ``None`` uses
+#: unit costs (best cross-dataset AUC).  Set to :func:`weighted_delta`
+#: for body-region-aware scoring on datasets where activities involve
+#: distinct body regions (e.g. HumanAct12).
+DEFAULT_DELTA = None
+
+
 @dataclass
 class ProgramTree:
     """Tree representation of a program for edit distance computation.
@@ -109,102 +318,148 @@ def _tree_to_nodes_adj(tree: Union[Tree, Token], nodes: list, adj: list, parent_
     return node_idx
 
 
-def _lark_tree_to_program_tree(tree: Tree, program: str) -> ProgramTree:
+def _lark_tree_to_program_tree(
+    tree: Tree,
+    program: str,
+    collapse_sensors: bool = False,
+) -> ProgramTree:
     """Convert Lark parse tree to ProgramTree for edit distance.
-    
-    Simplifies the tree structure:
-    - Removes interval values (INT tokens) to focus on structure
-    - Normalizes numeric values for tolerance-aware comparison
-    
+
     Args:
         tree: Lark parse tree
         program: Original program string
-        
+        collapse_sensors: If ``True``, each ``sensor`` subtree is collapsed
+            into a single composite node ``"joint.axis:value"``.
+            Default ``False`` keeps the expanded tree, which empirically
+            gives better AUC because UTED has richer structure to align.
+
     Returns:
         ProgramTree with nodes and adjacency list
     """
-    nodes = []
-    adj = []
-    
-    # Build simplified tree without intervals
-    _build_simplified_tree(tree, nodes, adj, None)
-    
+    nodes: list[str] = []
+    adj: list[list[int]] = []
+    _build_simplified_tree(tree, nodes, adj, None, collapse_sensors=collapse_sensors)
     return ProgramTree(nodes=nodes, adj=adj, program=program)
 
 
-def _build_simplified_tree(tree: Union[Tree, Token], nodes: list, adj: list, parent_idx: Optional[int], in_sensor: bool = False) -> Optional[int]:
+def _collapse_sensor_node(
+    tree: Tree, nodes: list, adj: list, parent_idx: Optional[int]
+) -> Optional[int]:
+    """Collapse a ``sensor`` subtree into a single composite node.
+
+    Composite label format: ``"joint.axis:value_bucket"``.
+    Example: ``"lhand.x:v0.3"``.
+    """
+    joint = axis = value = None
+    for child in tree.children:
+        if isinstance(child, Token):
+            if child.type == "JOINT":
+                joint = str(child)
+            elif child.type == "AXIS":
+                axis = str(child)
+            elif child.type in ("VALUE", "NUMBER"):
+                value = _normalize_value(float(child))
+    if not joint or not axis:
+        # Malformed sensor — fall back to plain label
+        node_idx = len(nodes)
+        nodes.append("sensor")
+        adj.append([])
+        if parent_idx is not None:
+            adj[parent_idx].append(node_idx)
+        return node_idx
+
+    label = f"{joint}.{axis}"
+    if value:
+        label += f":{value}"
+
+    node_idx = len(nodes)
+    nodes.append(label)
+    adj.append([])
+    if parent_idx is not None:
+        adj[parent_idx].append(node_idx)
+    return node_idx
+
+
+def _build_simplified_tree(
+    tree: Union[Tree, Token],
+    nodes: list,
+    adj: list,
+    parent_idx: Optional[int],
+    in_sensor: bool = False,
+    collapse_sensors: bool = True,
+) -> Optional[int]:
     """Build simplified tree structure, skipping interval values.
-    
-    Args:
-        tree: Lark Tree or Token
-        nodes: List to append node labels to
-        adj: List to append adjacency lists to
-        parent_idx: Index of parent node
-        in_sensor: Whether we're inside a sensor node (VALUE should be kept)
-    
-    Returns:
-        Index of created node, or None if skipped
+
+    When *collapse_sensors* is ``True``, each ``sensor`` subtree becomes a
+    single composite node (see :func:`_collapse_sensor_node`).  This makes
+    the resulting tree ultra-flat so that UTED compares sensors directly.
     """
     if isinstance(tree, Token):
-        # Skip frame indices (NUMBER tokens outside sensors, or FRAME/INT)
+        # Skip frame indices
         if tree.type in ("FRAME", "INT"):
             return None
         if tree.type == "NUMBER" and not in_sensor:
             return None
-        
-        # Create node for token
+
         node_idx = len(nodes)
-        
         if tree.type in ("VALUE", "NUMBER"):
-            # This is a sensor value - normalize it
             label = _normalize_value(float(tree.value))
         else:
             label = tree.value
-            
         nodes.append(label)
         adj.append([])
-        
         if parent_idx is not None:
             adj[parent_idx].append(node_idx)
-            
         return node_idx
-    
-    # Tree node
+
+    # ---- Sensor collapse ------------------------------------------------
+    if collapse_sensors and tree.data == "sensor":
+        return _collapse_sensor_node(tree, nodes, adj, parent_idx)
+
+    # ---- Non-sensor tree node -------------------------------------------
     node_idx = len(nodes)
     nodes.append(tree.data)
     adj.append([])
-    
     if parent_idx is not None:
         adj[parent_idx].append(node_idx)
-    
-    # Process children - set in_sensor=True when entering a sensor node
+
     child_in_sensor = in_sensor or tree.data == "sensor"
     for child in tree.children:
-        _build_simplified_tree(child, nodes, adj, node_idx, child_in_sensor)
-    
+        _build_simplified_tree(
+            child, nodes, adj, node_idx, child_in_sensor,
+            collapse_sensors=collapse_sensors,
+        )
     return node_idx
 
 
-def parse_to_tree(program: str) -> ProgramTree:
+def parse_to_tree(
+    program: str,
+    collapse_sensors: bool = False,
+) -> ProgramTree:
     """Parse a program string into a tree representation.
-    
+
     Args:
-        program: ExAct program string (e.g., "[0,50]lhand.x(0.3)*acc;")
-        
+        program: ExAct program string (e.g., ``"[0,50]lhand.x(0.3)*rhand.y(0.5)"``)
+        collapse_sensors: Collapse each sensor subtree into a single composite
+            node ``"joint.axis:value"`` (default ``False``).  Expanded trees
+            (the default) give better separation because UTED has more
+            structure to align.
+
     Returns:
         ProgramTree for edit distance computation
-        
+
     Raises:
         lark.exceptions.LarkError: If program cannot be parsed
     """
     tree = _PARSER.parse(program)
-    return _lark_tree_to_program_tree(tree, program)
+    return _lark_tree_to_program_tree(tree, program, collapse_sensors=collapse_sensors)
 
 
 def program_edit_distance(
     program1: Union[str, ProgramTree],
     program2: Union[str, ProgramTree],
-    delta: Optional[Callable] = None,
+    delta: Optional[Callable] = "default",
+    normalize: bool = False,
 ) -> float:
     """Compute unordered tree edit distance between two programs.
     
@@ -213,15 +468,19 @@ def program_edit_distance(
     Args:
         program1: First program (string or ProgramTree)
         program2: Second program (string or ProgramTree)
-        delta: Optional custom cost function. If None, uses unit costs.
-               Signature: delta(node1, node2) -> float
-               delta(node, None) = deletion cost
-               delta(None, node) = insertion cost
+        delta: Cost function.  ``"default"`` → :func:`weighted_delta`,
+               ``None`` → unit costs, or a custom callable.
+        normalize: If ``True``, divide the raw distance by
+               ``max(len(tree1), len(tree2))`` so that the result is in
+               roughly [0, max_unit_cost] regardless of program length.
                
     Returns:
         Edit distance (float >= 0)
     """
     from edist.uted import uted
+    
+    if delta == "default":
+        delta = DEFAULT_DELTA
     
     # Parse if needed
     if isinstance(program1, str):
@@ -230,24 +489,32 @@ def program_edit_distance(
         program2 = parse_to_tree(program2)
     
     # Compute UTED
-    return uted(
+    dist = uted(
         program1.nodes, program1.adj,
         program2.nodes, program2.adj,
-        delta=delta
+        delta=delta,
     )
+    
+    if normalize:
+        max_size = max(len(program1), len(program2), 1)
+        dist = dist / max_size
+    
+    return dist
 
 
 def min_distance_to_model(
     query_program: Union[str, ProgramTree],
     model_programs: list[Union[str, ProgramTree]],
-    delta: Optional[Callable] = None,
+    delta: Optional[Callable] = "default",
+    normalize: bool = False,
 ) -> tuple[float, int]:
     """Compute minimum edit distance from query to any program in model.
     
     Args:
         query_program: Query program
         model_programs: List of programs in the model
-        delta: Optional custom cost function
+        delta: Cost function (``"default"`` → weighted, ``None`` → unit).
+        normalize: Normalize each pairwise distance by max tree size.
         
     Returns:
         Tuple of (min_distance, index of closest program)
@@ -259,7 +526,7 @@ def min_distance_to_model(
     min_idx = -1
     
     for i, model_prog in enumerate(model_programs):
-        dist = program_edit_distance(query_program, model_prog, delta)
+        dist = program_edit_distance(query_program, model_prog, delta, normalize=normalize)
         if dist < min_dist:
             min_dist = dist
             min_idx = i
@@ -270,14 +537,16 @@ def min_distance_to_model(
 def batch_min_distances(
     query_programs: list[Union[str, ProgramTree]],
     model_programs: list[Union[str, ProgramTree]],
-    delta: Optional[Callable] = None,
+    delta: Optional[Callable] = "default",
+    normalize: bool = False,
 ) -> list[float]:
     """Compute minimum distances for a batch of queries.
     
     Args:
         query_programs: List of query programs
         model_programs: List of programs in the model
-        delta: Optional custom cost function
+        delta: Cost function (``"default"`` → weighted, ``None`` → unit).
+        normalize: Normalize each pairwise distance by max tree size.
         
     Returns:
         List of minimum distances, one per query
@@ -290,7 +559,7 @@ def batch_min_distances(
     
     distances = []
     for query in query_programs:
-        dist, _ = min_distance_to_model(query, model_trees, delta)
+        dist, _ = min_distance_to_model(query, model_trees, delta, normalize=normalize)
         distances.append(dist)
     
     return distances
@@ -303,6 +572,8 @@ def _compute_row_distances(
     model_activities: list[str],
     model_programs_data: dict[str, list[tuple[list[str], list[list[int]], str]]],
     n_activities: int,
+    use_weighted_delta: bool = True,
+    normalize: bool = True,
 ) -> tuple[int, np.ndarray, np.ndarray]:
     """Compute one row of the distance matrix (for parallel execution).
     
@@ -313,11 +584,15 @@ def _compute_row_distances(
         model_activities: List of all activity names
         model_programs_data: Dict mapping activity -> list of (nodes, adj, program)
         n_activities: Number of activities
+        use_weighted_delta: Use :func:`weighted_delta` (True) or unit costs.
+        normalize: Normalize each distance by ``max(|tree1|, |tree2|)``.
         
     Returns:
         Tuple of (row_idx, mean_distances, std_distances)
     """
     from edist.uted import uted
+    
+    delta = weighted_delta if use_weighted_delta else None
     
     row_means = np.zeros(n_activities)
     row_stds = np.zeros(n_activities)
@@ -346,8 +621,11 @@ def _compute_row_distances(
                 dist = uted(
                     query.nodes, query.adj,
                     model.nodes, model.adj,
-                    delta=None
+                    delta=delta,
                 )
+                if normalize:
+                    max_size = max(len(query), len(model), 1)
+                    dist = dist / max_size
                 if dist < min_dist:
                     min_dist = dist
             distances.append(min_dist)
@@ -413,13 +691,20 @@ class ProgramDistanceMatrix:
         tree = parse_to_tree(program) if isinstance(program, str) else program
         self.test_programs[activity].append(tree)
     
-    def compute_matrix(self, delta: Optional[Callable] = None, verbose: bool = True, num_workers: int = 1) -> np.ndarray:
+    def compute_matrix(
+        self,
+        delta: Optional[Callable] = "default",
+        verbose: bool = True,
+        num_workers: int = 1,
+        normalize: bool = False,
+    ) -> np.ndarray:
         """Compute the separability matrix.
         
         Args:
-            delta: Optional custom cost function
+            delta: Cost function (``"default"`` → weighted, ``None`` → unit).
             verbose: Whether to show progress
             num_workers: Number of parallel workers (default: 1 = sequential)
+            normalize: Normalize distances by max tree size (default False).
             
         Returns:
             Matrix M where M[i,j] = mean min-distance from activity i tests to activity j model
@@ -450,7 +735,9 @@ class ProgramDistanceMatrix:
                 model_progs = self.model_programs[model_activity]
                 
                 # Compute min distance for each query
-                distances = batch_min_distances(query_programs, model_progs, delta)
+                distances = batch_min_distances(
+                    query_programs, model_progs, delta, normalize=normalize,
+                )
                 
                 matrix[i, j] = np.mean(distances)
                 matrix_std[i, j] = np.std(distances)
@@ -508,6 +795,8 @@ class ProgramDistanceMatrix:
                     self.activity_names,
                     model_programs_data,
                     self.n_activities,
+                    use_weighted_delta=(DEFAULT_DELTA is not None),
+                    normalize=False,
                 )
                 futures[future] = query_activity
             
@@ -791,6 +1080,9 @@ def _compute_sigmoid_scores(
 ) -> list[float]:
     """Compute sigmoid-based similarity scores for each query against a model.
 
+    Uses :data:`DEFAULT_DELTA` (unit costs by default; set to
+    :func:`weighted_delta` for body-region-aware scoring).
+
     Args:
         query_programs: Test programs to score
         model_programs: Model programs (from training)
@@ -801,14 +1093,21 @@ def _compute_sigmoid_scores(
     """
     from edist.uted import uted
 
+    delta = DEFAULT_DELTA
+
     scores = []
     for query in query_programs:
-        # Compute distances to all model programs
+        # Compute weighted distances to every model program.
+        # We intentionally do NOT normalize by tree size here: the raw
+        # weighted distances (~2-4) sit in the region where the sigmoid
+        # function has the highest gradient, giving maximum discriminative
+        # power.  Normalizing would compress values to ~0.2-0.3 where
+        # σ is nearly flat.
         dists = np.array([
             uted(
                 query.nodes, query.adj,
                 model.nodes, model.adj,
-                delta=None,
+                delta=delta,
             )
             for model in model_programs
         ])

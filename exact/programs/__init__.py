@@ -9,6 +9,14 @@ from .edit_distance import (
     _compute_row_distances,
     ProgramDistanceMatrix,
     VALUE_TOLERANCE,
+    weighted_delta,
+    DEFAULT_DELTA,
+    JOINT_GROUPS,
+    JOINT_TO_GROUP,
+    COST_SAME_REGION,
+    COST_MIRROR,
+    COST_ADJACENT,
+    COST_DISTANT,
 )
 from .selection import (
     SelectionResult,
