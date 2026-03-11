@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 import torch
 
 from exact.data.env import HumEnv, extract_joint_positions, JOINT_POS_DIM
@@ -248,50 +249,39 @@ def load_labels(label_path: str) -> dict:
 def save_pose_data(
     pose_path: str,
     poses: np.ndarray,
+    video_name: str = "augmented",
+    scorer: str = "ESK",
 ) -> None:
-    """Save pose data to ESK HDF5 format.
-    
+    """Save pose data to ESK HDF5 format via pandas (PyTables-compatible).
+
+    Uses ``pd.DataFrame.to_hdf`` so the resulting file has all the PyTables
+    metadata attributes that ``pd.read_hdf`` (and DLC2Action) expect.
+
     Args:
         pose_path: Output path for pose HDF5 file
         poses: Pose array of shape [num_frames, 96]
+        video_name: Individual/video identifier stored in column MultiIndex
+        scorer: Scorer level stored in column MultiIndex
     """
-    num_frames = len(poses)
-    
-    # Create structured array matching ESK format
-    dtype = np.dtype([
-        ("index", "<i8"),
-        ("values_block_0", "<f4", (96,)),
-    ])
-    
-    table = np.zeros(num_frames, dtype=dtype)
-    table["index"] = np.arange(num_frames)
-    table["values_block_0"] = poses.astype(np.float32)
-    
-    # Create HDF5 file with proper structure
+    from exact.encoder import SMPL_KEYPOINTS
+
+    num_frames, num_cols = poses.shape
+    assert num_cols == 96, f"Expected 96 columns (24 joints * 4), got {num_cols}"
+
+    # Build DLC-style MultiIndex columns: (scorer, individual, bodypart, coord)
+    coords = ["x", "y", "z", "likelihood"]
+    tuples = []
+    for kp in SMPL_KEYPOINTS:
+        for c in coords:
+            tuples.append((scorer, video_name, kp, c))
+    columns = pd.MultiIndex.from_tuples(
+        tuples, names=["scorer", "individuals", "bodyparts", "coords"]
+    )
+
+    df = pd.DataFrame(poses.astype(np.float32), columns=columns)
+
     Path(pose_path).parent.mkdir(parents=True, exist_ok=True)
-    
-    with h5py.File(pose_path, "w") as f:
-        # Create tracks group
-        tracks = f.create_group("tracks")
-        
-        # Create table dataset
-        tracks.create_dataset("table", data=table)
-        
-        # Create minimal index structure (required by DLC2Action)
-        _i_table = tracks.create_group("_i_table")
-        index = _i_table.create_group("index")
-        
-        # Empty index arrays (not used but required for format compatibility)
-        index.create_dataset("abounds", data=np.array([], dtype=np.int64))
-        index.create_dataset("bounds", data=np.zeros((0, 127), dtype=np.int64))
-        index.create_dataset("indices", data=np.zeros((0, 131072), dtype=np.uint32))
-        index.create_dataset("indicesLR", data=np.zeros(131072, dtype=np.uint32))
-        index.create_dataset("mbounds", data=np.array([], dtype=np.int64))
-        index.create_dataset("mranges", data=np.array([], dtype=np.int64))
-        index.create_dataset("ranges", data=np.zeros((0, 2), dtype=np.int64))
-        index.create_dataset("sorted", data=np.zeros((0, 131072), dtype=np.int64))
-        index.create_dataset("sortedLR", data=np.zeros(131201, dtype=np.int64))
-        index.create_dataset("zbounds", data=np.array([], dtype=np.int64))
+    df.to_hdf(pose_path, key="tracks", mode="w", format="table")
 
 
 def save_labels(
