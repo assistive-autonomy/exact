@@ -119,9 +119,14 @@ def main(cfg: DictConfig):
     logger.info("Activity Segmentation Configuration")
     logger.info(f"\n{OmegaConf.to_yaml(cfg)}")
 
-    # Unwrap the segmentation config group if present
-    if "segmentation" in cfg:
-        cfg = cfg.segmentation
+    # Unwrap nested config groups introduced by Hydra's directory-based naming
+    # e.g. segmentation/augmented/esk_activities → cfg.segmentation.augmented.{...}
+    while "project" not in cfg:
+        keys = list(cfg.keys())
+        if len(keys) == 1:
+            cfg = cfg[keys[0]]
+        else:
+            break
 
     # Extract project configuration
     project_cfg = cfg.project

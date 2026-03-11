@@ -8,7 +8,7 @@
 # Three experimental conditions per dataset:
 #   original   — baseline: train on real data only
 #   perturbed  — robustness: train on temporally perturbed annotations
-#   augmented  — proposed:  add synthetic sequences (10 or 20 per class)
+#   augmented  — proposed:  train on original + all synthetic data
 #
 # Datasets: ESK verbs, ESK activities, HumanAct12
 #
@@ -28,7 +28,7 @@
 # =============================================================================
 set -euo pipefail
 
-cd /pvc/exact
+#cd /pvc/exact
 
 SCRIPT="scripts/tasks/segmentation.py"
 
@@ -83,26 +83,15 @@ if should_run perturbed humanact12; then
     run_config "segmentation/perturbed/humanact12" "HumanAct12 — perturbed"
 fi
 
-# ─── Condition 3: Augmented +10 synthetic samples per class ─────────────────
+# ─── Condition 3: Augmented (original + all synthetic data) ─────────────────
 if should_run augmented esk_activities; then
-    run_config "segmentation/augmented/esk_activities_10synth" "ESK Activities — augmented (10 synth)"
+    run_config "segmentation/augmented/esk_activities" "ESK Activities — augmented"
 fi
-if should_run augmented esk_verbs; then
-    run_config "segmentation/augmented/esk_verbs_10synth" "ESK Verbs — augmented (10 synth)"
-fi
+# if should_run augmented esk_verbs; then
+#     run_config "segmentation/augmented/esk_verbs" "ESK Verbs — augmented"
+# fi
 if should_run augmented humanact12; then
-    run_config "segmentation/augmented/humanact12_10synth" "HumanAct12 — augmented (10 synth)"
-fi
-
-# ─── Condition 4: Augmented +20 synthetic samples per class ─────────────────
-if should_run augmented esk_activities; then
-    run_config "segmentation/augmented/esk_activities_20synth" "ESK Activities — augmented (20 synth)"
-fi
-if should_run augmented esk_verbs; then
-    run_config "segmentation/augmented/esk_verbs_20synth" "ESK Verbs — augmented (20 synth)"
-fi
-if should_run augmented humanact12; then
-    run_config "segmentation/augmented/humanact12_20synth" "HumanAct12 — augmented (20 synth)"
+    run_config "segmentation/augmented/humanact12" "HumanAct12 — augmented"
 fi
 
 echo ""
