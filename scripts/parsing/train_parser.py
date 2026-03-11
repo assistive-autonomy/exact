@@ -198,12 +198,37 @@ class GenerationEvalCallback(TrainerCallback):
         return self._eval_samples
 
     def on_step_end(self, args, state, control, **kwargs):
-        if not state.is_world_process_zero:
-            return
-        if (
+        # All ranks must agree on whether this step triggers a generation eval
+        # so that the barrier pair below is always matched.
+        should_eval = (
             state.global_step > 0
             and state.global_step % self.every_n_steps == 0
-        ):
+        )
+        if not should_eval:
+            return
+
+        # ── DDP synchronisation ─────────────────────────────────────────────
+        # 1. All ranks rendezvous at barrier_enter.
+        # 2. Rank 0 runs generation eval (can take several minutes).
+        #    Non-zero ranks skip straight to the broadcast.
+        # 3. Rank 0 broadcasts should_training_stop so *all* ranks agree on
+        #    whether to exit the training loop.  Without this, rank 0 would
+        #    break out while ranks 1-N continue into DDP gradient all-reduce,
+        #    causing an NCCL watchdog timeout (SIGABRT) after 30 min.
+        # 4. All ranks hit barrier_exit and proceed together.
+        _dist_active = (
+            torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        )
+        _broadcast_device = (
+            "cuda" if torch.cuda.is_available() else "cpu"
+        ) if _dist_active else None
+
+        if _dist_active:
+            torch.distributed.barrier()   # barrier_enter
+
+        # ── Rank 0: run generation eval ───────────────────────────────────
+        if state.is_world_process_zero:
             logger.info(
                 f"[Step {state.global_step}] Running mid-training generation eval "
                 f"({self.n_samples} samples)..."
@@ -234,7 +259,7 @@ class GenerationEvalCallback(TrainerCallback):
                     f"edit_dist={edit_dist if edit_dist is not None else 'N/A'}"
                 )
 
-                # ── Track best generation edit distance ─────────────────
+                # ── Track best generation edit distance ─────────────
                 if edit_dist is not None:
                     if edit_dist < self._best_edit_distance:
                         self._best_edit_distance = edit_dist
@@ -276,7 +301,7 @@ class GenerationEvalCallback(TrainerCallback):
                             f"(patience {self._no_improve_count}/{self.gen_early_stopping_patience})"
                         )
 
-                    # ── Generation-based early stopping ─────────────────
+                    # ── Generation-based early stopping ─────────────
                     if (
                         self.gen_early_stopping_patience > 0
                         and self._no_improve_count >= self.gen_early_stopping_patience
@@ -301,6 +326,17 @@ class GenerationEvalCallback(TrainerCallback):
             finally:
                 if was_training:
                     self.parser_model.train()
+
+        # ── All ranks: sync early-stopping decision, then release ─────────
+        if _dist_active:
+            stop_tensor = torch.tensor(
+                [int(control.should_training_stop)],
+                dtype=torch.int32,
+                device=_broadcast_device,
+            )
+            torch.distributed.broadcast(stop_tensor, src=0)
+            control.should_training_stop = bool(stop_tensor.item())
+            torch.distributed.barrier()       # barrier_exit
 
 
 class AlignmentLoggingCallback(TrainerCallback):
@@ -392,7 +428,12 @@ class CurriculumCallback(TrainerCallback):
         if self._total_steps is None or self._total_steps == 0:
             return
 
-        progress = state.global_step / self._total_steps
+        # [v5 FIX] Use epoch-based progress instead of step-based.
+        # Step-based progress was broken because curriculum filtering shrinks
+        # the dataset, reducing actual steps while max_steps stays based on
+        # the full dataset size.  Epoch-based progress is independent of
+        # dataset filtering.
+        progress = state.epoch / args.num_train_epochs
 
         if progress < self.phase1_end:
             self._set_phase(1)
@@ -853,20 +894,25 @@ def main():
                 override_cfg = OmegaConf.from_dotlist(args.overrides)
                 cfg = OmegaConf.merge(cfg, override_cfg)
     else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = Path(cfg.get("output_dir", "results/parser")) / timestamp
+        base_dir = Path(cfg.get("output_dir", "results/parser"))
+        coord_file = base_dir / ".ddp_run_dir"
         if is_main_process:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir = base_dir / timestamp
             output_dir.mkdir(parents=True, exist_ok=True)
             OmegaConf.save(cfg, output_dir / "config.yaml")
-        # Ensure all ranks wait for rank 0 to create the directory
-        if world_size > 1:
-            import torch.distributed as dist
-            if dist.is_initialized():
-                dist.barrier()
-            else:
-                # Not yet initialized — directory will exist by the time Trainer needs it
-                pass
-        output_dir.mkdir(parents=True, exist_ok=True)  # no-op on rank 0, creates on others if needed
+            # Write chosen directory to a coordination file so all ranks agree
+            if world_size > 1:
+                coord_file.write_text(str(output_dir))
+        else:
+            # Wait for rank 0 to create the coordination file (up to 60 s)
+            import time
+            for _ in range(60):
+                if coord_file.exists():
+                    break
+                time.sleep(1)
+            output_dir = Path(coord_file.read_text().strip())
+            output_dir.mkdir(parents=True, exist_ok=True)
 
     run_name = output_dir.name
 
