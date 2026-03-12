@@ -74,11 +74,12 @@ def crop_program_and_motion(
         (zero-padded) and ``new_program`` has renumbered frame indices.
     """
     segments = parse_program_segments(program)
-    if len(segments) <= 1:
-        # Single-segment programs cannot be cropped further
-        return program, obs
-
     num_segments = len(segments)
+
+    # Need strictly more segments than min_segments so randint(min, num-1)
+    # has a valid range (num-1 >= min_segments  →  num > min_segments).
+    if num_segments <= min_segments:
+        return program, obs
 
     # Pick how many contiguous segments to keep
     keep_count = rng.randint(min_segments, num_segments - 1)
@@ -141,8 +142,30 @@ def preload_h5_to_cache(h5_path: str) -> Path:
 
     Returns the cache path.  Safe to call from multiple processes —
     an atomic rename prevents readers from seeing a half-written file.
+
+    In a DDP context, only rank 0 builds the cache; other ranks wait
+    for it to appear (avoids 4× redundant I/O and peak RAM).
     """
+    import os as _os
+
     cache_path = _cache_path_for(h5_path)
+
+    # ── DDP-aware: let rank 0 build, others wait ───────────────────────
+    local_rank = int(_os.environ.get("LOCAL_RANK", 0))
+    world_size = int(_os.environ.get("WORLD_SIZE", 1))
+
+    if world_size > 1 and local_rank != 0:
+        # Wait for rank 0 to finish writing the cache
+        import torch.distributed as dist
+        if dist.is_initialized():
+            logger.info(
+                f"[rank {local_rank}] Waiting for rank 0 to build cache …"
+            )
+            dist.barrier()
+            if cache_path.exists():
+                return cache_path
+            # Fallthrough: rank 0 didn't build it (shouldn't happen)
+
     fingerprint = _h5_fingerprint(h5_path)
 
     logger.info(f"Building .pt cache from {h5_path} …")
@@ -174,10 +197,21 @@ def preload_h5_to_cache(h5_path: str) -> Path:
         "fingerprint": fingerprint,
     }
 
-    # Atomic write: save to a temp file first, then rename
-    tmp_path = cache_path.with_suffix(".pt.tmp")
+    # Atomic write: save to a per-process temp file, then rename.
+    # Using the PID makes the tmp path unique so concurrent DDP workers
+    # don't clobber each other's in-progress write.  If another rank
+    # finishes the rename first that is fine — we just discard our copy.
+    tmp_path = cache_path.with_suffix(f".pt.tmp.{_os.getpid()}")
     torch.save(payload, tmp_path)
-    tmp_path.rename(cache_path)
+    try:
+        tmp_path.rename(cache_path)
+    except FileNotFoundError:
+        # Another DDP rank already renamed its own tmp → cache exists.
+        # Verify the cache is present and remove our temp file.
+        tmp_path.unlink(missing_ok=True)
+        if not cache_path.exists():
+            raise  # Genuinely missing — re-raise
+        logger.info(f"Cache already written by another process, discarding duplicate.")
 
     elapsed = time.time() - t0
     logger.info(
@@ -185,6 +219,13 @@ def preload_h5_to_cache(h5_path: str) -> Path:
         f"({len(programs)} samples, {obs_stacked.nbytes / 1024**3:.1f} GB, "
         f"{elapsed:.1f}s)"
     )
+
+    # ── Signal other DDP ranks that the cache is ready ─────────────────
+    if world_size > 1 and local_rank == 0:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            dist.barrier()
+
     return cache_path
 
 
@@ -297,7 +338,8 @@ def load_motion_data(h5_path: str, local_cache_dir: str | None = None) -> Tuple[
     cache_path = _cache_path_for(h5_path)
     fingerprint = _h5_fingerprint(h5_path)
 
-    # Ensure the .pt cache file exists on NFS
+    # Ensure the .pt cache file exists on NFS.
+    # In DDP, only rank 0 builds; others wait at the barrier inside.
     if not cache_path.exists():
         preload_h5_to_cache(h5_path)
 
