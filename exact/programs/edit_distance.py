@@ -20,7 +20,7 @@ with open(_GRAMMAR_PATH, "r") as f:
 _PARSER = Lark(_GRAMMAR, start="start", parser="earley")
 
 
-# Value tolerance for comparing numeric values
+# Value tolerance for comparing numeric values (kept for backward compat)
 VALUE_TOLERANCE = 0.3
 
 
@@ -62,8 +62,8 @@ _ADJACENT_GROUPS: set[frozenset[str]] = {
 
 
 def _is_value_label(label: str) -> bool:
-    """Check if a node label is a normalized value bucket."""
-    return label.startswith("v:")
+    """Check if a node label is a value/sign label."""
+    return label.startswith("v:") or label in ("pos", "neg")
 
 
 def _get_value_from_label(label: str) -> float:
@@ -90,28 +90,51 @@ def _parse_composite_label(label: str) -> tuple[str, str, str | None] | None:
     return joint, axis, value
 
 
-# -- Cost constants (tuned via grid search on HumanAct12) ----------------
-# Joint distributions look very similar across activities, so joint region
-# costs are intentionally low to let *tree structure* dominate.  Axis and
-# value costs are kept modest because the discriminative signal lives in
-# which joints are *present* rather than which axis/value they use.
+# -- Cost constants -----------------------------------------------------------
+# Costs are calibrated so that:
+#
+#   1. *Correct joints and values get strong reward* — matching or nearby
+#      sensors are nearly free (0.0–0.2), so programs from the same activity
+#      produce small total distances (≈0–3).
+#   2. *Completely wrong body parts are severely penalised* — COST_DISTANT
+#      (4.0 per sensor pair) drives cross-activity distances to 8–20+.
+#   3. The biased sigmoid ``σ(bias - k·d)`` maps d≈0 → score≈1.0 and
+#      d≈8+ → score≈0, giving the full [0, 1] range in the AUC matrix.
+#
+# Hierarchy (low → high cost):
+#   wrong sign < same region < axis < mirror < adjacent < indel < distant
+#
+# UTED optimality: 2×SENSOR_INDEL (5.0) > max substitution
+# (DISTANT + AXIS + SIGN = 4.45) so the solver always substitutes rather
+# than bypassing body-region costs via delete+insert.
 
+#: Substitution: same joint & axis, wrong sign (best partial credit)
+COST_SIGN_MISMATCH = 0.1
 #: Substitution: joint in same body region (e.g. lhand ↔ lwrist)
-COST_SAME_REGION = 0.25
-#: Substitution: mirror joint (e.g. lhand ↔ rhand)
+COST_SAME_REGION = 0.2
+#: Substitution: different axis on same/similar joint
+COST_AXIS = 0.35
+#: Substitution: mirror joint (e.g. lhand ↔ rhand) — correct part, wrong side
 COST_MIRROR = 0.5
 #: Substitution: adjacent body region (e.g. lhand ↔ lhip, torso ↔ larm)
-COST_ADJACENT = 1.0
-#: Substitution: distant body region (e.g. lhand ↔ rankle)
-COST_DISTANT = 2.0
-#: Substitution: different axis on otherwise identical sensor
-COST_AXIS = 0.3
-#: Maximum value-difference contribution
-COST_VALUE_CAP = 0.5
+COST_ADJACENT = 1.5
 #: Insertion / deletion of a composite sensor node
-COST_SENSOR_INDEL = 1.5
-#: Insertion / deletion of a structural node (start / motion)
-COST_STRUCTURAL_INDEL = 0.05
+COST_SENSOR_INDEL = 2.5
+#: Substitution: distant body region (e.g. lhand ↔ rankle) — **most** expensive
+COST_DISTANT = 4.0
+#: Insertion / deletion of a motion segment node (segment count matters slightly)
+COST_MOTION_INDEL = 0.15
+#: Insertion / deletion of the start node (structural, near-free)
+COST_START_INDEL = 0.01
+#: Kept for backward compatibility — maps to :data:`COST_START_INDEL`.
+COST_STRUCTURAL_INDEL = COST_START_INDEL
+
+#: Sigmoid bias.  ``σ(bias - k·d)`` with ``bias > 0`` means a perfect
+#: match (d=0) scores ``σ(bias) ≈ 1.0``, giving the full [0, 1] range.
+SIGMOID_BIAS = 6.0
+#: Sigmoid temperature.  Controls decay speed with distance.
+#: With bias=6, k=0.8:  d=0 → 0.998, d=4 → 0.83, d=8 → 0.27, d=12 → 0.02.
+SIGMOID_TEMPERATURE = 0.8
 
 def weighted_delta(a: Optional[str], b: Optional[str]) -> float:
     """Body-region-aware cost function for tree edit distance.
@@ -126,17 +149,20 @@ def weighted_delta(a: Optional[str], b: Optional[str]) -> float:
     low so that overall tree structure (number/arrangement of sensors)
     dominates over individual joint identity:
 
-    Composite sensor substitution (joint.axis:value ↔ joint.axis:value):
+    Composite sensor substitution (joint.axis:sign ↔ joint.axis:sign):
         Same label                   → 0.0
-        Same region joint            → 0.25  (+ axis/value penalty)
-        Mirror joint (l↔r)           → 0.5   (+ axis/value penalty)
-        Adjacent region              → 1.0   (+ axis/value penalty)
-        Distant region               → 2.0   (+ axis/value penalty)
-        (axis mismatch adds 0.3, value diff adds ≤ 0.5)
+        Same joint+axis, wrong sign  → 0.1   (best partial credit)
+        Same region joint            → 0.2   (+ axis/sign penalty)
+        Different axis               → +0.35 (additive)
+        Mirror joint (l↔r)           → 0.5   (+ axis/sign penalty)
+        Adjacent region              → 1.5   (+ axis/sign penalty)
+        Distant region               → 4.0   (+ axis/sign penalty)
+        (axis mismatch adds 0.35, sign mismatch adds 0.1)
 
     Insertion / deletion:
-        Composite sensor             → 1.5
-        Structural node              → 0.05
+        Composite sensor             → 2.5   (missing predicate)
+        Motion segment               → 0.15  (segment count)
+        Start node                   → 0.01  (structural, near-free)
 
     Falls back to per-token costs for non-collapsed (legacy) trees.
     """
@@ -148,11 +174,13 @@ def weighted_delta(a: Optional[str], b: Optional[str]) -> float:
         # Composite sensor label?
         if _parse_composite_label(node) is not None:
             return COST_SENSOR_INDEL
+        if node == "motion":
+            return COST_MOTION_INDEL
         if node in STRUCTURAL_NODES:
-            return COST_STRUCTURAL_INDEL
+            return COST_START_INDEL
         # Legacy individual tokens
         if node in ALL_JOINTS:
-            return 1.5
+            return COST_SENSOR_INDEL
         if node in ALL_AXES:
             return 0.5
         if _is_value_label(node):
@@ -187,15 +215,13 @@ def weighted_delta(a: Optional[str], b: Optional[str]) -> float:
             else:
                 cost += COST_DISTANT
 
-        # -- Axis (secondary signal) --
+        # -- Axis (same joint, different axis → clearly different sensor) --
         if axis_a != axis_b:
             cost += COST_AXIS
 
-        # -- Value (amplified — movement amplitude varies across activities) --
+        # -- Sign (only care if positive or negative — binary match) --
         if val_a and val_b and val_a != val_b:
-            va = _get_value_from_label(val_a)
-            vb = _get_value_from_label(val_b)
-            cost += min(abs(va - vb), COST_VALUE_CAP)
+            cost += COST_SIGN_MISMATCH
 
         return cost
 
@@ -216,8 +242,7 @@ def weighted_delta(a: Optional[str], b: Optional[str]) -> float:
         return COST_AXIS
 
     if _is_value_label(a) and _is_value_label(b):
-        diff = abs(_get_value_from_label(a) - _get_value_from_label(b))
-        return min(diff, COST_VALUE_CAP)
+        return 0.0 if a == b else COST_SIGN_MISMATCH
 
     if a in STRUCTURAL_NODES and b in STRUCTURAL_NODES:
         return 0.0
@@ -256,20 +281,12 @@ class ProgramTree:
 
 
 def _normalize_value(value: float) -> str:
-    """Normalize numeric value to a bucket for tolerance-aware comparison.
-    
-    Values within VALUE_TOLERANCE are mapped to the same bucket.
-    This makes values like 0.3 and 0.5 (diff=0.2 < 0.3) compare as equal.
-    
-    Args:
-        value: Numeric value from program
-        
-    Returns:
-        Bucket label string (e.g., "v:0.3" for values in [0.15, 0.45))
+    """Encode value as its sign: ``"pos"`` or ``"neg"``.
+
+    Only the sign of the value matters for edit-distance comparison.
+    Positive (including zero) maps to ``"pos"``, negative to ``"neg"``.
     """
-    # Round to nearest bucket center
-    bucket = round(value / VALUE_TOLERANCE) * VALUE_TOLERANCE
-    return f"v:{bucket:.1f}"
+    return "pos" if value >= 0 else "neg"
 
 
 def _tree_to_nodes_adj(tree: Union[Tree, Token], nodes: list, adj: list, parent_idx: Optional[int] = None) -> int:
@@ -1098,11 +1115,10 @@ def _compute_sigmoid_scores(
     scores = []
     for query in query_programs:
         # Compute weighted distances to every model program.
-        # We intentionally do NOT normalize by tree size here: the raw
-        # weighted distances (~2-4) sit in the region where the sigmoid
-        # function has the highest gradient, giving maximum discriminative
-        # power.  Normalizing would compress values to ~0.2-0.3 where
-        # σ is nearly flat.
+        # We do NOT normalize by tree size: the raw weighted distances
+        # are transformed by a biased sigmoid σ(bias - k·d) so that:
+        #   d=0 (exact match) → score ≈ 1.0
+        #   d=8+ (different body parts) → score ≈ 0
         dists = np.array([
             uted(
                 query.nodes, query.adj,
@@ -1112,12 +1128,16 @@ def _compute_sigmoid_scores(
             for model in model_programs
         ])
 
+        # Biased sigmoid: σ(bias - k·d)
+        k = SIGMOID_TEMPERATURE
+        b = SIGMOID_BIAS
+
         if method == "mean-sigmoid":
-            # mean over i of sigma(-edist(model_i, query))
-            score = float(np.mean(_sigmoid(-dists)))
+            # mean over i of sigma(bias - k * edist(model_i, query))
+            score = float(np.mean(_sigmoid(b - k * dists)))
         elif method == "min-sigmoid":
-            # sigma(-min_i edist(model_i, query))
-            score = float(_sigmoid(np.array([-dists.min()]))[0])
+            # sigma(bias - k * min_i edist(model_i, query))
+            score = float(_sigmoid(np.array([b - k * dists.min()]))[0])
         else:
             raise ValueError(f"Unknown method: {method}")
 

@@ -17,6 +17,13 @@ from .edit_distance import (
     COST_MIRROR,
     COST_ADJACENT,
     COST_DISTANT,
+    COST_SENSOR_INDEL,
+    COST_MOTION_INDEL,
+    COST_START_INDEL,
+    COST_SIGN_MISMATCH,
+    COST_AXIS,
+    SIGMOID_BIAS,
+    SIGMOID_TEMPERATURE,
 )
 from .selection import (
     SelectionResult,

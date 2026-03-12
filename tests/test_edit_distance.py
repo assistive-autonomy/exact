@@ -22,23 +22,23 @@ class TestWeightedDelta:
         from exact.programs.edit_distance import weighted_delta, COST_SAME_REGION
         # lhand <-> lwrist = same region (left_arm), same axis & sign
         cost = weighted_delta("lhand.x:pos", "lwrist.x:pos")
-        assert cost == COST_SAME_REGION
+        assert cost == COST_SAME_REGION  # 0.2
 
     def test_mirror_composite(self):
         from exact.programs.edit_distance import weighted_delta, COST_MIRROR
         cost = weighted_delta("lhand.x:pos", "rhand.x:pos")
-        assert cost == COST_MIRROR
+        assert cost == COST_MIRROR  # 0.5
 
     def test_adjacent_region_composite(self):
         from exact.programs.edit_distance import weighted_delta, COST_ADJACENT
         # lhand <-> lhip = adjacent (left_arm <-> left_leg)
         cost = weighted_delta("lhand.x:pos", "lhip.x:pos")
-        assert cost == COST_ADJACENT
+        assert cost == COST_ADJACENT  # 1.5
 
     def test_distant_region_composite(self):
         from exact.programs.edit_distance import weighted_delta, COST_DISTANT
         cost = weighted_delta("lhand.x:pos", "rankle.x:pos")
-        assert cost == COST_DISTANT
+        assert cost == COST_DISTANT  # 4.0
 
     def test_axis_mismatch_adds_cost(self):
         from exact.programs.edit_distance import weighted_delta, COST_AXIS
@@ -50,7 +50,20 @@ class TestWeightedDelta:
         from exact.programs.edit_distance import weighted_delta, COST_SIGN_MISMATCH
         same_sign = weighted_delta("lhand.x:pos", "lhand.x:pos")
         diff_sign = weighted_delta("lhand.x:pos", "lhand.x:neg")
-        assert diff_sign - same_sign == pytest.approx(COST_SIGN_MISMATCH)
+        assert diff_sign - same_sign == pytest.approx(COST_SIGN_MISMATCH)  # 0.1
+
+    def test_partial_credit_hierarchy(self):
+        """distant > missing > adjacent > mirror > same region > wrong sign."""
+        from exact.programs.edit_distance import weighted_delta
+
+        wrong_sign = weighted_delta("lhand.x:pos", "lhand.x:neg")
+        same_region = weighted_delta("lhand.x:pos", "lwrist.x:pos")
+        mirror = weighted_delta("lhand.x:pos", "rhand.x:pos")
+        adjacent = weighted_delta("lhand.x:pos", "lhip.x:pos")
+        missing = weighted_delta("lhand.x:pos", None)
+        distant = weighted_delta("lhand.x:pos", "rankle.x:pos")
+
+        assert wrong_sign < same_region < mirror < adjacent < missing < distant
 
     def test_same_sign_no_value_cost(self):
         from exact.programs.edit_distance import weighted_delta
@@ -59,13 +72,45 @@ class TestWeightedDelta:
 
     def test_composite_indel_cost(self):
         from exact.programs.edit_distance import weighted_delta, COST_SENSOR_INDEL
-        assert weighted_delta("lhand.x:pos", None) == COST_SENSOR_INDEL
+        assert weighted_delta("lhand.x:pos", None) == COST_SENSOR_INDEL  # 2.5
         assert weighted_delta(None, "rankle.z:neg") == COST_SENSOR_INDEL
 
+    def test_motion_indel_cost(self):
+        from exact.programs.edit_distance import weighted_delta, COST_MOTION_INDEL
+        assert weighted_delta("motion", None) == COST_MOTION_INDEL  # 0.15
+        assert weighted_delta(None, "motion") == COST_MOTION_INDEL
+
     def test_structural_indel_cheap(self):
-        from exact.programs.edit_distance import weighted_delta, COST_STRUCTURAL_INDEL
-        assert weighted_delta("start", None) == COST_STRUCTURAL_INDEL
-        assert weighted_delta(None, "motion") == COST_STRUCTURAL_INDEL
+        from exact.programs.edit_distance import weighted_delta, COST_START_INDEL
+        assert weighted_delta("start", None) == COST_START_INDEL  # 0.01
+
+    def test_uted_prefers_substitution_over_delete_insert(self):
+        """2 × SENSOR_INDEL must exceed the maximum substitution cost.
+
+        This ensures the UTED solver always pairs distant sensors via
+        substitution rather than bypassing body-region costs with
+        delete + insert.
+        """
+        from exact.programs.edit_distance import (
+            COST_SENSOR_INDEL, COST_DISTANT, COST_AXIS, COST_SIGN_MISMATCH,
+        )
+        max_sub = COST_DISTANT + COST_AXIS + COST_SIGN_MISMATCH
+        assert 2 * COST_SENSOR_INDEL > max_sub  # 5.0 > 4.45
+
+    def test_biased_sigmoid_full_range(self):
+        """Biased sigmoid gives full [0, 1] range: d=0 → ≈1, d=large → ≈0."""
+        from exact.programs.edit_distance import (
+            _sigmoid, SIGMOID_BIAS, SIGMOID_TEMPERATURE,
+        )
+        import numpy as np
+
+        # Perfect match
+        score_zero = float(_sigmoid(np.array([SIGMOID_BIAS]))[0])
+        assert score_zero > 0.99
+
+        # Very different programs (d=15)
+        score_far = float(_sigmoid(np.array([SIGMOID_BIAS - SIGMOID_TEMPERATURE * 15]))[0])
+        assert score_far < 0.05
 
     def test_structural_substitution_free(self):
         from exact.programs.edit_distance import weighted_delta
