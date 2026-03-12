@@ -87,9 +87,9 @@ fi
 if should_run augmented esk_activities; then
     run_config "segmentation/augmented/esk_activities" "ESK Activities — augmented"
 fi
-# if should_run augmented esk_verbs; then
-#     run_config "segmentation/augmented/esk_verbs" "ESK Verbs — augmented"
-# fi
+if should_run augmented esk_verbs; then
+    run_config "segmentation/augmented/esk_verbs" "ESK Verbs — augmented"
+fi
 if should_run augmented humanact12; then
     run_config "segmentation/augmented/humanact12" "HumanAct12 — augmented"
 fi

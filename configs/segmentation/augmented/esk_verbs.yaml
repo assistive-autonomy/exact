@@ -67,7 +67,7 @@ model:
   num_f_maps: 128
   feature_dim: null
 
-hyperparameter_search_epochs: 5
+hyperparameter_search_epochs: 10
 hyperparameter_search_trials: 10
 hyperparameter_search_metric: f1
 num_seeds: 3

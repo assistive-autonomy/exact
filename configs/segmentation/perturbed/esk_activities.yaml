@@ -32,7 +32,7 @@ data:
 training:
   lr: 0.001
   device: auto
-  num_epochs: 50
+  num_epochs: 30
   to_ram: false
   batch_size: 32  # Reduced from 64 to lower memory usage
   normalize: true
@@ -72,7 +72,7 @@ model:
   feature_dim: null
 
 hyperparameter_search_epochs: 10
-hyperparameter_search_trials: 20
+hyperparameter_search_trials: 10
 hyperparameter_search_metric: f1
 num_seeds: 3
 models: [ms_tcn3, c2f_tcn, edtcn, c2f_transformer]

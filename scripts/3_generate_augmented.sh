@@ -11,6 +11,9 @@
 #
 # Environment variables:
 #   NUM_SAMPLES=1000     Total synthetic samples per model file  (default: 1000)
+#   NUM_SAMPLES_VERBS=1000   Override sample count for ESK verbs  (default: NUM_SAMPLES)
+#   NUM_SAMPLES_ACTIVITY=1000  Override for ESK activities        (default: NUM_SAMPLES)
+#   NUM_SAMPLES_HUMANACT=1000  Override for HumanAct12            (default: NUM_SAMPLES)
 #   TRAJ_LEN_VERBS=50    Steps per trajectory for ESK verbs      (default: 50)
 #   TRAJ_LEN_ACTIVITY=350 Steps per trajectory for ESK activities(default: 350)
 #   TRAJ_LEN_HUMANACT=75 Steps per trajectory for HumanAct12     (default: 75)
@@ -38,6 +41,12 @@ HUMANACT12_PATH="${HUMANACT12_PATH:-../exact_data/benchmarks/humanact12}"
 MODELS_DIR="${MODELS_DIR:-../exact_data/models}"
 
 NUM_SAMPLES="${NUM_SAMPLES:-1000}"
+# Per-dataset sample counts — set independently to control aug/real ratio.
+# ESK has ~2M real train frames → need more samples to reach meaningful ratio.
+# HumanAct12 has ~56K real frames → fewer samples suffice.
+NUM_SAMPLES_VERBS="${NUM_SAMPLES_VERBS:-$NUM_SAMPLES}"
+NUM_SAMPLES_ACTIVITY="${NUM_SAMPLES_ACTIVITY:-$NUM_SAMPLES}"
+NUM_SAMPLES_HUMANACT="${NUM_SAMPLES_HUMANACT:-$NUM_SAMPLES}"
 # Per-dataset trajectory lengths based on median segment durations in training data:
 #   ESK verbs:    median=31, p75~50  → 50 steps
 #   ESK activity: median=333         → 350 steps
@@ -62,7 +71,6 @@ if [[ -n "${NUM_WORKERS:-}" ]]; then
 fi
 
 COMMON_ARGS=(
-    --num-samples "$NUM_SAMPLES"
     --relabel-workers "$RELABEL_WORKERS"
     --z-variants "$Z_VARIANTS"
     --buffer-batch-size "$BATCH_SIZE"
@@ -87,17 +95,18 @@ echo ""
 echo "============================================"
 echo "Stage 3: Generating Augmented Data (CPU-only, ${NUM_CPUS} cores)"
 echo "============================================"
-echo "  Samples per model: $NUM_SAMPLES"
+echo "  Samples (verbs/activity/humanact): $NUM_SAMPLES_VERBS / $NUM_SAMPLES_ACTIVITY / $NUM_SAMPLES_HUMANACT"
 echo "  Trajectory length (verbs/activity/humanact): $TRAJ_LEN_VERBS / $TRAJ_LEN_ACTIVITY / $TRAJ_LEN_HUMANACT"
 echo ""
 
 if [[ -f "$MODELS_DIR/models_verbs.json" ]]; then
-    echo "[1/3] ESK verbs  →  $ESK_PATH/augmented_verbs/  (traj_len=$TRAJ_LEN_VERBS)"
+    echo "[1/3] ESK verbs  →  $ESK_PATH/augmented_verbs/  (samples=$NUM_SAMPLES_VERBS, traj_len=$TRAJ_LEN_VERBS)"
     uv run scripts/data/generate_augmented_data.py \
         --models "$MODELS_DIR/models_verbs.json" \
         --output-dir "$ESK_PATH/augmented_verbs" \
         --video-name augmented_verbs \
         --trajectory-length "$TRAJ_LEN_VERBS" \
+        --num-samples "$NUM_SAMPLES_VERBS" \
         "${COMMON_ARGS[@]}"
     echo ""
 else
@@ -105,12 +114,13 @@ else
 fi
 
 if [[ -f "$MODELS_DIR/models_activity.json" ]]; then
-    echo "[2/3] ESK activities  →  $ESK_PATH/augmented_activity/  (traj_len=$TRAJ_LEN_ACTIVITY)"
+    echo "[2/3] ESK activities  →  $ESK_PATH/augmented_activity/  (samples=$NUM_SAMPLES_ACTIVITY, traj_len=$TRAJ_LEN_ACTIVITY)"
     uv run scripts/data/generate_augmented_data.py \
         --models "$MODELS_DIR/models_activity.json" \
         --output-dir "$ESK_PATH/augmented_activity" \
         --video-name augmented_activity \
         --trajectory-length "$TRAJ_LEN_ACTIVITY" \
+        --num-samples "$NUM_SAMPLES_ACTIVITY" \
         "${COMMON_ARGS[@]}"
     echo ""
 else
@@ -118,12 +128,13 @@ else
 fi
 
 if [[ -f "$MODELS_DIR/models_humanact12.json" ]]; then
-    echo "[3/3] HumanAct12  →  $HUMANACT12_PATH/augmented/  (traj_len=$TRAJ_LEN_HUMANACT)"
+    echo "[3/3] HumanAct12  →  $HUMANACT12_PATH/augmented/  (samples=$NUM_SAMPLES_HUMANACT, traj_len=$TRAJ_LEN_HUMANACT)"
     uv run scripts/data/generate_augmented_data.py \
         --models "$MODELS_DIR/models_humanact12.json" \
         --output-dir "$HUMANACT12_PATH/augmented" \
         --video-name augmented_humanact12 \
         --trajectory-length "$TRAJ_LEN_HUMANACT" \
+        --num-samples "$NUM_SAMPLES_HUMANACT" \
         "${COMMON_ARGS[@]}"
     echo ""
 else
