@@ -112,5 +112,5 @@ eval_samples: 16
 # Wandb
 report_to: wandb
 wandb_project: exact
-wandb_entity: assistive-autonomy
+wandb_entity: <CHOOSE_YOUR_ENTITY>
 wandb_mode: online

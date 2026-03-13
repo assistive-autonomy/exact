@@ -631,7 +631,7 @@ Examples:
     parser.add_argument(
         "--entity",
         type=str,
-        default="assistive-autonomy",
+        default="<CHOOSE_YOUR_ENTITY>",
         help="W&B entity/team",
     )
     parser.add_argument(
