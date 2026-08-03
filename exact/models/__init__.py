@@ -1,7 +1,8 @@
-"""Executable Activity Models module.
+"""Executable Behaviour Representations (EBR) module.
 
-This module provides classes for combining multiple activity programs
-into unified executable models using logical disjunction.
+This module provides classes for aggregating multiple ExAct programs, by action
+label, into executable behaviour representations using logical disjunction. (The
+class name ``ExecutableActivityModel`` is retained for backwards compatibility.)
 """
 
 from .executable import (

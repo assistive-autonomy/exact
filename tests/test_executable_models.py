@@ -1,4 +1,4 @@
-"""Tests for Executable Activity Models."""
+"""Tests for Executable Behaviour Representations (EBR)."""
 
 import json
 import tempfile

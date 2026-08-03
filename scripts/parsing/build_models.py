@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Build Executable Activity Models from parsed programs.
+"""Build Executable Behaviour Representations (EBR) from parsed programs.
 
 This script loads parsed programs (from parse_esk.py) and builds an
-ActivityModelCollection that can be used for:
+ActivityModelCollection (one EBR per action label) that can be used for:
 - Data augmentation (generate trajectories using BehaviourModel)
-- Anomaly detection (compare test programs to activity models)
+- Anomaly detection (compare test programs to the per-action EBR)
 
 The collection is saved as a JSON file with the following structure:
     {

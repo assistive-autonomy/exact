@@ -1,13 +1,25 @@
-# Understanding Human Actions through the Lens of Executable Models
+# Towards Human Motion World Models via Executable Behaviour Representations
 
 ![Python](https://img.shields.io/badge/Python->=3.10-blue?logo=python&logoColor=white)
 ![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04-orange?logo=ubuntu&logoColor=white)
 
-This repository contains a staged experimental pipeline for:
+<p align="center">
+  <img src="assets/overview.png" alt="Overview of executable behaviour representations: the parser is trained with synthetic data generation, then used in representation building to parse and aggregate ExAct programs from human motion-capture by action label." width="700">
+</p>
+
+We study learning **executable behaviour representations (EBR)** — a planning component of a
+human motion world model (HuMoWM) — from human motion-capture (MoCap). We introduce **ExAct**,
+a domain-specific language that represents human motion as underspecified programs over SMPL
+keypoints. ExAct programs compile to reward models for zero-shot policy inference, and their
+compositional structure lets us aggregate per-program policies, by action label, into EBR. We
+evaluate EBR on two tasks — human action segmentation and human action anomaly detection —
+across the HumanAct12, ESK Activities, and ESK Verbs datasets.
+
+This repository contains the staged experimental pipeline for that study:
 
 1. Generating synthetic program-motion data.
-2. Training and running the parser.
-3. Building executable models.
+2. Training and running the ExAct parser.
+3. Building executable behaviour representations (EBR).
 4. Running segmentation experiments.
 5. Running anomaly detection experiments.
 
@@ -72,7 +84,7 @@ Key output:
 
 - `../exact_data/programs/synthetic/train_diverse.h5`
 
-### Stage 2: Train parser, parse splits, build executable models
+### Stage 2: Train parser, parse splits, build executable behaviour representations (EBR)
 
 Script: `scripts/2_train_and_parse.sh`
 
@@ -80,7 +92,7 @@ Purpose:
 
 - Trains parser (DDP when multiple GPUs are available).
 - Parses train/val/test for ESK verbs, ESK activities, HumanAct12.
-- Builds executable model collections from train-split programs.
+- Builds executable behaviour representations (EBR) from train-split programs, aggregated by action label.
 
 Default run:
 
@@ -107,7 +119,7 @@ SKIP_BUILD=1 bash scripts/2_train_and_parse.sh
 Key outputs:
 
 - Parsed programs in `../exact_data/programs/parsed/`
-- Executable models in `../exact_data/models/`
+- Executable behaviour representations (EBR) in `../exact_data/models/`
 
 ### Stage 3: Generate augmented data for segmentation
 
@@ -115,7 +127,7 @@ Script: `scripts/3_generate_augmented.sh`
 
 Purpose:
 
-- Uses executable models from Stage 2 to synthesize augmented benchmark data.
+- Uses the executable behaviour representations (EBR) from Stage 2 to synthesize augmented benchmark data.
 - Produces augmented sets for ESK verbs, ESK activities, and HumanAct12.
 
 Default run:

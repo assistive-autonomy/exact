@@ -8,9 +8,9 @@ config file:
                  Trains one model per target activity; separability is measured
                  by each model's log-probability on every test activity.
 
-  mean_sigmoid — Executable activity models + program edit distance.
+  mean_sigmoid — Executable behaviour representations (EBR) + program edit distance.
                  Scores a test sequence by the *mean* sigmoid-transformed
-                 distance from the test program to each activity's program set.
+                 distance from the test program to each action's program set.
 
   min_sigmoid  — Same as above but uses the *minimum* distance rather than
                  the mean (picks the closest matching program in the model).

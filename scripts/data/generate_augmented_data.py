@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""Generate augmented motion data from Executable Activity Models (CPU-only).
+"""Generate augmented motion data from Executable Behaviour Representations (EBR) (CPU-only).
 
 Designed for CPU-only machines with many cores, following the same
 multiprocessing pattern as generate_data.py.
 
 Workflow:
-  1. Load pre-built executable activity models from JSON
-  2. Spawn one worker per activity (each with its own BehaviourModel on CPU)
+  1. Load pre-built executable behaviour representations (EBR) from JSON
+  2. Spawn one worker per action (each with its own BehaviourModel on CPU)
   3. Each worker pre-computes z vectors, then rolls out trajectories
   4. Collect results and write ESK-format dataset
 

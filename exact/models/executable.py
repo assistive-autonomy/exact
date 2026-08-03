@@ -1,9 +1,11 @@
-"""Executable Activity Models.
+"""Executable Behaviour Representations (EBR).
 
-This module implements the core logic for combining multiple activity motion
-programs into a single executable model using logical disjunction.
+This module implements the core logic for aggregating multiple ExAct motion
+programs, sharing an action label, into a single executable behaviour
+representation using logical disjunction. (The class name
+``ExecutableActivityModel`` is retained for backwards compatibility.)
 
-Given N programs p_1, p_2, ..., p_N for the same activity, we combine them
+Given N programs p_1, p_2, ..., p_N for the same action, we combine them
 into a single reward function using the formula:
 
     r = 1 - prod_{i=1}^{N} (1 - p_i(state))
