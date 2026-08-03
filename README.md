@@ -7,23 +7,7 @@
   <img src="assets/overview.png" alt="Overview of executable behaviour representations: the parser is trained with synthetic data generation, then used in representation building to parse and aggregate ExAct programs from human motion-capture by action label." width="700">
 </p>
 
-We study learning **executable behaviour representations (EBR)** — a planning component of a
-human motion world model (HuMoWM) — from human motion-capture (MoCap). We introduce **ExAct**,
-a domain-specific language that represents human motion as underspecified programs over SMPL
-keypoints. ExAct programs compile to reward models for zero-shot policy inference, and their
-compositional structure lets us aggregate per-program policies, by action label, into EBR. We
-evaluate EBR on two tasks — human action segmentation and human action anomaly detection —
-across the HumanAct12, ESK Activities, and ESK Verbs datasets.
-
-This repository contains the staged experimental pipeline for that study:
-
-1. Generating synthetic program-motion data.
-2. Training and running the ExAct parser.
-3. Building executable behaviour representations (EBR).
-4. Running segmentation experiments.
-5. Running anomaly detection experiments.
-
-The main workflow is implemented in `scripts/1_generate_data.sh` through `scripts/5_run_anomaly_detection.sh`.
+Human motion world models should capture motion’s intentionality by being executable: adaptable to different actions and supporting the assessment of motion quality. To achieve this, we introduce a domain-specific language ExAct that represents human motions as underspecified programs that can be compiled to a reward model for zero-shot policy inference. By leveraging the compositional nature of ExAct programs, we combine individual policies into executable behaviour representations. We evaluate the utility of the proposed approach by analysing human motion-capture for the tasks of human action segmentation and human action anomaly detection. Our results suggest that the improvement in data efficiency and a capture of intuitive relationships between human actions compared with task-specific models.
 
 ## 1. Setup
 
