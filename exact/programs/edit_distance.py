@@ -23,6 +23,13 @@ _PARSER = Lark(_GRAMMAR, start="start", parser="earley")
 # Value tolerance for comparing numeric values (kept for backward compat)
 VALUE_TOLERANCE = 0.3
 
+#: Width of each value quantisation bucket.  Values are binned into
+#: intervals of this width: [0, BIN_WIDTH), [BIN_WIDTH, 2×BIN_WIDTH), …
+#: so that movement-magnitude differences contribute to edit distance.
+VALUE_BIN_WIDTH = 0.4
+#: Maximum bucket index (values ≥ BIN_WIDTH×NUM are clamped).
+VALUE_NUM_BINS = 5
+
 
 # =============================================================================
 # Body-region groupings for weighted edit distance
@@ -63,7 +70,10 @@ _ADJACENT_GROUPS: set[frozenset[str]] = {
 
 def _is_value_label(label: str) -> bool:
     """Check if a node label is a value/sign label."""
-    return label.startswith("v:") or label in ("pos", "neg")
+    if label.startswith("v:") or label in ("pos", "neg"):
+        return True
+    # New bucket format: "b0".."b4" (positive) or "n0".."n4" (negative)
+    return len(label) == 2 and label[0] in ("b", "n") and label[1].isdigit()
 
 
 def _get_value_from_label(label: str) -> float:
@@ -104,12 +114,15 @@ def _parse_composite_label(label: str) -> tuple[str, str, str | None] | None:
 # Hierarchy (low → high cost):
 #   wrong sign < same region < axis < mirror < adjacent < indel < distant
 #
-# UTED optimality: 2×SENSOR_INDEL (5.0) > max substitution
-# (DISTANT + AXIS + SIGN = 4.45) so the solver always substitutes rather
-# than bypassing body-region costs via delete+insert.
+# UTED optimality: 2×SENSOR_INDEL (5.2) > max substitution
+# (DISTANT + AXIS + SIGN + 4×VALUE_STEP = 5.05) so the solver always
+# substitutes rather than bypassing body-region costs via delete+insert.
 
 #: Substitution: same joint & axis, wrong sign (best partial credit)
 COST_SIGN_MISMATCH = 0.1
+#: Graduated cost per value-bucket step (additive with sign mismatch).
+#: Bucket 0 vs bucket 2 costs 2 × COST_VALUE_STEP = 0.30.
+COST_VALUE_STEP = 0.15
 #: Substitution: joint in same body region (e.g. lhand ↔ lwrist)
 COST_SAME_REGION = 0.2
 #: Substitution: different axis on same/similar joint
@@ -119,7 +132,7 @@ COST_MIRROR = 0.5
 #: Substitution: adjacent body region (e.g. lhand ↔ lhip, torso ↔ larm)
 COST_ADJACENT = 1.5
 #: Insertion / deletion of a composite sensor node
-COST_SENSOR_INDEL = 2.5
+COST_SENSOR_INDEL = 2.6
 #: Substitution: distant body region (e.g. lhand ↔ rankle) — **most** expensive
 COST_DISTANT = 4.0
 #: Insertion / deletion of a motion segment node (segment count matters slightly)
@@ -131,10 +144,11 @@ COST_STRUCTURAL_INDEL = COST_START_INDEL
 
 #: Sigmoid bias.  ``σ(bias - k·d)`` with ``bias > 0`` means a perfect
 #: match (d=0) scores ``σ(bias) ≈ 1.0``, giving the full [0, 1] range.
-SIGMOID_BIAS = 6.0
+#: Calibrated for **raw** collapsed-tree distances in [0, ~8].
+SIGMOID_BIAS = 4.0
 #: Sigmoid temperature.  Controls decay speed with distance.
-#: With bias=6, k=0.8:  d=0 → 0.998, d=4 → 0.83, d=8 → 0.27, d=12 → 0.02.
-SIGMOID_TEMPERATURE = 0.8
+#: With bias=4, k=1:  d=0 → 0.98, d=2 → 0.88, d=4 → 0.50, d=6 → 0.12.
+SIGMOID_TEMPERATURE = 1.0
 
 def weighted_delta(a: Optional[str], b: Optional[str]) -> float:
     """Body-region-aware cost function for tree edit distance.
@@ -219,9 +233,9 @@ def weighted_delta(a: Optional[str], b: Optional[str]) -> float:
         if axis_a != axis_b:
             cost += COST_AXIS
 
-        # -- Sign (only care if positive or negative — binary match) --
-        if val_a and val_b and val_a != val_b:
-            cost += COST_SIGN_MISMATCH
+        # -- Value bucket (graduated cost: sign + magnitude) --
+        if val_a and val_b:
+            cost += _value_bucket_cost(val_a, val_b)
 
         return cost
 
@@ -242,13 +256,41 @@ def weighted_delta(a: Optional[str], b: Optional[str]) -> float:
         return COST_AXIS
 
     if _is_value_label(a) and _is_value_label(b):
-        return 0.0 if a == b else COST_SIGN_MISMATCH
+        return _value_bucket_cost(a, b)
 
     if a in STRUCTURAL_NODES and b in STRUCTURAL_NODES:
         return 0.0
 
     # Cross-type substitution (should be rare)
     return 5.0
+
+
+def _value_bucket_cost(val_a: str, val_b: str) -> float:
+    """Graduated cost between two value-bucket labels.
+
+    Handles the new bucket format (``"b0"``..``"b4"``, ``"n0"``..``"n4"``)
+    as well as the legacy ``"pos"``/``"neg"`` labels.
+
+    Returns 0.0 for identical labels.
+    """
+    if val_a == val_b:
+        return 0.0
+
+    # Legacy format: "pos"/"neg" – fall back to flat sign cost
+    if val_a in ("pos", "neg") or val_b in ("pos", "neg"):
+        return COST_SIGN_MISMATCH
+
+    try:
+        sign_a, bucket_a = val_a[0], int(val_a[1])
+        sign_b, bucket_b = val_b[0], int(val_b[1])
+    except (IndexError, ValueError):
+        return COST_SIGN_MISMATCH  # unrecognised format
+
+    cost = 0.0
+    if sign_a != sign_b:
+        cost += COST_SIGN_MISMATCH
+    cost += abs(bucket_a - bucket_b) * COST_VALUE_STEP
+    return cost
 
 
 #: Default cost function used throughout the pipeline.
@@ -281,12 +323,18 @@ class ProgramTree:
 
 
 def _normalize_value(value: float) -> str:
-    """Encode value as its sign: ``"pos"`` or ``"neg"``.
+    """Encode value as a quantised bucket.
 
-    Only the sign of the value matters for edit-distance comparison.
-    Positive (including zero) maps to ``"pos"``, negative to ``"neg"``.
+    Values are binned into intervals of width :data:`VALUE_BIN_WIDTH` so
+    that magnitude differences contribute to the edit distance.  The sign
+    is encoded as a prefix: ``b`` (positive / zero) or ``n`` (negative).
+
+    Examples:  0.2 → ``"b0"``, 0.9 → ``"b2"``, 1.7 → ``"b4"``,
+    -0.5 → ``"n1"``.
     """
-    return "pos" if value >= 0 else "neg"
+    sign = "b" if value >= 0 else "n"
+    bucket = min(int(abs(value) / VALUE_BIN_WIDTH), VALUE_NUM_BINS - 1)
+    return f"{sign}{bucket}"
 
 
 def _tree_to_nodes_adj(tree: Union[Tree, Token], nodes: list, adj: list, parent_idx: Optional[int] = None) -> int:
@@ -338,17 +386,17 @@ def _tree_to_nodes_adj(tree: Union[Tree, Token], nodes: list, adj: list, parent_
 def _lark_tree_to_program_tree(
     tree: Tree,
     program: str,
-    collapse_sensors: bool = False,
+    collapse_sensors: bool = True,
 ) -> ProgramTree:
     """Convert Lark parse tree to ProgramTree for edit distance.
 
     Args:
         tree: Lark parse tree
         program: Original program string
-        collapse_sensors: If ``True``, each ``sensor`` subtree is collapsed
-            into a single composite node ``"joint.axis:value"``.
-            Default ``False`` keeps the expanded tree, which empirically
-            gives better AUC because UTED has richer structure to align.
+        collapse_sensors: If ``True`` (default), each ``sensor`` subtree is
+            collapsed into a single composite node ``"joint.axis:bucket"``.
+            This produces flat trees where the edit distance is driven by
+            which body parts and movement magnitudes the programs use.
 
     Returns:
         ProgramTree with nodes and adjacency list
@@ -451,16 +499,16 @@ def _build_simplified_tree(
 
 def parse_to_tree(
     program: str,
-    collapse_sensors: bool = False,
+    collapse_sensors: bool = True,
 ) -> ProgramTree:
     """Parse a program string into a tree representation.
 
     Args:
-        program: ExAct program string (e.g., ``"[0,50]lhand.x(0.3)*rhand.y(0.5)"``)
+        program: ExAct program string (e.g., ``"[0,50]lhand.x(0.3)"``).
         collapse_sensors: Collapse each sensor subtree into a single composite
-            node ``"joint.axis:value"`` (default ``False``).  Expanded trees
-            (the default) give better separation because UTED has more
-            structure to align.
+            node ``"joint.axis:bucket"`` (default ``True``).  Collapsed trees
+            give better separation because the edit distance focuses on
+            body-part and movement-magnitude differences.
 
     Returns:
         ProgramTree for edit distance computation
@@ -679,6 +727,9 @@ class ProgramDistanceMatrix:
         # Test programs per activity
         self.test_programs: dict[str, list[ProgramTree]] = {}
         
+        # Optional IDF weights per model program (set via compute_idf_weights)
+        self._idf_weights: dict[str, np.ndarray] | None = None
+        
         # Results
         self.matrix: np.ndarray | None = None
         self.matrix_std: np.ndarray | None = None
@@ -707,6 +758,59 @@ class ProgramDistanceMatrix:
         
         tree = parse_to_tree(program) if isinstance(program, str) else program
         self.test_programs[activity].append(tree)
+
+    def compute_idf_weights(
+        self,
+        raw_programs_by_activity: dict[str, list[str]],
+    ) -> None:
+        """Compute IDF-based weights for model programs.
+
+        Programs whose body-part tokens are *rare* across activities get
+        higher weight so that the mean-sigmoid scorer emphasises
+        activity-distinctive programs over generic ones.
+
+        Call **after** :meth:`set_model_programs` and **before**
+        :meth:`compute_auc_matrix`.
+
+        Args:
+            raw_programs_by_activity: ``{activity: [program_string, …]}``
+                for every activity (the same strings passed to
+                :meth:`set_model_programs`).
+        """
+        import re
+        from collections import Counter
+
+        pat = re.compile(r"([a-z_]+)\.([xyz])\(")
+
+        # Token set per activity
+        act_tokens: dict[str, set[str]] = {}
+        for act in self.activity_names:
+            toks: set[str] = set()
+            for prog in raw_programs_by_activity.get(act, []):
+                for m in pat.finditer(prog):
+                    toks.add(f"{m.group(1)}.{m.group(2)}")
+            act_tokens[act] = toks
+
+        # Document frequency
+        n = len(self.activity_names)
+        df: Counter[str] = Counter()
+        for toks in act_tokens.values():
+            for t in toks:
+                df[t] += 1
+        idf = {t: np.log(n / c) for t, c in df.items()}
+
+        # Per-program weight = Σ idf(token)
+        self._idf_weights = {}
+        for act in self.activity_names:
+            weights = []
+            for prog in raw_programs_by_activity.get(act, []):
+                toks = [
+                    f"{m.group(1)}.{m.group(2)}"
+                    for m in pat.finditer(prog)
+                ]
+                w = sum(idf.get(t, 0.0) for t in toks) if toks else 1.0
+                weights.append(max(w, 0.01))
+            self._idf_weights[act] = np.array(weights)
     
     def compute_matrix(
         self,
@@ -951,7 +1055,10 @@ class ProgramDistanceMatrix:
                     continue
 
                 model_progs = self.model_programs[model_activity]
-                scores = _compute_sigmoid_scores(query_programs, model_progs, method)
+                w = self._idf_weights.get(model_activity) if self._idf_weights else None
+                scores = _compute_sigmoid_scores(
+                    query_programs, model_progs, method, weights=w,
+                )
                 per_program_scores[query_activity][model_activity] = scores
 
         return per_program_scores
@@ -1094,16 +1201,23 @@ def _compute_sigmoid_scores(
     query_programs: list[ProgramTree],
     model_programs: list[ProgramTree],
     method: str,
+    weights: Optional[np.ndarray] = None,
 ) -> list[float]:
     """Compute sigmoid-based similarity scores for each query against a model.
 
     Uses :data:`DEFAULT_DELTA` (unit costs by default; set to
     :func:`weighted_delta` for body-region-aware scoring).
 
+    Raw (un-normalised) weighted distances are transformed by a biased
+    sigmoid ``σ(bias - k·d)``.
+
     Args:
         query_programs: Test programs to score
         model_programs: Model programs (from training)
         method: "mean-sigmoid" or "min-sigmoid"
+        weights: Optional per-model-program weights for the mean-sigmoid
+            method.  When provided the mean is weighted:
+            ``Σ wᵢ · σ(bias - k·dᵢ) / Σ wᵢ``.  Ignored for min-sigmoid.
 
     Returns:
         List of scores, one per query program (higher = more similar to model)
@@ -1112,13 +1226,21 @@ def _compute_sigmoid_scores(
 
     delta = DEFAULT_DELTA
 
+    # Normalise weights once
+    if weights is not None:
+        w = np.asarray(weights, dtype=float)
+        if len(w) != len(model_programs):
+            raise ValueError(
+                "weights must match the number of model programs: "
+                f"got {len(w)} weights for {len(model_programs)} model programs"
+            )
+        w = w / w.sum()
+    else:
+        w = None
+
     scores = []
     for query in query_programs:
         # Compute weighted distances to every model program.
-        # We do NOT normalize by tree size: the raw weighted distances
-        # are transformed by a biased sigmoid σ(bias - k·d) so that:
-        #   d=0 (exact match) → score ≈ 1.0
-        #   d=8+ (different body parts) → score ≈ 0
         dists = np.array([
             uted(
                 query.nodes, query.adj,
@@ -1131,12 +1253,14 @@ def _compute_sigmoid_scores(
         # Biased sigmoid: σ(bias - k·d)
         k = SIGMOID_TEMPERATURE
         b = SIGMOID_BIAS
+        sigs = _sigmoid(b - k * dists)
 
         if method == "mean-sigmoid":
-            # mean over i of sigma(bias - k * edist(model_i, query))
-            score = float(np.mean(_sigmoid(b - k * dists)))
+            if w is not None:
+                score = float(np.dot(w, sigs))
+            else:
+                score = float(np.mean(sigs))
         elif method == "min-sigmoid":
-            # sigma(bias - k * min_i edist(model_i, query))
             score = float(_sigmoid(np.array([b - k * dists.min()]))[0])
         else:
             raise ValueError(f"Unknown method: {method}")

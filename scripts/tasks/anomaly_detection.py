@@ -519,6 +519,7 @@ def run_exec_pipeline(cfg: DictConfig, method: str, output_dir: Path) -> dict:
     dist_matrix  = ProgramDistanceMatrix(activity_names)
     train_counts = {}
     test_counts  = {}
+    idf_raw_programs = {}
 
     for activity in activity_names:
         if use_saved_models:
@@ -550,6 +551,9 @@ def run_exec_pipeline(cfg: DictConfig, method: str, output_dir: Path) -> dict:
             mprg = result.selected_programs
 
         dist_matrix.set_model_programs(activity, mprg)
+        idf_raw_programs[activity] = [
+            (p if isinstance(p, str) else p.get("program", "")) for p in mprg
+        ]
         train_counts[activity] = len(mprg)
 
         test_raw  = test_data["programs_by_activity"].get(activity, [])
@@ -559,6 +563,12 @@ def run_exec_pipeline(cfg: DictConfig, method: str, output_dir: Path) -> dict:
         test_counts[activity] = len(test_prgs)
 
         logger.info(f"  {activity}: {len(mprg)} model  |  {len(test_prgs)} test")
+
+    # ── Compute IDF weights across activities ────────────────────────────────
+    use_idf = bool(cfg.data.get("use_idf_weights", True))
+    if use_idf:
+        dist_matrix.compute_idf_weights(idf_raw_programs)
+        logger.info("IDF weights computed (mean-sigmoid will use weighted scoring)")
 
     logger.info(f"Computing edit distances ({num_workers} worker(s))…")
     raw_distance_matrix = dist_matrix.compute_matrix(verbose=True, num_workers=num_workers)

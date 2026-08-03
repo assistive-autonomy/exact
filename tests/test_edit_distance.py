@@ -16,64 +16,75 @@ class TestWeightedDelta:
 
     def test_identical_composite_zero_cost(self):
         from exact.programs.edit_distance import weighted_delta
-        assert weighted_delta("lhand.x:pos", "lhand.x:pos") == 0.0
+        assert weighted_delta("lhand.x:b0", "lhand.x:b0") == 0.0
 
     def test_same_region_composite(self):
         from exact.programs.edit_distance import weighted_delta, COST_SAME_REGION
-        # lhand <-> lwrist = same region (left_arm), same axis & sign
-        cost = weighted_delta("lhand.x:pos", "lwrist.x:pos")
+        # lhand <-> lwrist = same region (left_arm), same axis & bucket
+        cost = weighted_delta("lhand.x:b0", "lwrist.x:b0")
         assert cost == COST_SAME_REGION  # 0.2
 
     def test_mirror_composite(self):
         from exact.programs.edit_distance import weighted_delta, COST_MIRROR
-        cost = weighted_delta("lhand.x:pos", "rhand.x:pos")
+        cost = weighted_delta("lhand.x:b0", "rhand.x:b0")
         assert cost == COST_MIRROR  # 0.5
 
     def test_adjacent_region_composite(self):
         from exact.programs.edit_distance import weighted_delta, COST_ADJACENT
         # lhand <-> lhip = adjacent (left_arm <-> left_leg)
-        cost = weighted_delta("lhand.x:pos", "lhip.x:pos")
+        cost = weighted_delta("lhand.x:b0", "lhip.x:b0")
         assert cost == COST_ADJACENT  # 1.5
 
     def test_distant_region_composite(self):
         from exact.programs.edit_distance import weighted_delta, COST_DISTANT
-        cost = weighted_delta("lhand.x:pos", "rankle.x:pos")
+        cost = weighted_delta("lhand.x:b0", "rankle.x:b0")
         assert cost == COST_DISTANT  # 4.0
 
     def test_axis_mismatch_adds_cost(self):
         from exact.programs.edit_distance import weighted_delta, COST_AXIS
-        same_axis = weighted_delta("lhand.x:pos", "rhand.x:pos")
-        diff_axis = weighted_delta("lhand.x:pos", "rhand.y:pos")
+        same_axis = weighted_delta("lhand.x:b0", "rhand.x:b0")
+        diff_axis = weighted_delta("lhand.x:b0", "rhand.y:b0")
         assert diff_axis - same_axis == pytest.approx(COST_AXIS)
 
     def test_sign_mismatch_adds_cost(self):
         from exact.programs.edit_distance import weighted_delta, COST_SIGN_MISMATCH
-        same_sign = weighted_delta("lhand.x:pos", "lhand.x:pos")
-        diff_sign = weighted_delta("lhand.x:pos", "lhand.x:neg")
+        # Same bucket index, different sign → sign mismatch cost
+        same_sign = weighted_delta("lhand.x:b0", "lhand.x:b0")
+        diff_sign = weighted_delta("lhand.x:b0", "lhand.x:n0")
         assert diff_sign - same_sign == pytest.approx(COST_SIGN_MISMATCH)  # 0.1
 
+    def test_value_bucket_graduated_cost(self):
+        """Value buckets add graduated cost proportional to bucket distance."""
+        from exact.programs.edit_distance import weighted_delta, COST_VALUE_STEP
+        # Adjacent buckets (1 step)
+        c1 = weighted_delta("lhand.x:b0", "lhand.x:b1")
+        assert c1 == pytest.approx(COST_VALUE_STEP)
+        # 3 steps apart
+        c3 = weighted_delta("lhand.x:b0", "lhand.x:b3")
+        assert c3 == pytest.approx(3 * COST_VALUE_STEP)
+
     def test_partial_credit_hierarchy(self):
-        """distant > missing > adjacent > mirror > same region > wrong sign."""
+        """distant > missing > adjacent > mirror > same region > wrong value."""
         from exact.programs.edit_distance import weighted_delta
 
-        wrong_sign = weighted_delta("lhand.x:pos", "lhand.x:neg")
-        same_region = weighted_delta("lhand.x:pos", "lwrist.x:pos")
-        mirror = weighted_delta("lhand.x:pos", "rhand.x:pos")
-        adjacent = weighted_delta("lhand.x:pos", "lhip.x:pos")
-        missing = weighted_delta("lhand.x:pos", None)
-        distant = weighted_delta("lhand.x:pos", "rankle.x:pos")
+        wrong_value = weighted_delta("lhand.x:b0", "lhand.x:b1")
+        same_region = weighted_delta("lhand.x:b0", "lwrist.x:b0")
+        mirror = weighted_delta("lhand.x:b0", "rhand.x:b0")
+        adjacent = weighted_delta("lhand.x:b0", "lhip.x:b0")
+        missing = weighted_delta("lhand.x:b0", None)
+        distant = weighted_delta("lhand.x:b0", "rankle.x:b0")
 
-        assert wrong_sign < same_region < mirror < adjacent < missing < distant
+        assert wrong_value < same_region < mirror < adjacent < missing < distant
 
     def test_same_sign_no_value_cost(self):
         from exact.programs.edit_distance import weighted_delta
-        # Two positive values (regardless of magnitude) should have zero cost
-        assert weighted_delta("lhand.x:pos", "lhand.x:pos") == 0.0
+        # Same bucket → zero cost
+        assert weighted_delta("lhand.x:b2", "lhand.x:b2") == 0.0
 
     def test_composite_indel_cost(self):
         from exact.programs.edit_distance import weighted_delta, COST_SENSOR_INDEL
-        assert weighted_delta("lhand.x:pos", None) == COST_SENSOR_INDEL  # 2.5
-        assert weighted_delta(None, "rankle.z:neg") == COST_SENSOR_INDEL
+        assert weighted_delta("lhand.x:b2", None) == COST_SENSOR_INDEL  # 2.6
+        assert weighted_delta(None, "rankle.z:n1") == COST_SENSOR_INDEL
 
     def test_motion_indel_cost(self):
         from exact.programs.edit_distance import weighted_delta, COST_MOTION_INDEL
@@ -93,9 +104,11 @@ class TestWeightedDelta:
         """
         from exact.programs.edit_distance import (
             COST_SENSOR_INDEL, COST_DISTANT, COST_AXIS, COST_SIGN_MISMATCH,
+            COST_VALUE_STEP, VALUE_NUM_BINS,
         )
-        max_sub = COST_DISTANT + COST_AXIS + COST_SIGN_MISMATCH
-        assert 2 * COST_SENSOR_INDEL > max_sub  # 5.0 > 4.45
+        max_value_cost = COST_SIGN_MISMATCH + (VALUE_NUM_BINS - 1) * COST_VALUE_STEP
+        max_sub = COST_DISTANT + COST_AXIS + max_value_cost
+        assert 2 * COST_SENSOR_INDEL > max_sub
 
     def test_biased_sigmoid_full_range(self):
         """Biased sigmoid gives full [0, 1] range: d=0 → ≈1, d=large → ≈0."""
@@ -106,10 +119,10 @@ class TestWeightedDelta:
 
         # Perfect match
         score_zero = float(_sigmoid(np.array([SIGMOID_BIAS]))[0])
-        assert score_zero > 0.99
+        assert score_zero > 0.95
 
-        # Very different programs (d=15)
-        score_far = float(_sigmoid(np.array([SIGMOID_BIAS - SIGMOID_TEMPERATURE * 15]))[0])
+        # Very different programs (raw collapsed distance ~8)
+        score_far = float(_sigmoid(np.array([SIGMOID_BIAS - SIGMOID_TEMPERATURE * 8.0]))[0])
         assert score_far < 0.05
 
     def test_structural_substitution_free(self):
@@ -146,14 +159,14 @@ class TestProgramTree:
         assert len(tree.adj) == len(tree.nodes)
     
     def test_collapsed_sensor_label(self):
-        """Collapsed tree should contain composite ``joint.axis:sign`` labels."""
+        """Collapsed tree should contain composite ``joint.axis:bucket`` labels."""
         from exact.programs import parse_to_tree
         
         tree = parse_to_tree("[0,50]lhand.x(0.3)", collapse_sensors=True)
-        # Should have: start, motion, "lhand.x:pos"
+        # Should have: start, motion, "lhand.x:b0"
         composite = [n for n in tree.nodes if "." in str(n)]
         assert len(composite) == 1
-        assert composite[0] == "lhand.x:pos"
+        assert composite[0] == "lhand.x:b0"
     
     def test_multiple_sensors_collapsed(self):
         from exact.programs import parse_to_tree
@@ -193,20 +206,20 @@ class TestProgramTree:
         assert tree1.adj == tree2.adj
     
     def test_value_sign_encoding(self):
-        """Verify values are encoded by sign only."""
+        """Verify values are encoded by magnitude bucket."""
         from exact.programs.edit_distance import _normalize_value
         
-        # All positive values map to the same label
-        assert _normalize_value(0.3) == _normalize_value(0.4)
-        assert _normalize_value(0.3) == _normalize_value(5.0)
-        assert _normalize_value(0.3) == "pos"
+        # Values in the same bin map to the same label
+        assert _normalize_value(0.0) == _normalize_value(0.3)  # both in bin 0
+        assert _normalize_value(0.0) == "b0"
         
-        # Negative values map to a different label
-        assert _normalize_value(-0.3) == "neg"
-        assert _normalize_value(-0.3) == _normalize_value(-1.5)
+        # Values in different bins map to different labels
+        assert _normalize_value(0.3) != _normalize_value(0.5)  # b0 vs b1
+        assert _normalize_value(0.5) != _normalize_value(1.0)  # b1 vs b2
         
-        # Positive != negative
-        assert _normalize_value(0.3) != _normalize_value(-0.3)
+        # Negative values get "n" prefix
+        assert _normalize_value(-0.3) == "n0"
+        assert _normalize_value(-0.3) != _normalize_value(0.3)
 
 
 class TestProgramEditDistance:
@@ -233,15 +246,15 @@ class TestProgramEditDistance:
         assert dist == 0.0
     
     def test_same_sign_values_zero_distance(self):
-        """Programs with same-sign values should have zero distance."""
+        """Programs with same-bucket values should have zero distance."""
         from exact.programs import program_edit_distance
         
         prog1 = "[0,50]lhand.x(0.3)"
-        prog2 = "[0,50]lhand.x(5.0)"  # Different magnitude, same sign
+        prog2 = "[0,50]lhand.x(0.1)"  # Same bucket (both < 0.4)
         
         dist = program_edit_distance(prog1, prog2)
         
-        assert dist == 0.0  # Same sign → match
+        assert dist == 0.0  # Same bucket → match
     
     def test_different_joints_positive_distance(self):
         from exact.programs import program_edit_distance
@@ -414,6 +427,39 @@ class TestProgramDistanceMatrix:
         
         # With this setup, separation should be positive
         assert metrics["separation"] > 0
+
+    def test_idf_weights_match_selected_models(self):
+        from exact.programs import ProgramDistanceMatrix
+
+        matrix_calc = ProgramDistanceMatrix(["A", "B"])
+        matrix_calc.set_model_programs("A", ["[0,50]lhand.x(0.3)"])
+        matrix_calc.set_model_programs("B", ["[0,50]rhand.x(0.3)"])
+        matrix_calc.add_test_program("A", "[0,50]lhand.x(0.3)")
+        matrix_calc.add_test_program("B", "[0,50]rhand.x(0.3)")
+
+        matrix_calc.compute_idf_weights({
+            "A": ["[0,50]lhand.x(0.3)"],
+            "B": ["[0,50]rhand.x(0.3)"],
+        })
+
+        _, _, metrics = matrix_calc.compute_auc_matrix(method="mean-sigmoid", verbose=False)
+
+        assert metrics["mean_auc"] >= 0.0
+
+
+def test_compute_sigmoid_scores_rejects_weight_mismatch():
+    from exact.programs.edit_distance import _compute_sigmoid_scores, parse_to_tree
+
+    query_programs = [parse_to_tree("[0,50]lhand.x(0.3)")]
+    model_programs = [parse_to_tree("[0,50]lhand.x(0.3)")]
+
+    with pytest.raises(ValueError, match="weights must match the number of model programs"):
+        _compute_sigmoid_scores(
+            query_programs,
+            model_programs,
+            method="mean-sigmoid",
+            weights=np.array([1.0, 2.0]),
+        )
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ from .edit_distance import (
     COST_MOTION_INDEL,
     COST_START_INDEL,
     COST_SIGN_MISMATCH,
+    COST_VALUE_STEP,
     COST_AXIS,
     SIGMOID_BIAS,
     SIGMOID_TEMPERATURE,
