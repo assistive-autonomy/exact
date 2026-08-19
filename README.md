@@ -1,13 +1,16 @@
 # Towards Human Motion World Models via Executable Behaviour Representations
 
+[![arXiv](https://img.shields.io/badge/arXiv-2604.18064-b31b1b.svg?logo=arxiv&logoColor=white)](https://arxiv.org/abs/2604.18064)
 ![Python](https://img.shields.io/badge/Python->=3.10-blue?logo=python&logoColor=white)
 ![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04-orange?logo=ubuntu&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 <p align="center">
   <img src="assets/overview.png" alt="Overview of executable behaviour representations: the parser is trained with synthetic data generation, then used in representation building to parse and aggregate ExAct programs from human motion-capture by action label." width="700">
 </p>
 
-Human motion world models should capture motion’s intentionality by being executable: adaptable to different actions and supporting the assessment of motion quality. To achieve this, we introduce a domain-specific language ExAct that represents human motions as underspecified programs that can be compiled to a reward model for zero-shot policy inference. By leveraging the compositional nature of ExAct programs, we combine individual policies into executable behaviour representations. We evaluate the utility of the proposed approach by analysing human motion-capture for the tasks of human action segmentation and human action anomaly detection. Our results suggest that the improvement in data efficiency and a capture of intuitive relationships between human actions compared with task-specific models.
+Human motion world models should capture motion's intentionality by being executable: adaptable to different actions and capable of assessing motion quality. To achieve this, we introduce a domain-specific language ExAct that represents human motions as underspecified programs that can be compiled to a reward model for zero-shot policy inference. By leveraging the compositional nature of ExAct programs, we combine individual policies into executable behaviour representations. We evaluate the utility of the proposed approach by analysing human motion capture for the tasks of human action segmentation and human action anomaly detection. Our results suggest that the improvement in data efficiency and the capture of intuitive relationships between human actions are better than those of task-specific models.
+
 
 ## 1. Setup
 
